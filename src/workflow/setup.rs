@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{MuxMode, WindowConfig};
+use crate::config::{MuxMode, WindowConfig, WindowPlacement};
 use crate::multiplexer::{
     CreateSessionParams, CreateWindowInSessionParams, CreateWindowParams, Multiplexer,
     PaneSetupOptions,
@@ -177,36 +177,40 @@ pub fn setup_environment(
             let panes = window_plans[0].panes.as_deref().unwrap_or(&[]);
             let resolved_panes = resolve_pane_configuration(panes, config, agent);
 
-            let initial_pane_id =
-                if let Some(parent_session) = options.window_session_name.as_deref() {
-                    let parent_session_full_name = parent_session.to_string();
-                    if mux.session_exists(&parent_session_full_name)? {
-                        mux.create_window_in_session(CreateWindowInSessionParams {
-                            session_name: &parent_session_full_name,
-                            name: Some(&mux_target_full_name),
-                            cwd: effective_working_dir,
-                        })
-                        .context("Failed to create window in session")?
-                    } else {
-                        mux.create_session(CreateSessionParams {
-                            prefix: "",
-                            name: &parent_session_full_name,
-                            cwd: effective_working_dir,
-                            initial_window_name: Some(&mux_target_full_name),
-                        })
-                        .context("Failed to create session")?
-                    }
-                } else {
-                    let current_window_id = mux.current_window_id()?;
-                    let insertion_target = after_window.as_deref().or(current_window_id.as_deref());
-                    mux.create_window(CreateWindowParams {
-                        prefix,
-                        name: target_window_name,
+            let initial_pane_id = if let Some(parent_session) =
+                options.window_session_name.as_deref()
+            {
+                let parent_session_full_name = parent_session.to_string();
+                if mux.session_exists(&parent_session_full_name)? {
+                    mux.create_window_in_session(CreateWindowInSessionParams {
+                        session_name: &parent_session_full_name,
+                        name: Some(&mux_target_full_name),
                         cwd: effective_working_dir,
-                        after_window: insertion_target,
                     })
-                    .context("Failed to create window")?
+                    .context("Failed to create window in session")?
+                } else {
+                    mux.create_session(CreateSessionParams {
+                        prefix: "",
+                        name: &parent_session_full_name,
+                        cwd: effective_working_dir,
+                        initial_window_name: Some(&mux_target_full_name),
+                    })
+                    .context("Failed to create session")?
+                }
+            } else {
+                let placement_window_id = match config.window_placement() {
+                    WindowPlacement::AfterCurrent => mux.current_window_id()?,
+                    WindowPlacement::Rightmost => mux.rightmost_window_id()?,
                 };
+                let insertion_target = after_window.as_deref().or(placement_window_id.as_deref());
+                mux.create_window(CreateWindowParams {
+                    prefix,
+                    name: target_window_name,
+                    cwd: effective_working_dir,
+                    after_window: insertion_target,
+                })
+                .context("Failed to create window")?
+            };
             info!(
                 branch = branch_name,
                 handle = handle,
