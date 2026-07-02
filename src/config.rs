@@ -3008,6 +3008,7 @@ mod tests {
         SidebarHeight, SidebarPosition, SidebarWidth, SplitDirection, ToolchainMode,
         is_agent_command, validate_domain, validate_group_add_entry, validate_layouts_config,
     };
+    use crate::test_support;
     use tempfile::TempDir;
 
     fn cfg(edit: impl FnOnce(&mut Config)) -> Config {
@@ -3082,7 +3083,9 @@ mod tests {
 
     fn git_tempdir() -> TempDir {
         let temp = TempDir::new().unwrap();
-        std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        test_support::clear_local_git_env(&mut command);
+        command
             .args(["init"])
             .current_dir(temp.path())
             .output()
@@ -3416,7 +3419,9 @@ agents:
         let result = find_project_config(&src).unwrap();
         assert!(result.is_some());
         let loc = result.unwrap();
-        assert!(loc.config_path.ends_with("backend/.workmux.yaml"));
+        let backend_config = backend.join(".workmux.yaml").canonicalize().unwrap();
+        assert_eq!(loc.config_path, backend_config);
+        assert_eq!(loc.config_dir, backend.canonicalize().unwrap());
         assert_eq!(loc.rel_dir, std::path::PathBuf::from("backend"));
     }
 
@@ -3437,7 +3442,9 @@ agents:
         let result = find_project_config(&backend).unwrap();
         assert!(result.is_some());
         let loc = result.unwrap();
-        assert!(loc.config_path.ends_with("backend/.workmux.yaml"));
+        let backend_config = backend.join(".workmux.yaml").canonicalize().unwrap();
+        assert_eq!(loc.config_path, backend_config);
+        assert_eq!(loc.config_dir, backend.canonicalize().unwrap());
     }
 
     #[test]
