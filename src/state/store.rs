@@ -9,6 +9,7 @@ use tracing::{info, trace, warn};
 
 use super::types::{AgentState, GlobalSettings, PaneKey};
 use crate::config::SandboxRuntime;
+use crate::util::write_atomic;
 
 /// Manages filesystem-based state persistence for workmux agents.
 ///
@@ -648,7 +649,10 @@ mod tests {
         for entry in fs::read_dir(&agents_dir).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().to_string_lossy().to_string();
-            assert!(!name.ends_with(".tmp"), "temp file should be cleaned up");
+            assert!(
+                !name.contains(".tmp"),
+                "temp file should be cleaned up: {name}"
+            );
         }
     }
 

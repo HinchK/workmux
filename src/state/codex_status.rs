@@ -25,6 +25,7 @@ use tracing::warn;
 
 use crate::multiplexer::AgentStatus;
 use crate::state::{PaneKey, StateStore};
+use crate::util::write_atomic;
 
 #[derive(Debug, Deserialize)]
 struct CodexHookProbe {
