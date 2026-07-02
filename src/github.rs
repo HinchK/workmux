@@ -446,6 +446,22 @@ pub fn get_pr_details_in(repo_root: Option<&Path>, pr_number: u32) -> Result<PrD
     Ok(pr_details)
 }
 
+const PR_LIST_FIELDS_WITH_CHECKS: &str =
+    "number,title,state,isDraft,headRefName,url,statusCheckRollup";
+const PR_LIST_FIELDS: &str = "number,title,state,isDraft,headRefName,url";
+
+fn run_pr_list(
+    repo_root: Option<&Path>,
+    args: &[&str],
+    json_fields: &str,
+) -> std::io::Result<std::process::Output> {
+    let mut command = Command::new("gh");
+    if let Some(path) = repo_root {
+        command.current_dir(path);
+    }
+    command.args(args).args(["--json", json_fields]).output()
+}
+
 /// Internal struct for parsing batch PR list results
 #[derive(Debug, Deserialize)]
 struct PrBatchItem {
@@ -463,28 +479,24 @@ struct PrBatchItem {
 
 /// Fetch all PRs for the current repository.
 pub fn list_prs() -> Result<HashMap<String, PrSummary>> {
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "list",
-            "--state",
-            "all",
-            "--json",
-            "number,title,state,isDraft,headRefName,url,statusCheckRollup",
-            "--limit",
-            "200",
-        ])
-        .output();
+    let args = ["pr", "list", "--state", "all", "--limit", "200"];
+    let output = run_pr_list(None, &args, PR_LIST_FIELDS_WITH_CHECKS);
 
     let output = match output {
-        Ok(out) => out,
+        Ok(out) if out.status.success() => out,
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            debug!(stderr = %stderr, "github:pr list batch with checks failed, retrying without checks");
+            match run_pr_list(None, &args, PR_LIST_FIELDS) {
+                Ok(retry) => retry,
+                Err(e) => return Err(e).context("Failed to execute gh command"),
+            }
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             debug!("github:gh CLI not found, skipping PR lookup");
             return Ok(HashMap::new());
         }
-        Err(e) => {
-            return Err(e).context("Failed to execute gh command");
-        }
+        Err(e) => return Err(e).context("Failed to execute gh command"),
     };
 
     if !output.status.success() {
@@ -826,23 +838,19 @@ fn list_prs_for_branches_rest(
     let mut map = HashMap::new();
 
     for branch in branches {
-        let output = match Command::new("gh")
-            .current_dir(repo_root)
-            .args([
-                "pr",
-                "list",
-                "--head",
-                branch,
-                "--state",
-                "all",
-                "--json",
-                "number,title,state,isDraft,headRefName,url,statusCheckRollup",
-                "--limit",
-                "1",
-            ])
-            .output()
-        {
-            Ok(output) => output,
+        let args = [
+            "pr", "list", "--head", branch, "--state", "all", "--limit", "1",
+        ];
+        let output = match run_pr_list(Some(repo_root), &args, PR_LIST_FIELDS_WITH_CHECKS) {
+            Ok(output) if output.status.success() => output,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!(branch = branch, stderr = %stderr, "github:branch pr list with checks failed, retrying without checks");
+                match run_pr_list(Some(repo_root), &args, PR_LIST_FIELDS) {
+                    Ok(output) => output,
+                    Err(_) => continue,
+                }
+            }
             Err(_) => continue,
         };
 
