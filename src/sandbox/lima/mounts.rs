@@ -458,19 +458,24 @@ mod tests {
         .unwrap()
     }
 
+    fn agent_config_host_path(tmp_path: &Path, agent_name: &str) -> PathBuf {
+        tmp_path.join("agent-cfg").join(agent_name)
+    }
+
     #[test]
     fn test_pi_agent_appends_bin_overlay_after_parent() {
         let tmp = tempfile::tempdir().unwrap();
         let mounts = project_mounts_for_test(tmp.path(), "test-vm", "pi");
+        let parent_host_path = agent_config_host_path(tmp.path(), "pi");
 
-        // Find the parent and bin mounts by guest_path suffix.
         let parent_idx = mounts
             .iter()
-            .position(|m| m.guest_path.ends_with(".pi/agent"))
-            .expect("parent .pi/agent mount missing");
+            .position(|m| m.host_path == parent_host_path)
+            .expect("parent pi agent mount missing");
+        let parent_guest_path = mounts[parent_idx].guest_path.clone();
         let bin_idx = mounts
             .iter()
-            .position(|m| m.guest_path.ends_with(".pi/agent/bin"))
+            .position(|m| m.guest_path == parent_guest_path.join("bin"))
             .expect("bin overlay mount missing");
         assert!(
             bin_idx > parent_idx,
@@ -502,14 +507,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mounts = project_mounts_for_test(tmp.path(), "test-vm", "omp");
 
-        assert!(
-            mounts.iter().any(|m| m.guest_path.ends_with(".omp/agent")),
-            "parent .omp/agent mount missing"
-        );
+        let omp_host_path = agent_config_host_path(tmp.path(), "omp");
+        let parent_mount = mounts
+            .iter()
+            .find(|m| m.host_path == omp_host_path)
+            .expect("parent omp agent mount missing");
         assert!(
             !mounts
                 .iter()
-                .any(|m| m.guest_path.ends_with(".omp/agent/bin")),
+                .any(|m| m.guest_path == parent_mount.guest_path.join("bin")),
             "omp agent should not get a bin overlay"
         );
         assert!(
