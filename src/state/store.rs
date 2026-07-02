@@ -9,7 +9,6 @@ use tracing::{info, trace, warn};
 
 use super::types::{AgentState, GlobalSettings, PaneKey};
 use crate::config::SandboxRuntime;
-use crate::util::write_atomic;
 
 /// Manages filesystem-based state persistence for workmux agents.
 ///
