@@ -40,13 +40,8 @@ quick overview.
 ![workmux screenshot](https://raw.githubusercontent.com/raine/workmux/refs/heads/main/meta/screenshot_20260329_165534.webp)
 
 > [!TIP]
-> [consult-llm](https://github.com/raine/consult-llm) pairs naturally with
-> workmux: let your agents consult another AI model to plan architecture,
-> review changes, debate approaches, or get unstuck on tricky bugs without
-> leaving the worktree.
->
-> See [How to orchestrate large coding tasks without context bloat](https://raine.dev/blog/phased-implement-workflow/)
-> for a workflow that combines workmux and consult-llm.
+> I'm building [aven](https://github.com/raine/aven), a local-first task manager
+> for power users and agents who live in the terminal.
 
 ## Why workmux?
 
