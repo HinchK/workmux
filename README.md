@@ -596,6 +596,9 @@ immediately. If the branch doesn't exist, it will be created automatically.
   know or care whether the worktree already exists.
 - `-s, --session`: Create a tmux session instead of a window. See
   [Session mode](#session-mode) for details.
+- `--dry-run`: Print the resolved worktree path, branch, base, multiplexer
+  target, file operations, and post-create hooks without creating or modifying
+  anything.
 - `--config <path>`: Use an alternate config file for this invocation. Still
   merges with global config.
 - `--fork`: Fork the last conversation from the current worktree into the new
@@ -648,6 +651,9 @@ workmux add origin/user-auth-pr
 
 # Remote branches with slashes work too (creates local branch "feature/foo")
 workmux add origin/feature/foo
+
+# Preview the resolved plan without creating anything
+workmux add feature/parallel-task --dry-run
 
 # Create a worktree in the background without switching to it
 workmux add feature/parallel-task --background

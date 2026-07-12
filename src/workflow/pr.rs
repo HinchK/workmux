@@ -111,6 +111,40 @@ pub fn resolve_pr_ref(
     })
 }
 
+pub fn resolve_pr_ref_dry_run(
+    pr_number: u32,
+    custom_branch_name: Option<&str>,
+) -> Result<PrCheckoutResult> {
+    let pr_details = spinner::with_spinner(&format!("Fetching PR #{}", pr_number), || {
+        github::get_pr_details(pr_number)
+    })
+    .with_context(|| format!("Failed to fetch details for PR #{}", pr_number))?;
+    println!("PR #{}: {}", pr_number, pr_details.title);
+    println!("Author: {}", pr_details.author.login);
+    println!("Branch: {}", pr_details.head_ref_name);
+
+    let current_repo_owner =
+        git::get_repo_owner().context("Failed to determine repository owner from origin remote")?;
+    let is_fork = pr_details.is_fork(&current_repo_owner);
+    let fork_owner = &pr_details.head_repository_owner.login;
+    let remote_name = if is_fork {
+        git::resolve_fork_remote_name(fork_owner)?
+    } else {
+        "origin".to_string()
+    };
+    let local_branch = custom_branch_name.map(String::from).unwrap_or_else(|| {
+        if is_fork {
+            fork_local_branch_name(fork_owner, &pr_details.head_ref_name)
+        } else {
+            pr_details.head_ref_name.clone()
+        }
+    });
+    Ok(PrCheckoutResult {
+        local_branch,
+        remote_branch: format!("{}/{}", remote_name, pr_details.head_ref_name),
+    })
+}
+
 /// Result of resolving a fork branch.
 pub struct ForkBranchResult {
     pub remote_ref: String,
@@ -160,6 +194,43 @@ pub fn detect_remote_branch(
     base: Option<&str>,
 ) -> Result<(Option<String>, String)> {
     detect_remote_branch_internal(branch_name, base, &RealRemoteDetectionContext)
+}
+
+pub fn detect_remote_branch_dry_run(
+    branch_name: &str,
+    base: Option<&str>,
+) -> Result<(Option<String>, String)> {
+    if let Some(fork_spec) = git::parse_fork_branch_spec(branch_name) {
+        if base.is_some() {
+            return Err(anyhow!(
+                "Cannot use --base with 'owner:branch' syntax. The branch '{}' from '{}' will be used as the base.",
+                fork_spec.branch,
+                fork_spec.owner
+            ));
+        }
+        let remote = git::resolve_fork_remote_name(&fork_spec.owner)?;
+        return Ok((
+            Some(format!("{}/{}", remote, fork_spec.branch)),
+            fork_local_branch_name(&fork_spec.owner, &fork_spec.branch),
+        ));
+    }
+
+    let remotes = git::list_remotes().context("Failed to list git remotes")?;
+    if remotes
+        .iter()
+        .any(|remote| branch_name.starts_with(&format!("{}/", remote)))
+    {
+        if base.is_some() {
+            return Err(anyhow!(
+                "Cannot use --base with a remote branch reference. The remote branch '{}' will be used as the base.",
+                branch_name
+            ));
+        }
+        let spec = git::parse_remote_branch_spec(branch_name)
+            .context("Invalid remote branch format. Use <remote>/<branch>")?;
+        return Ok((Some(branch_name.to_string()), spec.branch));
+    }
+    Ok((None, branch_name.to_string()))
 }
 
 /// Internal logic using the context trait for testability.

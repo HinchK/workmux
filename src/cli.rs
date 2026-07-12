@@ -320,6 +320,10 @@ enum Commands {
         #[arg(short = 's', long, conflicts_with = "mode")]
         session: bool,
 
+        /// Show what would be created without making persistent changes
+        #[arg(long)]
+        dry_run: bool,
+
         /// Use an alternate config file for this invocation (still merges with global config)
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         config: Option<PathBuf>,
@@ -926,6 +930,7 @@ pub fn run() -> Result<()> {
             wait,
             mode,
             session,
+            dry_run,
             config,
         } => {
             let mode_override = mode
@@ -946,6 +951,7 @@ pub fn run() -> Result<()> {
                 layout,
                 fork,
                 wait,
+                dry_run,
                 mode_override,
                 config.as_deref(),
             )

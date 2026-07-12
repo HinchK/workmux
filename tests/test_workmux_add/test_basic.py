@@ -23,6 +23,49 @@ from ..conftest import (
 from .conftest import add_branch_and_get_worktree
 
 
+class TestDryRun:
+    """Tests for previewing worktree creation."""
+
+    def test_add_dry_run_reports_plan_without_side_effects(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = mux_server
+        branch_name = "feature/dry-run"
+        worktree_path = get_worktree_path(mux_repo_path, branch_name)
+        hook_file = mux_repo_path / "dry-run-hook"
+        source_file = mux_repo_path / ".env"
+        source_file.write_text("SECRET=test\n")
+        shared_file = mux_repo_path / "shared.txt"
+        shared_file.write_text("shared\n")
+        write_workmux_config(
+            mux_repo_path,
+            files={"copy": [".env"], "symlink": ["shared.txt"]},
+            post_create=[f"touch {hook_file}"],
+            base_branch="main",
+        )
+        windows_before = env.list_windows()
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --dry-run",
+        )
+
+        assert f"Worktree: {worktree_path}" in result.stdout
+        assert f"Branch:   {branch_name}" in result.stdout
+        assert "Base:     main" in result.stdout
+        assert "Target:   wm-feature-dry-run (window)" in result.stdout
+        assert ".env -> .env (copy)" in result.stdout
+        assert "shared.txt -> shared.txt (symlink)" in result.stdout
+        assert f"touch {hook_file}" in result.stdout
+        assert not worktree_path.exists()
+        assert not hook_file.exists()
+        assert env.list_windows() == windows_before
+        branches = env.run_command(["git", "branch", "--list", branch_name])
+        assert branches.stdout.strip() == ""
+
+
 class TestWorktreeCreation:
     """Tests for basic worktree creation functionality."""
 
