@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.219 (2026-07-12)
+
+- The bundled workmux skill can guide coding agents to check out GitHub pull requests into new worktrees with `workmux add --pr`.
+
 ## v0.1.218 (2026-07-02)
 
 - Add a sidebar filter for switching between all sessions and the current tmux session, with jump navigation that works across sessions. ([#124](https://github.com/raine/workmux/pull/124))
