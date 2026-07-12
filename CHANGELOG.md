@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.220 (2026-07-12)
+
+- Preview the resolved worktree path, branch, base, multiplexer target, file operations, and post-create hooks with `workmux add --dry-run`, without creating or modifying anything.
+
 ## v0.1.219 (2026-07-12)
 
 - The bundled workmux skill can guide coding agents to check out GitHub pull requests into new worktrees with `workmux add --pr`.
