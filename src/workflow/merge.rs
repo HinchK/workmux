@@ -327,6 +327,7 @@ pub fn merge(
         true,
         false, // keep_branch: always delete when merging
         no_hooks,
+        true, // show_hook_output
     )?;
 
     // Navigate to the target branch window/session and close the source

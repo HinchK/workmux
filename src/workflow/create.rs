@@ -667,6 +667,7 @@ pub fn create_with_changes(
                 true,  // force
                 false, // keep_branch
                 false, // no_hooks: run hooks normally for rollback
+                true,  // show_hook_output
             )
             .context(
                 "Rollback failed: could not clean up the new worktree. Please do so manually.",

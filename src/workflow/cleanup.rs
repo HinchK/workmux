@@ -94,6 +94,7 @@ fn run_pre_remove_hooks(
     handle: &str,
     worktree_path: &Path,
     branch_name: &str,
+    show_hook_output: bool,
 ) -> Result<()> {
     if let Some(pre_remove_hooks) = &context.config.pre_remove {
         info!(
@@ -119,7 +120,7 @@ fn run_pre_remove_hooks(
         for command in pre_remove_hooks {
             // Run the hook with the worktree path as the working directory.
             // This allows for relative paths like `node_modules` in the command.
-            cmd::shell_command_with_env(command, worktree_path, &hook_env)
+            cmd::shell_command_with_env_output(command, worktree_path, &hook_env, show_hook_output)
                 .with_context(|| format!("Failed to run pre-remove command: '{}'", command))?;
         }
     }
@@ -223,6 +224,7 @@ pub fn cleanup(
     force: bool,
     keep_branch: bool,
     no_hooks: bool,
+    show_hook_output: bool,
 ) -> Result<CleanupResult> {
     // Determine if this worktree was created as a session or window
     let mode = get_worktree_mode(handle);
@@ -335,7 +337,13 @@ pub fn cleanup(
         // Skip if the worktree directory doesn't exist (e.g., user manually deleted it).
         // Skip if --no-hooks is set (e.g., RPC-triggered merge).
         if worktree_path.exists() && !no_hooks {
-            run_pre_remove_hooks(context, handle, worktree_path, branch_name)?;
+            run_pre_remove_hooks(
+                context,
+                handle,
+                worktree_path,
+                branch_name,
+                show_hook_output,
+            )?;
         } else {
             debug!(
                 path = %worktree_path.display(),
@@ -500,7 +508,13 @@ pub fn cleanup(
         // Run pre-remove hooks synchronously (they need the worktree intact)
         // Skip if --no-hooks is set (e.g., RPC-triggered merge).
         if worktree_path.exists() && !no_hooks {
-            run_pre_remove_hooks(context, handle, worktree_path, branch_name)?;
+            run_pre_remove_hooks(
+                context,
+                handle,
+                worktree_path,
+                branch_name,
+                show_hook_output,
+            )?;
         }
 
         // Clean up prompt files immediately (harmless, doesn't affect CWD)

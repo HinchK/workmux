@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use tracing::{debug, trace};
 
 /// A builder for executing shell commands with unified error handling
@@ -115,8 +115,22 @@ pub fn shell_command_with_env(
     workdir: &Path,
     env_vars: &[(&str, &str)],
 ) -> Result<()> {
+    shell_command_with_env_output(command, workdir, env_vars, true)
+}
+
+/// Run a shell command with additional environment variables and optional output inheritance.
+pub fn shell_command_with_env_output(
+    command: &str,
+    workdir: &Path,
+    env_vars: &[(&str, &str)],
+    inherit_output: bool,
+) -> Result<()> {
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(command).current_dir(workdir);
+
+    if !inherit_output {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
 
     for (key, value) in env_vars {
         cmd.env(key, value);

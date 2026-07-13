@@ -40,6 +40,26 @@ pub fn remove(
     keep_branch: bool,
     context: &WorkflowContext,
 ) -> Result<RemoveResult> {
+    remove_with_hook_output(handle, force, keep_branch, context, true)
+}
+
+/// Remove a worktree while keeping hook output away from the terminal.
+pub fn remove_quiet(
+    handle: &str,
+    force: bool,
+    keep_branch: bool,
+    context: &WorkflowContext,
+) -> Result<RemoveResult> {
+    remove_with_hook_output(handle, force, keep_branch, context, false)
+}
+
+fn remove_with_hook_output(
+    handle: &str,
+    force: bool,
+    keep_branch: bool,
+    context: &WorkflowContext,
+    show_hook_output: bool,
+) -> Result<RemoveResult> {
     info!(handle = handle, force, keep_branch, "remove:start");
 
     // Get worktree path and branch - this also validates that the worktree exists
@@ -147,6 +167,7 @@ pub fn remove(
         force,
         keep_branch,
         false, // no_hooks: run hooks normally for user-initiated remove
+        show_hook_output,
     )?;
 
     // Navigate to the main branch window/session and close the source

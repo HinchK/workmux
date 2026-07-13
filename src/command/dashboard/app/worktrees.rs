@@ -427,7 +427,7 @@ impl App {
         };
 
         // force=true because user confirmed via modal
-        if workflow::remove(&handle, true, keep_branch, &ctx).is_ok() {
+        if workflow::remove_quiet(&handle, true, keep_branch, &ctx).is_ok() {
             self.worktrees.retain(|w| w.path != *path);
 
             if self.worktrees.is_empty() {
@@ -591,7 +591,7 @@ impl App {
             for (i, (handle, _path)) in paths_to_remove.iter().enumerate() {
                 let _ = tx.send(AppEvent::SweepProgressUpdate(i + 1, total, handle.clone()));
 
-                if workflow::remove(handle, true, false, &ctx).is_err() {
+                if workflow::remove_quiet(handle, true, false, &ctx).is_err() {
                     failures += 1;
                 }
             }
