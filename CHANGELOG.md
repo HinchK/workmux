@@ -22,6 +22,11 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.221 (2026-07-13)
+
+- Ask for confirmation before quitting the sidebar, preventing accidental quit keypresses from closing all sidebar panes.
+- Keep the dashboard display intact when pre-remove hooks print output during worktree removal or bulk sweeps.
+
 ## v0.1.220 (2026-07-12)
 
 - Preview the resolved worktree path, branch, base, multiplexer target, file operations, and post-create hooks with `workmux add --dry-run`, without creating or modifying anything.
