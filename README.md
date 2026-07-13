@@ -1745,14 +1745,14 @@ The sidebar displays:
 - Project and worktree name (e.g. `myproject/fix-bug`)
 - Elapsed time since last status change
 
-| Key     | Action                |
-| ------- | --------------------- |
-| `j`/`k` | Navigate up/down      |
-| `Enter` | Jump to agent         |
-| `g`/`G` | Jump to first/last    |
-| `v`     | Toggle layout mode    |
-| `f`     | Toggle session filter |
-| `q`     | Quit sidebar          |
+| Key     | Action                 |
+| ------- | ---------------------- |
+| `j`/`k` | Navigate up/down       |
+| `Enter` | Jump to agent          |
+| `g`/`G` | Jump to first/last     |
+| `v`     | Toggle layout mode     |
+| `f`     | Toggle session filter  |
+| `q`     | Open quit confirmation |
 
 With tmux mouse mode enabled (`set -g mouse on`), click an agent row or top-bar
 chip to jump to its pane, or scroll to navigate the list.

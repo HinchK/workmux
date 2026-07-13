@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
@@ -452,6 +452,7 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
 
     if app.position == crate::config::SidebarPosition::Top {
         render_horizontal_bar(f, app, area);
+        render_exit_confirmation(f, app);
         return;
     }
 
@@ -501,6 +502,46 @@ pub fn render_sidebar(f: &mut Frame, app: &mut SidebarApp) {
         .alignment(Alignment::Center);
         f.render_widget(line, filter_rect);
     }
+
+    render_exit_confirmation(f, app);
+}
+
+fn render_exit_confirmation(f: &mut Frame, app: &SidebarApp) {
+    if !app.pending_exit {
+        return;
+    }
+
+    let terminal = f.area();
+    let width = 30.min(terminal.width);
+    let height = 3.min(terminal.height);
+    let area = Rect::new(
+        terminal.x + terminal.width.saturating_sub(width) / 2,
+        terminal.y + terminal.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(app.palette.help_border));
+    let text = Line::from(vec![
+        Span::styled(" Quit sidebar? ", Style::default().fg(app.palette.text)),
+        Span::styled(
+            "y",
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("es / ", Style::default().fg(app.palette.dimmed)),
+        Span::styled(
+            "n",
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("o", Style::default().fg(app.palette.dimmed)),
+    ]);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(text).block(block), area);
 }
 
 fn render_template_error(f: &mut Frame, app: &SidebarApp, area: Rect) -> Rect {
@@ -1025,6 +1066,27 @@ mod tests {
     use super::*;
     use crate::agent_display::{sanitize_pane_title, strip_oc_title_prefix};
     use crate::command::sidebar::app::TemplateError;
+
+    #[test]
+    fn render_sidebar_shows_exit_confirmation() {
+        let backend = TestBackend::new(34, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.template_error = None;
+        app.pending_exit = true;
+
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..5)
+            .flat_map(|y| (0..34).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(text.contains("Quit sidebar?"));
+        assert!(text.contains("yes / no"));
+    }
 
     #[test]
     fn render_sidebar_shows_template_error_warning() {

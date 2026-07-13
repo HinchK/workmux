@@ -34,7 +34,7 @@ Each agent row displays:
 | `v`     | Toggle layout mode       |
 | `f`     | Toggle session filter    |
 | `z`     | Toggle sleeping on agent |
-| `q`     | Quit sidebar             |
+| `q`     | Open quit confirmation   |
 
 ## Mouse support
 

@@ -207,6 +207,7 @@ pub struct SidebarApp {
     pub has_loaded_snapshot: bool,
     pub list_state: ListState,
     pub should_quit: bool,
+    pub pending_exit: bool,
     /// When true, quit without triggering global sidebar shutdown (last-pane auto-exit).
     pub quit_silent: bool,
     pub quit_reason: Option<String>,
@@ -289,6 +290,7 @@ impl SidebarApp {
             has_loaded_snapshot: true,
             list_state: ListState::default(),
             should_quit: false,
+            pending_exit: false,
             quit_silent: false,
             quit_reason: None,
             palette: ThemePalette::from_config(
@@ -373,6 +375,7 @@ impl SidebarApp {
             has_loaded_snapshot: false,
             list_state: ListState::default(),
             should_quit: false,
+            pending_exit: false,
             quit_silent: false,
             quit_reason: None,
             palette,

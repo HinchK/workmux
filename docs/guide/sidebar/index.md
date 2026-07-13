@@ -128,7 +128,7 @@ the list. Requires `set -g mouse on` in your `~/.tmux.conf`.
 | `v`     | Toggle layout mode       |
 | `f`     | Toggle session filter    |
 | `z`     | Toggle sleeping on agent |
-| `q`     | Quit sidebar             |
+| `q`     | Open quit confirmation   |
 
 ### Session filter
 

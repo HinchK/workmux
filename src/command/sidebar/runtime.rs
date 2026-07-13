@@ -257,25 +257,10 @@ fn process_event(
             }
         }
         AppEvent::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-            match (key.code, key.modifiers) {
-                (KeyCode::Char('q'), _)
-                | (KeyCode::Esc, _)
-                | (KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL) => {
-                    app.quit_reason = Some("user keypress".to_string());
-                    app.should_quit = true;
-                }
-                (KeyCode::Char('j'), _) | (KeyCode::Down, _) => app.next(),
-                (KeyCode::Char('k'), _) | (KeyCode::Up, _) => app.previous(),
-                (KeyCode::Enter, _) => app.jump_to_selected(),
-                (KeyCode::Char('G'), _) => app.select_last(),
-                (KeyCode::Char('g'), _) => app.select_first(),
-                (KeyCode::Char('v'), _) => app.toggle_layout_mode(),
-                (KeyCode::Char('z'), _) => app.toggle_sleeping(),
-                (KeyCode::Char('f'), _) => app.toggle_filter_mode(),
-                _ => {}
-            }
+            handle_key_press(app, key.code, key.modifiers);
             *needs_render = true;
         }
+        AppEvent::Input(Event::Mouse(_)) if app.pending_exit => {}
         AppEvent::Input(Event::Mouse(mouse)) => {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -299,5 +284,76 @@ fn process_event(
             *needs_render = true;
         }
         AppEvent::Input(_) => {}
+    }
+}
+
+fn handle_key_press(
+    app: &mut SidebarApp,
+    code: KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) {
+    if app.pending_exit {
+        if code == KeyCode::Char('y') {
+            app.quit_reason = Some("confirmed user exit".to_string());
+            app.should_quit = true;
+        } else {
+            app.pending_exit = false;
+        }
+        return;
+    }
+
+    match (code, modifiers) {
+        (KeyCode::Char('q'), _)
+        | (KeyCode::Esc, _)
+        | (KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL) => {
+            app.pending_exit = true;
+        }
+        (KeyCode::Char('j'), _) | (KeyCode::Down, _) => app.next(),
+        (KeyCode::Char('k'), _) | (KeyCode::Up, _) => app.previous(),
+        (KeyCode::Enter, _) => app.jump_to_selected(),
+        (KeyCode::Char('G'), _) => app.select_last(),
+        (KeyCode::Char('g'), _) => app.select_first(),
+        (KeyCode::Char('v'), _) => app.toggle_layout_mode(),
+        (KeyCode::Char('z'), _) => app.toggle_sleeping(),
+        (KeyCode::Char('f'), _) => app.toggle_filter_mode(),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::sidebar::app::TemplateError;
+    use crossterm::event::KeyModifiers;
+
+    fn test_app() -> SidebarApp {
+        SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        })
+    }
+
+    #[test]
+    fn q_q_does_not_quit_sidebar() {
+        let mut app = test_app();
+
+        handle_key_press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.pending_exit);
+        assert!(!app.should_quit);
+
+        handle_key_press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.pending_exit);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn y_confirms_pending_exit() {
+        let mut app = test_app();
+
+        handle_key_press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        handle_key_press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert!(app.should_quit);
+        assert_eq!(app.quit_reason.as_deref(), Some("confirmed user exit"));
     }
 }
