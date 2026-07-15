@@ -391,7 +391,15 @@ impl StateStore {
             let live_pane = live_panes.get(&state.pane_key.pane_id);
 
             let pane_id = &state.pane_key.pane_id;
+            let previous_server =
+                server_lifecycle_changed(state.boot_id.as_deref(), current_boot_id.as_deref());
             match live_pane {
+                None if previous_server => {
+                    trace!(
+                        pane_id,
+                        "reconcile: preserving agent from previous server lifecycle for resurrect"
+                    );
+                }
                 None => {
                     // Pane not in batched result - use backend-specific validation
                     if mux.validate_agent_alive(&state)? {
@@ -400,13 +408,6 @@ impl StateStore {
                             state.window_name.clone().unwrap_or_default(),
                         );
                         valid_agents.push(agent_pane);
-                    } else if state.boot_id.is_some() && state.boot_id != current_boot_id {
-                        // Server restarted since this state was written. Preserve
-                        // the state file for `workmux resurrect` to use.
-                        trace!(
-                            pane_id,
-                            "reconcile: preserving agent from previous server lifecycle for resurrect"
-                        );
                     } else {
                         info!(pane_id, "reconcile: removing agent, pane no longer exists");
                         self.delete_agent(&state.pane_key)?;
@@ -414,7 +415,7 @@ impl StateStore {
                     }
                 }
                 Some(live) if live.pid.is_some_and(|pid| pid != state.pane_pid) => {
-                    if state.boot_id.is_some() && state.boot_id != current_boot_id {
+                    if previous_server {
                         // Pane ID recycled after server restart - preserve for resurrect
                         trace!(
                             pane_id,
@@ -438,7 +439,7 @@ impl StateStore {
                         .as_ref()
                         .is_some_and(|cmd| *cmd != state.command) =>
                 {
-                    if state.boot_id.is_some() && state.boot_id != current_boot_id {
+                    if previous_server {
                         // Command changed after server restart - preserve for resurrect
                         trace!(
                             pane_id,
@@ -490,6 +491,10 @@ impl StateStore {
 
         Ok(valid_agents)
     }
+}
+
+fn server_lifecycle_changed(stored: Option<&str>, current: Option<&str>) -> bool {
+    stored.is_some() && stored != current
 }
 
 fn tmux_auto_renamed_windows(
@@ -573,6 +578,15 @@ mod tests {
             boot_id: None,
             agent_kind: None,
         }
+    }
+
+    #[test]
+    fn test_previous_server_lifecycle_requires_stored_boot_id() {
+        assert!(server_lifecycle_changed(Some("old"), Some("current")));
+        assert!(server_lifecycle_changed(Some("old"), None));
+        assert!(!server_lifecycle_changed(Some("current"), Some("current")));
+        assert!(!server_lifecycle_changed(None, Some("current")));
+        assert!(!server_lifecycle_changed(None, None));
     }
 
     #[test]
