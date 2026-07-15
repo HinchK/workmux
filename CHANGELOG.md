@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.222 (2026-07-15)
+
+- Keep dashboard refreshes responsive after multiplexer restarts while preserving agent state for `workmux resurrect`.
+
 ## v0.1.221 (2026-07-13)
 
 - Ask for confirmation before quitting the sidebar, preventing accidental quit keypresses from closing all sidebar panes.
