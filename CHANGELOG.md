@@ -22,9 +22,11 @@ description: Release notes and version history for workmux
 
 # Changelog
 
-## Unreleased
+## v0.1.223 (2026-07-17)
 
-- Update the sidebar's active agent marker promptly when navigation hotkeys switch tmux windows.
+- Update the sidebar's active agent marker more quickly when navigation hotkeys switch tmux windows.
+- Let the bundled merge and rebase skills safely include or preserve staged, unstaged, and untracked changes.
+- Merge completed agents sooner in coordinated workflows instead of waiting for every agent to finish.
 
 ## v0.1.222 (2026-07-15)
 
