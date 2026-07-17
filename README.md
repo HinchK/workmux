@@ -551,9 +551,10 @@ immediately. If the branch doesn't exist, it will be created automatically.
 - `--base <branch|commit|tag>`: Specify a base branch, commit, or tag to branch
   from when creating a new branch. Overrides `base_branch` config. Defaults to
   `base_branch` from config, then the currently checked out branch.
-- `--pr <number>`: Checkout a GitHub pull request by its number into a new
-  worktree.
+- `--pr <number|url>`: Checkout a GitHub pull request by its number or full URL
+  into a new worktree.
   - Requires the `gh` command-line tool to be installed and authenticated.
+  - URLs use the form `https://github.com/<owner>/<repository>/pull/<number>`.
   - The local branch name defaults to the PR's head branch name, but can be
     overridden (e.g., `workmux add custom-name --pr 123`).
   - If that local branch already exists and has no worktree, it is reused.
@@ -671,8 +672,8 @@ workmux add my-feature -o
 # Checkout PR #123. The local branch will be named after the PR's branch.
 workmux add --pr 123
 
-# Checkout PR #456 with a custom local branch name
-workmux add fix/api-bug --pr 456
+# Checkout a pull request from its full GitHub URL with a custom local branch
+workmux add --pr https://github.com/raine/workmux/pull/456 fix/api-bug
 
 # Checkout a fork branch using GitHub's owner:branch format (copy from GitHub UI)
 # Creates local branch "someuser-feature-branch" tracking the fork

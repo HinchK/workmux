@@ -1,5 +1,6 @@
 use crate::command::args::{MultiArgs, PromptArgs, RescueArgs, SetupFlags};
 use crate::config::{MuxMode, SidebarPosition};
+use crate::workflow::pr::PrReference;
 use crate::{claude, command, config, git, nerdfont};
 use anyhow::{Context, Result};
 use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -263,9 +264,9 @@ enum Commands {
         #[arg(required_unless_present_any = ["pr", "auto_name"], value_parser = GitBranchParser::new())]
         branch_name: Option<String>,
 
-        /// Pull request number to checkout
-        #[arg(long, conflicts_with_all = ["base", "auto_name"])]
-        pr: Option<u32>,
+        /// Pull request number or full GitHub pull request URL to checkout
+        #[arg(long, conflicts_with_all = ["base", "auto_name"], value_name = "NUMBER|URL")]
+        pr: Option<PrReference>,
 
         /// Generate branch name from prompt using LLM
         #[arg(short = 'A', long = "auto-name", conflicts_with = "pr")]
@@ -1222,6 +1223,46 @@ fn print_fish_dynamic_completion() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_pr_parses_number_and_github_url() {
+        for (value, expected_branch) in [
+            ("190", None),
+            ("https://github.com/raine/workmux/pull/190", Some("main")),
+        ] {
+            let mut args = vec!["wm", "add", "--pr", value];
+            if let Some(branch) = expected_branch {
+                args.push(branch);
+            }
+            let cli = Cli::try_parse_from(args).unwrap();
+
+            match cli.command {
+                Commands::Add {
+                    branch_name, pr, ..
+                } => {
+                    assert_eq!(branch_name.as_deref(), expected_branch);
+                    assert_eq!(pr.unwrap().number(), 190);
+                }
+                _ => panic!("expected add command"),
+            }
+        }
+    }
+
+    #[test]
+    fn add_pr_rejects_invalid_url() {
+        let err = match Cli::try_parse_from([
+            "wm",
+            "add",
+            "--pr",
+            "https://github.com/raine/workmux/issues/190",
+        ]) {
+            Ok(_) => panic!("expected invalid PR URL"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(err.to_string().contains("full GitHub pull request URL"));
+    }
 
     #[test]
     fn sidebar_position_flag_parses_supported_values() {

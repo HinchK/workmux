@@ -5,6 +5,52 @@
 
 use crate::{git, github, spinner};
 use anyhow::{Context, Result, anyhow};
+use std::str::FromStr;
+
+const PR_URL_PREFIX: &str = "https://github.com/";
+const PR_REFERENCE_ERROR: &str = "expected a pull request number or a full GitHub pull request URL like https://github.com/owner/repo/pull/123";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrReference {
+    number: u32,
+}
+
+impl PrReference {
+    pub fn number(self) -> u32 {
+        self.number
+    }
+}
+
+impl FromStr for PrReference {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let number = if let Ok(number) = value.parse() {
+            number
+        } else {
+            let path = value
+                .strip_prefix(PR_URL_PREFIX)
+                .ok_or_else(|| PR_REFERENCE_ERROR.to_string())?;
+            let path = path.strip_suffix('/').unwrap_or(path);
+            let mut segments = path.split('/');
+            let (Some(owner), Some(repository), Some("pull"), Some(number), None) = (
+                segments.next(),
+                segments.next(),
+                segments.next(),
+                segments.next(),
+                segments.next(),
+            ) else {
+                return Err(PR_REFERENCE_ERROR.to_string());
+            };
+            if owner.is_empty() || repository.is_empty() {
+                return Err(PR_REFERENCE_ERROR.to_string());
+            }
+            number.parse().map_err(|_| PR_REFERENCE_ERROR.to_string())?
+        };
+
+        Ok(Self { number })
+    }
+}
 
 /// Abstraction for git operations used in remote detection
 trait RemoteDetectionContext {
@@ -320,6 +366,44 @@ fn detect_remote_branch_internal(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn parses_numeric_pr_reference() {
+        assert_eq!(PrReference::from_str("190").unwrap().number(), 190);
+    }
+
+    #[test]
+    fn parses_github_pr_url() {
+        assert_eq!(
+            PrReference::from_str("https://github.com/raine/workmux/pull/190")
+                .unwrap()
+                .number(),
+            190
+        );
+        assert_eq!(
+            PrReference::from_str("https://github.com/raine/workmux/pull/190/")
+                .unwrap()
+                .number(),
+            190
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_pr_references() {
+        for value in [
+            "not-a-pr",
+            "http://github.com/raine/workmux/pull/190",
+            "https://example.com/raine/workmux/pull/190",
+            "https://github.com/raine/workmux/issues/190",
+            "https://github.com/raine/workmux/pull/not-a-number",
+            "https://github.com/raine/workmux/pull/190/files",
+        ] {
+            assert_eq!(
+                PrReference::from_str(value).unwrap_err().to_string(),
+                PR_REFERENCE_ERROR
+            );
+        }
+    }
 
     /// Mock context for testing without actual git operations
     struct MockContext {

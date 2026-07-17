@@ -40,10 +40,11 @@ Creates a git worktree, runs file operations and hooks, creates a tmux
 window with configured pane layout, and switches to it.
 
 Key flags:
-- `--pr <number>`: checkout a GitHub pull request into a new worktree. The local
-  branch defaults to the PR head branch name. Pass `<branch-name>` to override
-  it, for example `workmux add custom-name --pr 123`. Requires authenticated
-  `gh`.
+- `--pr <number|url>`: checkout a GitHub pull request by number or full URL into
+  a new worktree. The local branch defaults to the PR head branch name. Pass
+  `<branch-name>` to override it, for example
+  `workmux add --pr https://github.com/owner/repo/pull/123 custom-name`. Requires
+  authenticated `gh`.
 - `-b, --background`: create without switching to it
 - `-p <text>`: inline prompt for AI agent panes
 - `-P <file>`: prompt from file

@@ -1,5 +1,5 @@
 """
-Tests for PR checkout functionality (workmux add --pr <number>)
+Tests for PR checkout functionality (`workmux add --pr <number-or-url>`).
 """
 
 from .conftest import (
@@ -37,6 +37,45 @@ def test_add_pr_from_same_repo(mux_server, workmux_exe_path, remote_repo_path):
     window_name = get_window_name("feature-branch")
     windows = env.list_windows()
     assert window_name in windows
+
+
+def test_add_pr_from_github_url(mux_server, workmux_exe_path, remote_repo_path):
+    """Test PR checkout from a full GitHub pull request URL."""
+    env = mux_server
+    repo_path = env.tmp_path
+    setup_git_repo(repo_path, env.env)
+
+    setup_pr_remote_and_branch(env, repo_path, remote_repo_path, "feature-branch")
+    install_fake_pr_view(env, number=190)
+
+    result = run_workmux_command(
+        env,
+        workmux_exe_path,
+        repo_path,
+        "add --pr https://github.com/raine/workmux/pull/190 url-review",
+    )
+
+    assert "PR #190" in result.stdout
+    assert get_worktree_path(repo_path, "url-review").exists()
+    assert get_window_name("url-review") in env.list_windows()
+
+
+def test_add_pr_rejects_invalid_github_url(mux_server, workmux_exe_path):
+    """Test that --pr rejects GitHub URLs outside the pull request path."""
+    env = mux_server
+    repo_path = env.tmp_path
+    setup_git_repo(repo_path, env.env)
+
+    result = run_workmux_command(
+        env,
+        workmux_exe_path,
+        repo_path,
+        "add --pr https://github.com/raine/workmux/issues/190",
+        expect_fail=True,
+    )
+
+    assert result.exit_code != 0
+    assert "full GitHub pull request URL" in result.stderr
 
 
 def test_add_pr_with_custom_branch_name(mux_server, workmux_exe_path, remote_repo_path):

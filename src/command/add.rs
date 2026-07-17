@@ -8,7 +8,7 @@ use crate::template::{
     render_prompt_body, validate_template_variables,
 };
 use crate::workflow::SetupOptions;
-use crate::workflow::pr::{detect_remote_branch, detect_remote_branch_dry_run};
+use crate::workflow::pr::{PrReference, detect_remote_branch, detect_remote_branch_dry_run};
 use crate::workflow::prompt_loader::{PromptLoadArgs, load_prompt, parse_prompt_with_frontmatter};
 use crate::{config, git, workflow};
 use anyhow::{Context, Result, anyhow, bail};
@@ -183,7 +183,7 @@ fn resolve_layout(config: &mut config::Config, layout_name: &str) -> Result<()> 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     branch_name: Option<&str>,
-    pr: Option<u32>,
+    pr: Option<PrReference>,
     auto_name: bool,
     base: Option<&str>,
     name: Option<String>,
@@ -366,8 +366,9 @@ pub fn run(
                 let generated = generate_branch_name_with_spinner(Some(&prompt_text), &config)?;
                 (generated, Some(prompt), None, false)
             }
-        } else if let Some(pr_number) = pr {
+        } else if let Some(pr_reference) = pr {
             // Handle PR checkout if --pr flag is provided
+            let pr_number = pr_reference.number();
             let result = if dry_run {
                 workflow::pr::resolve_pr_ref_dry_run(pr_number, branch_name)?
             } else {
@@ -573,7 +574,7 @@ pub fn run(
         specs: &specs,
         resolved_base,
         remote_branch: remote_branch.as_deref(),
-        pr_number: pr,
+        pr_number: pr.map(PrReference::number),
         prompt_doc: prompt_doc.as_ref(),
         options,
         mode_override,
@@ -1077,7 +1078,7 @@ fn run_add_via_rpc(
     rescue: &RescueArgs,
     multi: &MultiArgs,
     base: Option<&str>,
-    pr: Option<u32>,
+    pr: Option<PrReference>,
     name: Option<&str>,
     wait: bool,
     mode_override: Option<MuxMode>,
