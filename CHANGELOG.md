@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## Unreleased
+
+- Update the sidebar's active agent marker promptly when navigation hotkeys switch tmux windows.
+
 ## v0.1.222 (2026-07-15)
 
 - Keep dashboard refreshes responsive after multiplexer restarts while preserving agent state for `workmux resurrect`.

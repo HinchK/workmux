@@ -3,6 +3,7 @@
 use anyhow::Result;
 use ignore::gitignore::Gitignore;
 use notify::{RecursiveMode, Watcher};
+use signal_hook::iterator::{Handle as SignalHandle, Signals};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -1359,6 +1360,29 @@ impl InactivityTracker {
     }
 }
 
+fn spawn_signal_listener(
+    term: Arc<AtomicBool>,
+    dirty_flag: Arc<AtomicBool>,
+    wake_tx: mpsc::SyncSender<()>,
+) -> Result<(SignalHandle, thread::JoinHandle<()>)> {
+    let mut signals = Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGUSR1])?;
+    let handle = signals.handle();
+    let thread = thread::spawn(move || {
+        for signal in signals.forever() {
+            match signal {
+                signal_hook::consts::SIGTERM => term.store(true, Ordering::Relaxed),
+                signal_hook::consts::SIGUSR1 => dirty_flag.store(true, Ordering::Relaxed),
+                _ => continue,
+            }
+            let _ = wake_tx.try_send(());
+            if signal == signal_hook::consts::SIGTERM {
+                break;
+            }
+        }
+    });
+    Ok((handle, thread))
+}
+
 /// Run the sidebar daemon (headless, no TUI).
 pub fn run() -> Result<()> {
     let mux = create_backend(detect_backend());
@@ -1373,18 +1397,17 @@ pub fn run() -> Result<()> {
 
     tracing::info!(instance_id = %instance_id, "sidebar daemon starting");
 
-    // Signal handlers for clean shutdown and dirty notification
+    // Signal state for clean shutdown and dirty notification.
     let term = Arc::new(AtomicBool::new(false));
     let dirty_flag = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, term.clone())?;
-    signal_hook::flag::register(signal_hook::consts::SIGUSR1, dirty_flag.clone())?;
 
-    // Wake channel: replaces the 10ms spin loop. Producers send () to wake the
-    // main loop immediately (SIGUSR1 uses the AtomicBool since signal handlers
-    // can't send on channels; the wake channel handles git worker notifications).
+    // Producers wake the main loop without polling. Signal delivery uses a
+    // dedicated thread because signal handlers cannot send on channels.
     let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    // Keep a sender alive so recv_timeout won't return Disconnected if the
-    // git worker thread panics (which would spin the main loop at 100% CPU).
+    let (signal_handle, signal_thread) =
+        spawn_signal_listener(term.clone(), dirty_flag.clone(), wake_tx.clone())?;
+    // Keep a sender alive so recv_timeout won't return Disconnected if a
+    // worker thread panics.
     let _wake_tx_keepalive = wake_tx.clone();
 
     let sock_path = socket_path(&instance_id);
@@ -1610,15 +1633,11 @@ pub fn run() -> Result<()> {
             last_health_log = Instant::now();
         }
 
-        // Block until woken by a producer or next refresh is due.
-        // SIGUSR1 sets dirty_flag (can't use channels from signal handlers),
-        // so we cap the wait at 100ms to check it, but otherwise block fully.
+        // Block until a producer wakes the loop or the next refresh is due.
         let wait = if dirty_pending {
             debounce_interval.saturating_sub(last_refresh.elapsed())
         } else {
-            refresh_interval
-                .saturating_sub(last_refresh.elapsed())
-                .min(Duration::from_millis(100))
+            refresh_interval.saturating_sub(last_refresh.elapsed())
         };
         let _ = wake_rx.recv_timeout(wait);
     }
@@ -1626,6 +1645,9 @@ pub fn run() -> Result<()> {
     if term.load(Ordering::Relaxed) {
         tracing::info!("sidebar daemon exiting: SIGTERM received");
     }
+
+    signal_handle.close();
+    let _ = signal_thread.join();
 
     // Cleanup
     let _ = std::fs::remove_file(&sock_path);
