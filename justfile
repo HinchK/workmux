@@ -80,6 +80,10 @@ docs-check:
 run *ARGS:
     cargo run -- "$@"
 
+# Build and open the dashboard in a running CuaBot session
+cua-dashboard session:
+    scripts/cua-dashboard '{{session}}'
+
 # Run integration tests in parallel
 itest *ARGS:
     #!/usr/bin/env bash
