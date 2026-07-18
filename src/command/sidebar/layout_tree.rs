@@ -364,6 +364,18 @@ fn scale_height(node: &mut LayoutNode, new_h: u16, new_y: u16) {
     scale_axis(node, Axis::Vertical, new_h, new_y);
 }
 
+fn sidebar_layout_size_for_status(
+    position: SidebarPosition,
+    content_size: u16,
+    pane_border_status: &str,
+) -> u16 {
+    if position == SidebarPosition::Top && pane_border_status == "top" {
+        content_size.saturating_add(1)
+    } else {
+        content_size
+    }
+}
+
 /// Rebalance the window layout after a sidebar pane was added.
 ///
 /// After `split-window -hbf`, the root is an HSplit with 2 children:
@@ -391,16 +403,26 @@ pub(super) fn reflow_after_sidebar_add_to_window_extent(
     window_id: &str,
     sidebar_pane_id: &str,
     position: SidebarPosition,
-    sidebar_size: u16,
+    content_size: u16,
     window_extent: Option<u16>,
 ) {
-    let layout_str = match Cmd::new("tmux")
-        .args(&["display-message", "-t", window_id, "-p", "#{window_layout}"])
+    let output = match Cmd::new("tmux")
+        .args(&[
+            "display-message",
+            "-t",
+            sidebar_pane_id,
+            "-p",
+            "#{pane-border-status}\t#{window_layout}",
+        ])
         .run_and_capture_stdout()
     {
-        Ok(s) => s.trim().to_string(),
+        Ok(s) => s,
         Err(_) => return,
     };
+    let output = output.trim();
+    let (pane_border_status, layout_str) = output.split_once('\t').unwrap_or(("", output));
+    let sidebar_size = sidebar_layout_size_for_status(position, content_size, pane_border_status);
+    let layout_str = layout_str.to_string();
 
     debug!(
         window_id,
@@ -638,6 +660,36 @@ mod tests {
             rect: rect(w, h, x, y),
             children,
         }
+    }
+
+    #[test]
+    fn top_sidebar_reserves_a_row_for_top_pane_status() {
+        assert_eq!(
+            sidebar_layout_size_for_status(SidebarPosition::Top, 3, "top"),
+            4
+        );
+    }
+
+    #[test]
+    fn sidebar_size_ignores_non_reserving_pane_statuses() {
+        for status in ["off", "bottom", "top-floating", "bottom-floating"] {
+            assert_eq!(
+                sidebar_layout_size_for_status(SidebarPosition::Top, 3, status),
+                3
+            );
+        }
+        assert_eq!(
+            sidebar_layout_size_for_status(SidebarPosition::Left, 3, "top"),
+            3
+        );
+    }
+
+    #[test]
+    fn pane_status_compensation_saturates() {
+        assert_eq!(
+            sidebar_layout_size_for_status(SidebarPosition::Top, u16::MAX, "top"),
+            u16::MAX
+        );
     }
 
     #[test]
