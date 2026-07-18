@@ -22,6 +22,11 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.224 (2026-07-18)
+
+- Check out a pull request by passing its full GitHub URL to `workmux add --pr`, in addition to using its number.
+- Keep the configured top sidebar height accurate when tmux pane titles are shown.
+
 ## v0.1.223 (2026-07-17)
 
 - Update the sidebar's active agent marker more quickly when navigation hotkeys switch tmux windows.
