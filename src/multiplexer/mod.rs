@@ -14,7 +14,7 @@ pub mod util;
 pub mod wezterm;
 pub mod zellij;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +27,28 @@ pub use tmux::TmuxBackend;
 pub use types::*;
 
 use crate::config::{Config, PaneConfig, SplitDirection};
+
+pub const STATUS_TARGET_BACKEND_ENV: &str = "WORKMUX_STATUS_BACKEND";
+pub const STATUS_TARGET_INSTANCE_ENV: &str = "WORKMUX_STATUS_INSTANCE";
+pub const STATUS_TARGET_PANE_ENV: &str = "WORKMUX_STATUS_PANE_ID";
+
+fn command_with_status_target(
+    command: &str,
+    backend: &str,
+    instance: &str,
+    pane_id: &str,
+) -> String {
+    format!(
+        "env {}={} {}={} {}={} {}",
+        STATUS_TARGET_BACKEND_ENV,
+        agent::shell_quote(backend),
+        STATUS_TARGET_INSTANCE_ENV,
+        agent::shell_quote(instance),
+        STATUS_TARGET_PANE_ENV,
+        agent::shell_quote(pane_id),
+        command
+    )
+}
 
 /// Main trait for terminal multiplexer backends.
 ///
@@ -321,6 +343,13 @@ pub trait Multiplexer: Send + Sync {
     /// Respawn a pane with optional command. Returns the (possibly new) pane ID.
     fn respawn_pane(&self, pane_id: &str, cwd: &Path, cmd: Option<&str>) -> Result<String>;
 
+    /// Set a user-facing display name for a pane.
+    ///
+    /// Backends that do not support stable pane names can ignore this.
+    fn set_pane_name(&self, _pane_id: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Capture the content of a pane
     fn capture_pane(&self, pane_id: &str, lines: u16) -> Option<String>;
 
@@ -599,6 +628,17 @@ pub trait Multiplexer: Send + Sync {
                     resolved.render_command()
                 };
 
+                let final_command = if is_agent_pane && self.name() == "zellij" {
+                    command_with_status_target(
+                        &final_command,
+                        self.name(),
+                        &self.instance_id(),
+                        &spawned_id,
+                    )
+                } else {
+                    final_command
+                };
+
                 let _ = self.clear_pane(&spawned_id);
                 self.send_keys(&spawned_id, &final_command)?;
 
@@ -641,6 +681,11 @@ pub trait Multiplexer: Send + Sync {
                 pane_ids[0] = pane_id.clone();
             } else {
                 pane_ids.push(pane_id.clone());
+            }
+
+            if let Some(name) = pane_config.name.as_deref() {
+                self.set_pane_name(&pane_id, name)
+                    .with_context(|| format!("Failed to set pane name '{}'", name))?;
             }
 
             if pane_config.zoom || pane_config.focus {
@@ -746,7 +791,7 @@ pub trait Multiplexer: Send + Sync {
 /// 1. `$WORKMUX_BACKEND` set → use that backend
 /// 2. `$TMUX` set → tmux
 /// 3. `$WEZTERM_PANE` set → WezTerm
-/// 4. `$ZELLIJ` set → Zellij
+/// 4. `$ZELLIJ`, `$ZELLIJ_PANE_ID`, or `$ZELLIJ_SESSION_NAME` set → Zellij
 /// 5. `$KITTY_WINDOW_ID` set → Kitty
 /// 6. None → defaults to tmux (for backward compatibility)
 ///
@@ -767,7 +812,9 @@ pub fn detect_backend() -> BackendType {
     resolve_backend(
         std::env::var("TMUX").is_ok(),
         std::env::var("WEZTERM_PANE").is_ok(),
-        std::env::var("ZELLIJ").is_ok(),
+        std::env::var("ZELLIJ").is_ok()
+            || std::env::var("ZELLIJ_PANE_ID").is_ok()
+            || std::env::var("ZELLIJ_SESSION_NAME").is_ok(),
         std::env::var("KITTY_WINDOW_ID").is_ok(),
     )
 }
@@ -803,9 +850,33 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
     }
 }
 
+pub fn create_backend_for_instance(
+    backend_type: BackendType,
+    instance: &str,
+) -> Arc<dyn Multiplexer> {
+    match backend_type {
+        BackendType::Zellij => Arc::new(zellij::ZellijBackend::for_session(instance)),
+        _ => create_backend(backend_type),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_target_command_quotes_identity_values() {
+        assert_eq!(
+            command_with_status_target(
+                "claude --continue",
+                "zellij",
+                "session with spaces",
+                "terminal_7",
+            ),
+            "env WORKMUX_STATUS_BACKEND=zellij WORKMUX_STATUS_INSTANCE='session with spaces' \
+             WORKMUX_STATUS_PANE_ID=terminal_7 claude --continue"
+        );
+    }
 
     #[test]
     fn no_env_defaults_to_tmux() {

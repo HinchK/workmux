@@ -624,9 +624,15 @@ impl<'de> Deserialize<'de> for AgentEntry {
     }
 }
 
-/// Configuration for a single tmux pane
+/// Configuration for a single multiplexer pane
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct PaneConfig {
+    /// Optional display name for the pane.
+    ///
+    /// Supported by the Zellij backend. Other backends may ignore this value.
+    #[serde(default)]
+    pub name: Option<String>,
+
     /// A command to run when the pane is created. The pane will remain open
     /// with an interactive shell after the command completes. If not provided,
     /// the pane will start with the default shell.
@@ -637,7 +643,7 @@ pub struct PaneConfig {
     #[serde(default)]
     pub focus: bool,
 
-    /// Split direction from the previous pane (horizontal or vertical)
+    /// Split direction from the previous pane (horizontal, vertical, or zellij-only stacked)
     #[serde(default)]
     pub split: Option<SplitDirection>,
 
@@ -675,6 +681,7 @@ pub struct LayoutConfig {
 pub enum SplitDirection {
     Horizontal,
     Vertical,
+    Stacked,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Default)]
@@ -1951,6 +1958,12 @@ pub fn validate_windows_config(windows: &[WindowConfig]) -> anyhow::Result<()> {
 /// Validate pane configuration
 pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
     for (i, pane) in panes.iter().enumerate() {
+        if let Some(name) = pane.name.as_deref()
+            && name.trim().is_empty()
+        {
+            anyhow::bail!("Pane {} has an empty 'name'.", i);
+        }
+
         if i == 0 {
             // First pane cannot have a split or size
             if pane.split.is_some() {
@@ -1982,6 +1995,15 @@ pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
                 "Pane {} has invalid percentage {}. Must be between 1 and 100.",
                 i,
                 p
+            );
+        }
+
+        if matches!(pane.split, Some(SplitDirection::Stacked))
+            && (pane.size.is_some() || pane.percentage.is_some())
+        {
+            anyhow::bail!(
+                "Pane {} with 'split: stacked' cannot have 'size' or 'percentage' specified.",
+                i
             );
         }
 
@@ -2763,11 +2785,14 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Default: Two-pane layout with shell and clear command.
 # panes:
 #   - command: pnpm install
+#     name: deps
 #     focus: true
 #   - split: horizontal
 #   - command: clear
 #     split: vertical
 #     size: 5
+#   - command: just test --watch
+#     split: stacked  # Zellij only
 
 # Multiple windows per session (session mode only, mutually exclusive with 'panes').
 # Each window can have its own pane layout. Unnamed windows get tmux's
@@ -5127,6 +5152,74 @@ layouts:
             split_pane("echo hi"),
         ];
         assert!(super::validate_panes_config(&panes).is_ok());
+    }
+
+    #[test]
+    fn validate_panes_stacked_split_ok() {
+        let panes = vec![
+            pane("vim"),
+            PaneConfig {
+                command: Some("tail -f app.log".into()),
+                split: Some(SplitDirection::Stacked),
+                ..Default::default()
+            },
+        ];
+        assert!(super::validate_panes_config(&panes).is_ok());
+    }
+
+    #[test]
+    fn validate_panes_stacked_split_rejects_size() {
+        let panes = vec![
+            pane("vim"),
+            PaneConfig {
+                command: Some("tail -f app.log".into()),
+                split: Some(SplitDirection::Stacked),
+                size: Some(10),
+                ..Default::default()
+            },
+        ];
+        let err = super::validate_panes_config(&panes).unwrap_err();
+        assert!(err.to_string().contains("split: stacked"));
+    }
+
+    #[test]
+    fn validate_panes_empty_name_fails() {
+        let panes = vec![PaneConfig {
+            name: Some("  ".into()),
+            ..pane("vim")
+        }];
+
+        let err = super::validate_panes_config(&panes).unwrap_err();
+        assert!(err.to_string().contains("empty 'name'"));
+    }
+
+    #[test]
+    fn stacked_split_deserializes_from_yaml() {
+        let yaml = r#"
+panes:
+  - command: vim
+  - command: tail -f app.log
+    split: stacked
+"#;
+        let config: super::Config = serde_yaml::from_str(yaml).unwrap();
+        let panes = config.panes.unwrap();
+        assert_eq!(panes[1].split, Some(SplitDirection::Stacked));
+    }
+
+    #[test]
+    fn pane_name_deserializes_from_yaml() {
+        let yaml = r#"
+panes:
+  - command: vim
+    name: editor
+  - command: tail -f app.log
+    name: logs
+    split: horizontal
+"#;
+        let config: super::Config = serde_yaml::from_str(yaml).unwrap();
+        let panes = config.panes.unwrap();
+        assert_eq!(panes[0].name.as_deref(), Some("editor"));
+        assert_eq!(panes[1].name.as_deref(), Some("logs"));
     }
 
     #[test]
