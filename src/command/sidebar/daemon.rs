@@ -592,6 +592,16 @@ struct PrWorkerPath {
 type PrPathCache = Arc<Mutex<HashMap<PathBuf, PrPathEntry>>>;
 type PrRepoCache = Arc<Mutex<HashMap<PathBuf, HashMap<String, PrSummary>>>>;
 
+fn clear_pr_path_cache(path_cache: &PrPathCache) -> bool {
+    if let Ok(mut cache) = path_cache.lock() {
+        let changed = !cache.is_empty();
+        cache.clear();
+        changed
+    } else {
+        false
+    }
+}
+
 fn publish_pr_path_cache(
     entries: &[PrWorkerPath],
     repo_roots: &HashMap<PathBuf, PathBuf>,
@@ -663,10 +673,7 @@ fn spawn_pr_worker(
             }
 
             if active_entries.is_empty() {
-                if paths_changed {
-                    if let Ok(mut cache) = path_cache_clone.lock() {
-                        cache.clear();
-                    }
+                if paths_changed && clear_pr_path_cache(&path_cache_clone) {
                     dirty_flag.store(true, Ordering::Relaxed);
                     let _ = wake_tx.try_send(());
                 }
@@ -1859,6 +1866,33 @@ mod tests {
             status: Some(AgentStatus::Done),
             ..working_agent(pane_id, 1)
         }
+    }
+
+    #[test]
+    fn clear_pr_path_cache_only_reports_content_changes() {
+        let cache: PrPathCache = Arc::new(Mutex::new(HashMap::new()));
+
+        assert!(!clear_pr_path_cache(&cache));
+
+        cache.lock().unwrap().insert(
+            PathBuf::from("/repo"),
+            PrPathEntry {
+                branch: "feature".to_string(),
+                summary: PrSummary {
+                    number: 123,
+                    title: "test".to_string(),
+                    state: "OPEN".to_string(),
+                    is_draft: false,
+                    checks: None,
+                    check_meta: None,
+                    url: None,
+                },
+            },
+        );
+
+        assert!(clear_pr_path_cache(&cache));
+        assert!(cache.lock().unwrap().is_empty());
+        assert!(!clear_pr_path_cache(&cache));
     }
 
     #[test]
