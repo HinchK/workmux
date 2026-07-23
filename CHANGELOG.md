@@ -22,6 +22,11 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.225 (2026-07-23)
+
+- Configure Zellij worktrees with stacked panes and custom pane names. ([#190](https://github.com/raine/workmux/pull/190))
+- Keep sidebar idle CPU usage low when no pull request data is available.
+
 ## v0.1.224 (2026-07-18)
 
 - Check out a pull request by passing its full GitHub URL to `workmux add --pr`, in addition to using its number.
