@@ -216,11 +216,7 @@ pub fn list_in(
                 .as_ref()
                 .is_some_and(|main_path| *main_path == path);
 
-            let created_at = std::fs::metadata(&path)
-                .ok()
-                .and_then(|m| m.created().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
+            let created_at = crate::creation_time::filesystem_birth_time(&path);
 
             let base_branch = git::get_branch_base_in(&branch, repo).ok();
 

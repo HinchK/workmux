@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -166,7 +167,7 @@ def test_list_output_format(
     # Verify feature branch entry - shows as relative path
     feature_entry = next((r for r in parsed_output if r["BRANCH"] == branch_name), None)
     assert feature_entry is not None
-    assert feature_entry["AGE"] != ""  # age is populated (value depends on timing)
+    assert feature_entry["AGE"] != "-"
     assert feature_entry["AGENT"] == "-"
     assert feature_entry["MUX"] == "✓"
     assert feature_entry["UNMERGED"] == "-"
@@ -426,9 +427,11 @@ def test_list_json_output(
     env = mux_server
     branch_name = "feature-json"
     write_workmux_config(mux_repo_path)
+    creation_started_at = int(time.time())
     run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
 
     output = run_workmux_list(env, workmux_exe_path, mux_repo_path, "--json")
+    listed_at = int(time.time())
     data = json.loads(output)
 
     assert isinstance(data, list)
@@ -463,6 +466,9 @@ def test_list_json_output(
     assert feature_entry["has_uncommitted_changes"] is False
     assert feature_entry["is_open"] is True
     assert feature_entry["path"] == str(get_worktree_path(mux_repo_path, branch_name))
+    assert isinstance(feature_entry["created_at"], int)
+    assert feature_entry["created_at"] > 0
+    assert creation_started_at - 1 <= feature_entry["created_at"] <= listed_at + 1
 
 
 def test_list_json_empty(
