@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.226 (2026-07-25)
+
+- Show linked worktree ages in `workmux list` when using Linux musl builds.
+
 ## v0.1.225 (2026-07-23)
 
 - Configure Zellij worktrees with stacked panes and custom pane names. ([#190](https://github.com/raine/workmux/pull/190))
