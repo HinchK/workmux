@@ -226,7 +226,7 @@ fn schedule_current_pane_kill() {
     }
 
     let cmd = format!(
-        "sleep 0.05; tmux kill-pane -t {} 2>/dev/null",
+        "sleep 0.05; tmux kill-pane -t {} 2>/dev/null || true",
         shell_quote(&pane)
     );
     let _ = Cmd::new("tmux").args(&["run-shell", "-b", &cmd]).run();
