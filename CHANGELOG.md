@@ -22,9 +22,11 @@ description: Release notes and version history for workmux
 
 # Changelog
 
-## Unreleased
+## v0.1.228 (2026-07-26)
 
-- Let `base_branch: auto` create new worktrees from each repository's effective main branch.
+- Use Antigravity CLI (`agy`) with automatic detection, prompt injection, branch name generation, and status tracking setup. ([#168](https://github.com/raine/workmux/issues/168)) ([#183](https://github.com/raine/workmux/pull/183))
+- See Codex permission prompts as waiting in the sidebar and dashboard. ([#197](https://github.com/raine/workmux/issues/197))
+- Set `base_branch: auto` to create new worktrees from each repository's effective main branch. ([#199](https://github.com/raine/workmux/issues/199))
 
 ## v0.1.227 (2026-07-26)
 
