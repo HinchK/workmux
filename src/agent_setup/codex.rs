@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::StatusCheck;
 use crate::agent_setup::json_config::{
@@ -41,17 +41,53 @@ pub fn detect() -> Option<&'static str> {
     None
 }
 
-/// Check if workmux hooks are installed in Codex hooks.json.
+/// Check if all workmux hooks are installed in Codex hooks.json.
 pub fn check() -> Result<StatusCheck> {
     let Some(path) = hooks_path() else {
         return Ok(StatusCheck::NotInstalled);
     };
 
-    json_config::check_hook_file(
-        &path,
-        "Failed to read ~/.codex/hooks.json",
-        "~/.codex/hooks.json is not valid JSON",
-    )
+    check_at(&path)
+}
+
+fn check_at(path: &Path) -> Result<StatusCheck> {
+    if !path.exists() {
+        return Ok(StatusCheck::NotInstalled);
+    }
+
+    let content = fs::read_to_string(path).context("Failed to read ~/.codex/hooks.json")?;
+    let config: Value =
+        serde_json::from_str(&content).context("~/.codex/hooks.json is not valid JSON")?;
+
+    let required = [
+        ("UserPromptSubmit", "working"),
+        ("PermissionRequest", "waiting"),
+        ("PostToolUse", "working"),
+        ("SubagentStart", "working"),
+        ("SubagentStop", "done"),
+        ("Stop", "done"),
+    ];
+
+    if required
+        .iter()
+        .all(|(event, status)| has_status_hook(&config, event, status))
+    {
+        Ok(StatusCheck::Installed)
+    } else {
+        Ok(StatusCheck::NotInstalled)
+    }
+}
+
+fn has_status_hook(config: &Value, event: &str, status: &str) -> bool {
+    let expected = format!("workmux set-window-status {status}");
+    config["hooks"][event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .any(|command| command.contains(&expected))
 }
 
 /// Remove workmux hooks from Codex hooks.json.
@@ -164,15 +200,9 @@ fn has_hooks_feature_key(content: &str) -> bool {
     })
 }
 
-/// Install workmux hooks into `~/.codex/hooks.json`.
-///
-/// Merges hook groups into existing hooks without clobbering or creating
-/// duplicates. Returns a description of what was done.
-pub fn install() -> Result<String> {
-    let path = hooks_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
+fn install_hooks_at(path: &Path) -> Result<()> {
     json_config::json_hook_install(
-        &path,
+        path,
         &load_hooks()?,
         &JsonHookInstallSpec {
             read_context: "Failed to read ~/.codex/hooks.json",
@@ -181,7 +211,17 @@ pub fn install() -> Result<String> {
             mkdir_context: "Failed to create ~/.codex/ directory",
             empty_root: EmptyJsonRoot::HooksObject,
         },
-    )?;
+    )
+}
+
+/// Install workmux hooks into `~/.codex/hooks.json`.
+///
+/// Merges hook groups into existing hooks without clobbering or creating
+/// duplicates. Returns a description of what was done.
+pub fn install() -> Result<String> {
+    let path = hooks_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+
+    install_hooks_at(&path)?;
 
     // Ensure hooks feature flag is enabled in config.toml
     let feature_msg = match ensure_hooks_feature_flag() {
@@ -204,6 +244,7 @@ mod tests {
             serde_json::from_str(HOOKS_JSON).expect("embedded hooks config is valid JSON");
         let hooks = parsed.get("hooks").unwrap().as_object().unwrap();
         assert!(hooks.contains_key("UserPromptSubmit"));
+        assert!(hooks.contains_key("PermissionRequest"));
         assert!(hooks.contains_key("PostToolUse"));
         assert!(hooks.contains_key("SubagentStart"));
         assert!(hooks.contains_key("SubagentStop"));
@@ -211,8 +252,10 @@ mod tests {
     }
 
     #[test]
-    fn test_hooks_json_contains_workmux_command() {
-        assert!(HOOKS_JSON.contains("workmux set-window-status"));
+    fn test_hooks_json_contains_workmux_commands() {
+        assert!(HOOKS_JSON.contains("workmux set-window-status working"));
+        assert!(HOOKS_JSON.contains("workmux set-window-status waiting"));
+        assert!(HOOKS_JSON.contains("workmux set-window-status done"));
     }
 
     #[test]
@@ -220,10 +263,69 @@ mod tests {
         let hooks = load_hooks().unwrap();
         let obj = hooks.as_object().unwrap();
         assert!(obj.contains_key("UserPromptSubmit"));
+        assert!(obj.contains_key("PermissionRequest"));
         assert!(obj.contains_key("PostToolUse"));
         assert!(obj.contains_key("SubagentStart"));
         assert!(obj.contains_key("SubagentStop"));
         assert!(obj.contains_key("Stop"));
+    }
+
+    #[test]
+    fn test_check_requires_complete_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        config["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("PermissionRequest");
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        assert!(matches!(
+            check_at(&path).unwrap(),
+            StatusCheck::NotInstalled
+        ));
+
+        install_hooks_at(&path).unwrap();
+
+        assert!(matches!(check_at(&path).unwrap(), StatusCheck::Installed));
+    }
+
+    #[test]
+    fn test_install_upgrades_legacy_hooks_idempotently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        config["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("PermissionRequest");
+        config["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 my-hook.py"
+                }]
+            }));
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        install_hooks_at(&path).unwrap();
+        install_hooks_at(&path).unwrap();
+
+        let installed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(has_status_hook(&installed, "PermissionRequest", "waiting"));
+        let permission_groups = installed["hooks"]["PermissionRequest"].as_array().unwrap();
+        assert_eq!(permission_groups.len(), 1);
+        assert!(
+            installed["hooks"]["Stop"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().unwrap())
+                .any(|hook| hook["command"] == "python3 my-hook.py")
+        );
     }
 
     #[test]

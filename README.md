@@ -1948,7 +1948,7 @@ at-a-glance visibility into what the agent in each window doing.
 | ------------ | --------------------------------------------------------------------------- |
 | Claude Code  | ✅ Supported                                                                |
 | OpenCode     | ✅ Supported                                                                |
-| Codex        | ✅ Supported\*                                                              |
+| Codex        | ✅ Supported                                                                |
 | Copilot CLI  | ✅ Supported\*                                                              |
 | Pi           | ✅ Supported\*                                                              |
 | Oh My Pi    | ✅ Supported                                                                |
@@ -1959,7 +1959,6 @@ at-a-glance visibility into what the agent in each window doing.
 
 **Notes:**
 
-- **Codex**: No 💬 waiting state
 - **Copilot CLI**: No 💬 waiting state
 - **Pi**: No 💬 waiting state
 - **Antigravity CLI (`agy`)**: No 💬 waiting state

@@ -8,8 +8,8 @@
 //! Current Codex hook payloads expose `agent_id` / `agent_type` for thread-spawned
 //! subagent turns, but not parent/child relationships between simultaneously
 //! active turns in the same tmux pane. Workmux tracks active Codex turns by
-//! `session_id` + `turn_id` and renders the pane as working while any tracked
-//! Codex turn is active.
+//! `session_id` + `turn_id`, preserves waiting status while any tracked turn
+//! needs input, and renders the pane as working when no tracked turn is waiting.
 //!
 //! Keep this module isolated so it can be removed or replaced if Codex adds
 //! official hook metadata for subagent/root detection.
@@ -48,6 +48,8 @@ pub struct CodexHookContext {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CodexPaneStatus {
     active: BTreeSet<String>,
+    #[serde(default)]
+    waiting: BTreeSet<String>,
 }
 
 struct CodexStatusLock {
@@ -179,26 +181,36 @@ impl CodexPaneStatus {
     fn apply(&mut self, context: &CodexHookContext, requested: AgentStatus) -> AgentStatus {
         if context.is_root_user_prompt() && matches!(requested, AgentStatus::Working) {
             self.active.clear();
+            self.waiting.clear();
         }
 
         match requested {
-            AgentStatus::Working | AgentStatus::Waiting => {
+            AgentStatus::Working => {
                 self.active.insert(context.run_id.clone());
-                AgentStatus::Working
+                self.waiting.remove(&context.run_id);
+            }
+            AgentStatus::Waiting => {
+                self.active.insert(context.run_id.clone());
+                self.waiting.insert(context.run_id.clone());
             }
             AgentStatus::Done => {
                 if context.is_root_stop() {
                     self.active.clear();
+                    self.waiting.clear();
                     return AgentStatus::Done;
                 }
 
                 self.active.remove(&context.run_id);
-                if self.active.is_empty() {
-                    AgentStatus::Done
-                } else {
-                    AgentStatus::Working
-                }
+                self.waiting.remove(&context.run_id);
             }
+        }
+
+        if !self.waiting.is_empty() {
+            AgentStatus::Waiting
+        } else if self.active.is_empty() {
+            AgentStatus::Done
+        } else {
+            AgentStatus::Working
         }
     }
 
@@ -344,6 +356,22 @@ mod tests {
             detect_run_id(input).as_deref(),
             Some("019de386-65c3-79c2-babc-5fc0a2b85dfd:019de386-65c9-7fa2-a25f-1fadd880f63d")
         );
+    }
+
+    #[test]
+    fn detects_codex_permission_request_payload() {
+        let input = r#"{
+            "hook_event_name":"PermissionRequest",
+            "session_id":"session",
+            "turn_id":"turn",
+            "model":"gpt-5.5",
+            "tool_name":"Bash"
+        }"#;
+
+        let context = detect_context(input).unwrap();
+        assert_eq!(context.run_id, "session:turn");
+        assert_eq!(context.event, "PermissionRequest");
+        assert!(!context.is_subagent);
     }
 
     #[test]
@@ -552,16 +580,75 @@ mod tests {
     }
 
     #[test]
-    fn scoped_waiting_renders_working() {
+    fn waiting_renders_waiting_until_same_run_resumes() {
         let mut pane = CodexPaneStatus::default();
         assert_eq!(
             pane.apply(
-                &CodexHookContext::new("run", "PostToolUse", false),
+                &CodexHookContext::new("run", "PermissionRequest", false),
                 AgentStatus::Waiting
+            ),
+            AgentStatus::Waiting
+        );
+        assert!(pane.active.contains("run"));
+        assert!(pane.waiting.contains("run"));
+
+        assert_eq!(
+            pane.apply(
+                &CodexHookContext::new("run", "PostToolUse", false),
+                AgentStatus::Working
             ),
             AgentStatus::Working
         );
-        assert!(!pane.is_empty());
+        assert!(!pane.waiting.contains("run"));
+    }
+
+    #[test]
+    fn waiting_survives_another_run_stopping() {
+        let mut pane = CodexPaneStatus::default();
+        start_parent_and_child(&mut pane);
+        assert_eq!(
+            pane.apply(
+                &CodexHookContext::new("parent", "PermissionRequest", false),
+                AgentStatus::Waiting
+            ),
+            AgentStatus::Waiting
+        );
+        assert_apply_subagent(
+            &mut pane,
+            "child",
+            "SubagentStop",
+            AgentStatus::Done,
+            AgentStatus::Waiting,
+        );
+        assert!(pane.waiting.contains("parent"));
+    }
+
+    #[test]
+    fn waiting_takes_precedence_over_another_working_run() {
+        let mut pane = CodexPaneStatus::default();
+        start_parent_and_child(&mut pane);
+        assert_eq!(
+            pane.apply(
+                &CodexHookContext::new("parent", "PermissionRequest", false),
+                AgentStatus::Waiting
+            ),
+            AgentStatus::Waiting
+        );
+        assert_apply_subagent(
+            &mut pane,
+            "child",
+            "PostToolUse",
+            AgentStatus::Working,
+            AgentStatus::Waiting,
+        );
+    }
+
+    #[test]
+    fn deserializes_runtime_state_without_waiting_set() {
+        let pane: CodexPaneStatus = serde_json::from_str(r#"{"active":["parent"]}"#).unwrap();
+
+        assert!(pane.active.contains("parent"));
+        assert!(pane.waiting.is_empty());
     }
 
     #[test]
@@ -594,12 +681,12 @@ mod tests {
     #[test]
     fn root_user_prompt_resets_stale_active_runs() {
         let mut pane = CodexPaneStatus::default();
-        assert_apply(
-            &mut pane,
-            "stale",
-            "PostToolUse",
-            AgentStatus::Working,
-            AgentStatus::Working,
+        assert_eq!(
+            pane.apply(
+                &CodexHookContext::new("stale", "PermissionRequest", false),
+                AgentStatus::Waiting
+            ),
+            AgentStatus::Waiting
         );
         assert_apply(
             &mut pane,
@@ -611,6 +698,7 @@ mod tests {
 
         assert_eq!(pane.active.len(), 1);
         assert!(pane.active.contains("current"));
+        assert!(pane.waiting.is_empty());
     }
 
     #[test]
@@ -642,6 +730,19 @@ mod tests {
         .unwrap();
         assert_eq!(rendered, AgentStatus::Working);
         assert!(path.exists());
+
+        let rendered = apply_status_with_store(
+            &store,
+            &key,
+            &CodexHookContext::new("parent", "PermissionRequest", false),
+            AgentStatus::Waiting,
+        )
+        .unwrap();
+        assert_eq!(rendered, AgentStatus::Waiting);
+        let persisted = read_status(&store.codex_status_runtime_dir(), &key)
+            .unwrap()
+            .unwrap();
+        assert!(persisted.waiting.contains("parent"));
 
         let rendered = apply_status_with_store(
             &store,

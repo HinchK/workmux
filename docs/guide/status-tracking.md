@@ -16,7 +16,7 @@ Workmux can display the status of the agent in your tmux window list, giving you
 | ----------------------- | --------------------------------------------------------------------------- |
 | Claude Code             | ✅ Supported                                                                |
 | OpenCode                | ✅ Supported                                                                |
-| Codex                   | ✅ Supported\*                                                              |
+| Codex                   | ✅ Supported                                                                |
 | Copilot CLI             | ✅ Supported\*                                                              |
 | Pi                      | ✅ Supported\*                                                              |
 | Oh My Pi                | ✅ Supported                                                                |
@@ -27,7 +27,6 @@ Workmux can display the status of the agent in your tmux window list, giving you
 
 **Notes:**
 
-- **Codex**: No 💬 waiting state. Requires `hooks = true` in `~/.codex/config.toml` (see [Codex setup](#codex-setup))
 - **Copilot CLI**: No 💬 waiting state
 - **Pi**: No 💬 waiting state
 - **Antigravity CLI (`agy`)**: No 💬 waiting state
@@ -119,7 +118,7 @@ curl -o ~/.codex/hooks.json \
 
 If you already have a `~/.codex/hooks.json`, merge the hook entries from the downloaded file into your existing configuration.
 
-Note: Codex hooks do not support detecting permission prompts, so only working/done states are tracked (no waiting state).
+Codex permission prompts use the 💬 waiting state.
 
 ## Gemini CLI setup
 
