@@ -287,6 +287,24 @@ fn build_docker_run_args_with_state_dir(
     )
 }
 
+fn podman_uses_remote_connection() -> bool {
+    !cfg!(target_os = "linux")
+        || std::env::var_os("CONTAINER_HOST").is_some()
+        || std::env::var_os("CONTAINER_CONNECTION").is_some()
+}
+
+fn validate_oci_runtime_support(runtime: SandboxRuntime, podman_remote: bool) -> Result<()> {
+    if runtime == SandboxRuntime::Podman && podman_remote {
+        anyhow::bail!(
+            "sandbox.container.oci_runtime is not supported by remote Podman; \
+             podman run --runtime is available only with local Podman on Linux. \
+             Use sandbox.container.runtime: docker, connect to local Podman, or \
+             unset sandbox.container.oci_runtime."
+        );
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_docker_run_args_inner(
     command: &str,
@@ -306,14 +324,27 @@ fn build_docker_run_args_inner(
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
+    let runtime = config.runtime();
+
     let mut args = Vec::new();
 
     // Base command (no runtime name -- caller prepends that)
     args.push("run".to_string());
+
+    // Optional VM/sandboxed OCI runtime. Apple Container manages its own VM
+    // and has no `--runtime` concept. Remote Podman does not expose its local
+    // engine's `--runtime` flag, so reject the setting instead of silently
+    // running under a different isolation boundary.
+    if let Some(oci_runtime) = config.container.oci_runtime()
+        && runtime != SandboxRuntime::AppleContainer
+    {
+        validate_oci_runtime_support(runtime, podman_uses_remote_connection())?;
+        args.push("--runtime".to_string());
+        args.push(oci_runtime.to_string());
+    }
+
     args.push("--rm".to_string());
     args.push("-it".to_string());
-
-    let runtime = config.runtime();
 
     // Resource limits: user config overrides runtime default.
     // Apple Container VMs default to 1 GB RAM which is too low for most workloads.
@@ -355,6 +386,23 @@ fn build_docker_run_args_inner(
     for dev in devices {
         args.push("--device".to_string());
         args.push(dev.to_arg());
+    }
+
+    // Extra capabilities / security options (global-only). Applied in both
+    // network modes. Primary use: docker-in-docker under `oci_runtime: kata`,
+    // where `--privileged` cannot be used and the guest VM remains the isolation
+    // boundary. Permissive values weaken host-kernel container isolation when
+    // used without a VM-based OCI runtime. Apple Container doesn't accept
+    // Docker/Podman `--cap-add`/`--security-opt`, so they're omitted there.
+    if runtime != SandboxRuntime::AppleContainer {
+        for cap in config.container.cap_add() {
+            args.push("--cap-add".to_string());
+            args.push(cap.clone());
+        }
+        for opt in config.container.security_opt() {
+            args.push("--security-opt".to_string());
+            args.push(opt.clone());
+        }
     }
 
     if network_deny {
@@ -997,6 +1045,120 @@ mod tests {
         assert!(args.contains(&"sh".to_string()));
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn test_oci_runtime_inserted_after_run() {
+        let config = sandbox_config(SandboxRuntime::Docker, |c| {
+            c.oci_runtime = Some("kata".to_string());
+        });
+        let args = test_build_run_args(&config, false);
+
+        assert_eq!(args[0], "run");
+        assert_eq!(args[1], "--runtime");
+        assert_eq!(args[2], "kata");
+    }
+
+    #[test]
+    fn test_oci_runtime_absent_by_default() {
+        let config = sandbox_config(SandboxRuntime::Docker, |_| {});
+        let args = test_build_run_args(&config, false);
+
+        assert!(
+            find_flag_value(&args, "--runtime").is_empty(),
+            "no --runtime should be added when oci_runtime is unset, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_remote_podman_rejects_oci_runtime() {
+        let err = validate_oci_runtime_support(SandboxRuntime::Podman, true)
+            .expect_err("remote Podman must reject oci_runtime");
+        assert!(err.to_string().contains("remote Podman"));
+
+        assert!(validate_oci_runtime_support(SandboxRuntime::Podman, false).is_ok());
+        assert!(validate_oci_runtime_support(SandboxRuntime::Docker, true).is_ok());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_oci_runtime_rejected_for_podman_on_remote_platform() {
+        let config = sandbox_config(SandboxRuntime::Podman, |c| {
+            c.oci_runtime = Some("crun".to_string());
+        });
+        let err = test_build_run_args_result(&config, false)
+            .expect_err("Podman is remote on non-Linux platforms");
+
+        assert!(err.to_string().contains("remote Podman"));
+    }
+
+    #[test]
+    fn test_cap_add_and_security_opt_emitted() {
+        let config = sandbox_config(SandboxRuntime::Docker, |c| {
+            c.cap_add = Some(vec!["ALL".to_string()]);
+            c.security_opt = Some(vec![
+                "seccomp=unconfined".to_string(),
+                "systempaths=unconfined".to_string(),
+            ]);
+        });
+        let args = test_build_run_args(&config, false);
+
+        assert_eq!(find_flag_value(&args, "--cap-add"), vec!["ALL"]);
+        assert_eq!(
+            find_flag_value(&args, "--security-opt"),
+            vec!["seccomp=unconfined", "systempaths=unconfined"]
+        );
+    }
+
+    #[test]
+    fn test_cap_add_and_security_opt_absent_by_default() {
+        let config = sandbox_config(SandboxRuntime::Docker, |_| {});
+        let args = test_build_run_args(&config, false);
+
+        assert!(
+            find_flag_value(&args, "--cap-add").is_empty(),
+            "no --cap-add when cap_add is unset, got: {args:?}"
+        );
+        assert!(
+            find_flag_value(&args, "--security-opt").is_empty(),
+            "no --security-opt when security_opt is unset, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_oci_runtime_omitted_on_apple_container() {
+        // Apple Container has no `--runtime` concept and would misread the
+        // value (e.g. treat `kata` as an Apple-native plugin), so a globally
+        // configured oci_runtime must be dropped rather than passed through.
+        let config = sandbox_config(SandboxRuntime::AppleContainer, |c| {
+            c.oci_runtime = Some("kata".to_string());
+        });
+        let args = test_build_run_args(&config, false);
+
+        assert!(
+            find_flag_value(&args, "--runtime").is_empty(),
+            "--runtime must be omitted on Apple Container, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_cap_add_and_security_opt_omitted_on_apple_container() {
+        // Apple Container does not accept Docker/Podman `--cap-add` /
+        // `--security-opt`; they must be dropped rather than passed through.
+        let config = sandbox_config(SandboxRuntime::AppleContainer, |c| {
+            c.cap_add = Some(vec!["ALL".to_string()]);
+            c.security_opt = Some(vec!["seccomp=unconfined".to_string()]);
+        });
+        let args = test_build_run_args(&config, false);
+
+        assert!(
+            find_flag_value(&args, "--cap-add").is_empty(),
+            "--cap-add must be omitted on Apple Container, got: {args:?}"
+        );
+        assert!(
+            find_flag_value(&args, "--security-opt").is_empty(),
+            "--security-opt must be omitted on Apple Container, got: {args:?}"
+        );
     }
 
     #[test]

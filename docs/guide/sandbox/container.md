@@ -41,23 +41,26 @@ workmux sandbox pull
 
 ## Configuration
 
-| Option                    | Default                                 | Description                                                                                                                                                                                                       |
-| ------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                 | `false`                                 | Enable container sandboxing                                                                                                                                                                                       |
-| `container.runtime`       | auto-detect                             | Container runtime: `docker`, `podman`, or `apple-container`. Auto-detected from PATH when not set. On macOS, prefers Apple Container (`container`) over Docker/Podman.                                            |
-| `container.memory`        | `16G` (Apple Container) / none (others) | Memory limit for the container. Apple Container VMs default to 1 GB which is too low, so workmux sets `16G` by default. This is a ceiling, not an upfront allocation. Works with any runtime when explicitly set. |
-| `container.cpus`          | none                                    | CPU count for the container. Only passed when explicitly set. Apple Container defaults to 4 CPUs which is sufficient for most workloads.                                                                          |
-| `container.devices`       | `[]`                                    | Host device nodes exposed to the sandbox (e.g. `/dev/kvm`, `/dev/ttyUSB0`). Passed to the runtime as `--device`. Docker and Podman only; Apple Container rejects. **Global config only.**                         |
-| `container.group_add`     | `[]`                                    | Supplementary groups added to the sandboxed process (e.g. `dialout`, `video`, or numeric GIDs). Passed to the runtime as `--group-add`. Docker and Podman only; Apple Container rejects. **Global config only.**  |
-| `target`                  | `agent`                                 | Which panes to sandbox: `agent` or `all`                                                                                                                                                                          |
-| `image`                   | `ghcr.io/raine/workmux-sandbox:{agent}` | Container image name (auto-resolved from configured agent).                                                                                                                                                       |
-| `rpc_host`                | auto                                    | Override hostname for guest-to-host RPC. Defaults to `host.docker.internal` (Docker), `host.containers.internal` (Podman), or `192.168.64.1` (Apple Container). **Global config only.**                           |
-| `env_passthrough`         | `[]`                                    | Environment variables to pass through. **Global config only.**                                                                                                                                                    |
-| `env`                     | `{}`                                    | Environment variables to set with explicit values (unlike `env_passthrough` which reads from host). **Global config only.**                                                                                       |
-| `extra_mounts`            | `[]`                                    | Additional host paths to mount (see [shared features](./features#extra-mounts)). **Global config only.**                                                                                                          |
-| `agent_config_dir`        | per-agent default                       | Custom host directory for agent config. Supports `{agent}` placeholder. Overrides default mounts (e.g. `~/.claude/`). Auto-created if missing. **Global config only.**                                            |
-| `network.policy`          | `allow`                                 | Network restriction policy: `allow` (no restrictions) or `deny` (block all except allowed domains). See [network restrictions](#network-restrictions). **Global config only.**                                    |
-| `network.allowed_domains` | `[]`                                    | Allowed outbound HTTPS domains when policy is `deny`. Supports exact matches, `*.` wildcard prefixes, and exact-host private destination opt-in. **Global config only.**                                          |
+| Option                    | Default                                 | Description                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                 | `false`                                 | Enable container sandboxing                                                                                                                                                                                                                                                                                                                                               |
+| `container.runtime`       | auto-detect                             | Container runtime: `docker`, `podman`, or `apple-container`. Auto-detected from PATH when not set. On macOS, prefers Apple Container (`container`) over Docker/Podman.                                                                                                                                                                                                    |
+| `container.memory`        | `16G` (Apple Container) / none (others) | Memory limit for the container. Apple Container VMs default to 1 GB which is too low, so workmux sets `16G` by default. This is a ceiling, not an upfront allocation. Works with any runtime when explicitly set.                                                                                                                                                         |
+| `container.cpus`          | none                                    | CPU count for the container. Only passed when explicitly set. Apple Container defaults to 4 CPUs which is sufficient for most workloads.                                                                                                                                                                                                                                  |
+| `container.devices`       | `[]`                                    | Host device nodes exposed to the sandbox (e.g. `/dev/kvm`, `/dev/ttyUSB0`). Passed to the runtime as `--device`. Docker and Podman only; Apple Container rejects. **Global config only.**                                                                                                                                                                                 |
+| `container.group_add`     | `[]`                                    | Supplementary groups added to the sandboxed process (e.g. `dialout`, `video`, or numeric GIDs). Passed to the runtime as `--group-add`. Docker and Podman only; Apple Container rejects. **Global config only.**                                                                                                                                                          |
+| `container.cap_add`       | `[]`                                    | Extra Linux capabilities granted to the container, passed verbatim as `--cap-add` (e.g. `ALL` or `SYS_ADMIN`). Docker and Podman only; Apple Container ignores it. Permissive values weaken host-kernel container isolation. **Global config only.**                                                                                                                     |
+| `container.security_opt`  | `[]`                                    | Security options passed verbatim as `--security-opt` (e.g. `seccomp=unconfined` or `no-new-privileges`). Docker and Podman only; Apple Container ignores it. Options can strengthen or weaken confinement. **Global config only.**                                                                                                                                      |
+| `container.oci_runtime`   | none (engine default)                   | OCI runtime to run the container under, passed as Docker or local Podman `--runtime`. Unset omits `--runtime`, deferring to the engine's configured default. Set to e.g. `kata` for stronger VM-based isolation. Remote Podman rejects this flag; Apple Container ignores it. **Global config only.**                                                                   |
+| `target`                  | `agent`                                 | Which panes to sandbox: `agent` or `all`                                                                                                                                                                                                                                                                                                                                  |
+| `image`                   | `ghcr.io/raine/workmux-sandbox:{agent}` | Container image name (auto-resolved from configured agent).                                                                                                                                                                                                                                                                                                               |
+| `rpc_host`                | auto                                    | Override hostname for guest-to-host RPC. Defaults to `host.docker.internal` (Docker), `host.containers.internal` (Podman), or `192.168.64.1` (Apple Container). **Global config only.**                                                                                                                                                                                   |
+| `env_passthrough`         | `[]`                                    | Environment variables to pass through. **Global config only.**                                                                                                                                                                                                                                                                                                            |
+| `env`                     | `{}`                                    | Environment variables to set with explicit values (unlike `env_passthrough` which reads from host). **Global config only.**                                                                                                                                                                                                                                               |
+| `extra_mounts`            | `[]`                                    | Additional host paths to mount (see [shared features](./features#extra-mounts)). **Global config only.**                                                                                                                                                                                                                                                                  |
+| `agent_config_dir`        | per-agent default                       | Custom host directory for agent config. Supports `{agent}` placeholder. Overrides default mounts (e.g. `~/.claude/`). Auto-created if missing. **Global config only.**                                                                                                                                                                                                    |
+| `network.policy`          | `allow`                                 | Network restriction policy: `allow` (no restrictions) or `deny` (block all except allowed domains). See [network restrictions](#network-restrictions). **Global config only.**                                                                                                                                                                                            |
+| `network.allowed_domains` | `[]`                                    | Allowed outbound HTTPS domains when policy is `deny`. Supports exact matches, `*.` wildcard prefixes, and exact-host private destination opt-in. **Global config only.**                                                                                                                                                                                                  |
 
 ### Example configurations
 
@@ -147,6 +150,77 @@ Listed paths are relative to the worktree root. Each one is shadowed by a read-o
 **Security: global-only.** `excluded_files` is ignored when set in a project's `.workmux.yaml`; it must be configured in your global config (`~/.config/workmux/config.yaml`). This prevents a malicious repo from deleting protections via its own config.
 
 **Note:** `excluded_files` relies on file-level bind mounts, which Apple Container does not support (it only accepts directory mounts). When the runtime is Apple Container and `excluded_files` is set, workmux fails fast rather than silently leaving secrets readable. Use Docker or Podman if you need this feature.
+
+**Run under a VM-based OCI runtime (stronger isolation):**
+
+```yaml
+sandbox:
+  enabled: true
+  container:
+    runtime: docker
+    oci_runtime: kata
+```
+
+`oci_runtime` is passed straight through to Docker or local Podman as `--runtime`,
+so the container runs under whatever OCI runtime you name instead of the engine's
+configured default. Pointing it at a VM-based runtime such as
+[Kata Containers](https://katacontainers.io/) gives each sandbox a hardware-VM
+boundary while reusing the exact same container image, mounts, user mapping, and
+RPC path as the normal container backend. Leaving it unset keeps the engine's
+default behavior.
+
+The named runtime must already be installed on the host and registered with your
+container engine (for Docker, listed under `docker info`'s runtimes). Setting it
+up is out of scope here. See the runtime's own documentation.
+
+Notes:
+
+- **Global config only.** Like `devices`/`group_add`, `oci_runtime` is ignored
+  when set in a project's `.workmux.yaml`. It changes the isolation boundary, so
+  a repository must not be able to select (or downgrade) it via its own config.
+- **Kata needs Docker.** Kata Containers does not officially support Podman as a
+  container manager ([Kata limitations](https://github.com/kata-containers/kata-containers/blob/main/docs/Limitations.md)),
+  so use `runtime: docker` for the `kata` example above.
+- **Podman support is local-only.** Other OCI runtimes may work with local Podman
+  on Linux. Remote Podman clients, including all macOS and Windows builds, do
+  not expose `podman run --runtime`. Workmux rejects `oci_runtime` on non-Linux
+  hosts and when `CONTAINER_HOST` or `CONTAINER_CONNECTION` selects a remote
+  service. Other remote Podman configurations are unsupported and may return
+  `unknown flag: --runtime` directly from Podman.
+- **Apple Container ignores it.** Apple Container manages its own VM and has no
+  `--runtime` concept, so a configured `oci_runtime` is silently omitted there
+  (as are `cap_add`/`security_opt`). This lets one global config target Kata on a
+  Docker host and still run on macOS without erroring.
+- **Network-deny mode** ([below](#network-restrictions)) configures `iptables`
+  inside the container, which needs a real in-guest kernel. It works under a
+  VM-based runtime like Kata, but may not under a userspace-kernel runtime such
+  as gVisor.
+
+**Docker-in-Docker under Kata:**
+
+```yaml
+sandbox:
+  enabled: true
+  container:
+    runtime: docker
+    oci_runtime: kata
+    cap_add: [ALL]
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
+```
+
+`cap_add` and `security_opt` are global-only passthroughs for Docker and Podman.
+They support an inner Docker daemon under Kata without `--privileged`, which
+injects host device nodes that conflict with devices in the guest. The values
+above grant every Linux capability and disable several container-level security
+controls, while Kata's guest VM remains the host isolation boundary.
+
+These fields are independent of `oci_runtime`. Without a VM-based OCI runtime,
+permissive values apply to a host-kernel container and weaken the sandbox's
+isolation from the host. `security_opt` values such as `no-new-privileges` can
+instead strengthen confinement. Apple Container silently omits both fields.
 
 **Sandbox all panes (not just agent):**
 
