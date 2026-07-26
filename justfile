@@ -123,4 +123,4 @@ release *ARGS:
 
 # Internal release helper
 _release bump *ARGS:
-    @cargo-release {{bump}} {{ARGS}}
+    @cargo-release --skip-publish {{bump}} {{ARGS}}
