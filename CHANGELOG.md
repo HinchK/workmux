@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.227 (2026-07-26)
+
+- Prevent stale sidebar pane cleanup from displaying harmless tmux errors.
+
 ## v0.1.226 (2026-07-25)
 
 - Show linked worktree ages in `workmux list` when using Linux musl builds.
