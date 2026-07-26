@@ -272,7 +272,7 @@ enum Commands {
         #[arg(short = 'A', long = "auto-name", conflicts_with = "pr")]
         auto_name: bool,
 
-        /// Base branch/commit/tag to branch from (overrides config base_branch, defaults to current branch)
+        /// Base branch/commit/tag to branch from (overrides config base_branch; config may use "auto"; defaults to current branch)
         #[arg(long)]
         base: Option<String>,
 

@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## Unreleased
+
+- Let `base_branch: auto` create new worktrees from each repository's effective main branch.
+
 ## v0.1.227 (2026-07-26)
 
 - Prevent stale sidebar pane cleanup from displaying harmless tmux errors.

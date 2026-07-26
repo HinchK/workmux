@@ -274,7 +274,7 @@ customize.
 | Option           | Description                                                                                           | Default                     |
 | ---------------- | ----------------------------------------------------------------------------------------------------- | --------------------------- |
 | `main_branch`    | Branch to merge into                                                                                  | Auto-detected               |
-| `base_branch`    | Default base branch for new worktrees                                                                 | Current branch              |
+| `base_branch`    | Default base ref for new worktrees, or `auto` for the effective main branch                           | Current branch              |
 | `worktree_dir`   | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.                         | `<project>__worktrees/`     |
 | `window_prefix`    | Prefix for tmux window/session names                                                                  | `wm-`                       |
 | `mode`             | Tmux mode (`window` or `session`)                                                                     | `window`                    |
@@ -284,6 +284,12 @@ customize.
 | `merge_strategy` | Default merge strategy (`merge`, `rebase`, `squash`)                                                  | `merge`                     |
 | `merge_keep`     | Keep resources after `workmux merge` by default                                                       | `false`                     |
 | `theme`          | Dashboard color scheme ([custom colors](https://workmux.raine.dev/guide/configuration#custom-colors)) | `default` (auto dark/light) |
+
+Set `base_branch: auto` to create independent work streams from each repository's
+effective main branch. Workmux uses configured `main_branch`, then the local
+`origin/HEAD`, `main`, or `master`. Detection uses local Git state and does not
+fetch. Omitting `base_branch` continues to create branches from the checked-out
+branch.
 
 #### Naming options
 
@@ -565,8 +571,9 @@ immediately. If the branch doesn't exist, it will be created automatically.
 #### Options
 
 - `--base <branch|commit|tag>`: Specify a base branch, commit, or tag to branch
-  from when creating a new branch. Overrides `base_branch` config. Defaults to
-  `base_branch` from config, then the currently checked out branch.
+  from when creating a new branch. Overrides `base_branch` config. The config
+  value `auto` uses the effective main branch. Without either setting, workmux
+  uses the currently checked out branch.
 - `--pr <number|url>`: Checkout a GitHub pull request by its number or full URL
   into a new worktree.
   - Requires the `gh` command-line tool to be installed and authenticated.

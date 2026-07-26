@@ -1331,6 +1331,7 @@ def write_workmux_config(
     merge_keep: Optional[bool] = None,
     worktree_naming: Optional[str] = None,
     worktree_prefix: Optional[str] = None,
+    main_branch: Optional[str] = None,
     base_branch: Optional[str] = None,
     prompt_file_only: Optional[bool] = None,
     window_placement: Optional[str] = None,
@@ -1364,6 +1365,8 @@ def write_workmux_config(
         config["worktree_naming"] = worktree_naming
     if worktree_prefix:
         config["worktree_prefix"] = worktree_prefix
+    if main_branch:
+        config["main_branch"] = main_branch
     if base_branch:
         config["base_branch"] = base_branch
     if prompt_file_only is not None:

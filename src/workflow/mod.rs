@@ -28,5 +28,5 @@ pub use rename::rename;
 pub use setup::write_prompt_file;
 
 // Re-export commonly used types for convenience
-pub use context::WorkflowContext;
+pub use context::{WorkflowContext, resolve_configured_base_branch};
 pub use types::{CreateArgs, SetupOptions};

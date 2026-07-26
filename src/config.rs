@@ -377,6 +377,7 @@ pub struct Config {
     pub main_branch: Option<String>,
 
     /// Default base branch/commit to branch from when creating new worktrees.
+    /// The value "auto" uses the effective main branch.
     /// Used as fallback when --base is not passed to `workmux add`.
     #[serde(default)]
     pub base_branch: Option<String>,
@@ -2734,9 +2735,10 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # main_branch: main
 
 # Default base branch/commit to branch from when creating new worktrees.
+# Use "auto" to branch from main_branch or the locally detected main/master branch.
 # The --base CLI flag always overrides this.
 # Default: The currently checked out branch.
-# base_branch: main
+# base_branch: auto
 
 # Default merge strategy for `workmux merge`.
 # Options: merge (default), rebase, squash

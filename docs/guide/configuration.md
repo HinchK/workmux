@@ -75,7 +75,7 @@ Most options have sensible defaults. You only need to configure what you want to
 | Option             | Description                                                                         | Default                     |
 | ------------------ | ----------------------------------------------------------------------------------- | --------------------------- |
 | `main_branch`      | Branch to merge into                                                                | Auto-detected               |
-| `base_branch`      | Default base branch for new worktrees (overridden by `--base`)                      | Current branch              |
+| `base_branch`      | Default base ref for new worktrees, or `auto` for the effective main branch          | Current branch              |
 | `worktree_dir`     | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.       | `<project>__worktrees/`     |
 | `nerdfont`         | Enable nerdfont icons (prompted on first run)                                       | Prompted                    |
 | `window_prefix`    | Override tmux window/session prefix                                                 | Icon or `wm-`               |
@@ -87,6 +87,13 @@ Most options have sensible defaults. You only need to configure what you want to
 | `merge_keep`       | Keep resources after `workmux merge` by default                                     | `false`                     |
 | `theme`            | Dashboard color scheme (see [themes](#themes))                                      | `default` (auto dark/light) |
 | `mode`             | Tmux mode (`window` or `session`). See [session mode](/guide/session-mode).         | `window`                    |
+
+Set `base_branch: auto` to create new branches from the effective main branch,
+regardless of the currently checked-out branch. Workmux uses configured
+`main_branch`, then the local `origin/HEAD`, `main`, or `master`. Detection uses
+local Git state and does not fetch. An explicit `workmux add --base` takes
+precedence. When `base_branch` is omitted, new branches use the checked-out
+branch.
 
 ### Themes
 

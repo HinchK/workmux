@@ -394,7 +394,6 @@ pub fn run(
     } else {
         base
     };
-    let config_base = initial_config.base_branch.as_deref();
 
     // Validate --with-changes compatibility
     if rescue.with_changes && multi.agent.len() > 1 {
@@ -531,7 +530,7 @@ pub fn run(
     let resolved_base = if remote_branch.is_some() {
         None
     } else {
-        cli_base.or(config_base)
+        cli_base
     };
 
     // Determine effective foreach matrix
@@ -858,13 +857,19 @@ impl<'a> CreationPlan<'a> {
 
             // Create a WorkflowContext for this spec's config (reuse shared mux)
             let context = workflow::WorkflowContext::new(config, mux.clone(), config_location)?;
+            let configured_base = if self.resolved_base.is_none() && self.remote_branch.is_none() {
+                workflow::resolve_configured_base_branch(&context.config, &context.execution_dir)?
+            } else {
+                None
+            };
+            let resolved_base = self.resolved_base.or(configured_base.as_deref());
 
             if self.dry_run {
                 print_dry_run(
                     &context,
                     &final_branch_name,
                     &handle,
-                    self.resolved_base,
+                    resolved_base,
                     self.remote_branch,
                     &self.options,
                     self.explicit_name.is_some(),
@@ -883,7 +888,7 @@ impl<'a> CreationPlan<'a> {
                 workflow::CreateArgs {
                     branch_name: &final_branch_name,
                     handle: &handle,
-                    base_branch: self.resolved_base,
+                    base_branch: resolved_base,
                     remote_branch: self.remote_branch,
                     pr_number: self.pr_number,
                     prompt: prompt_for_spec.as_ref(),

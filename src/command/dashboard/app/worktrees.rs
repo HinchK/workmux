@@ -33,9 +33,11 @@ fn delete_word_backward(s: &mut String) {
 fn default_add_worktree_base(repo_path: &Path) -> String {
     crate::config::Config::load_with_location_from(repo_path, None)
         .ok()
-        .and_then(|(config, _)| config.base_branch)
-        .map(|branch| branch.trim().to_string())
-        .filter(|branch| !branch.is_empty())
+        .and_then(|(config, _)| {
+            workflow::resolve_configured_base_branch(&config, repo_path)
+                .ok()
+                .flatten()
+        })
         .or_else(|| {
             git::get_current_branch_in(repo_path)
                 .ok()

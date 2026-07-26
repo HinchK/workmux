@@ -6,6 +6,8 @@ use crate::multiplexer::Multiplexer;
 use crate::{config, git};
 use tracing::debug;
 
+const AUTO_BASE_BRANCH: &str = "auto";
+
 /// Shared context for workflow operations
 ///
 /// This struct centralizes pre-flight checks and holds essential data
@@ -24,6 +26,33 @@ pub struct WorkflowContext {
     /// Absolute path to the directory where config was found.
     /// Used as source for file operations (copy/symlink).
     pub config_source_dir: PathBuf,
+}
+
+fn resolve_main_branch(config: &config::Config, repo_path: &Path) -> Result<String> {
+    if let Some(ref branch) = config.main_branch {
+        Ok(branch.clone())
+    } else {
+        git::get_default_branch_in(Some(repo_path)).context("Failed to determine the main branch")
+    }
+}
+
+pub fn resolve_configured_base_branch(
+    config: &config::Config,
+    repo_path: &Path,
+) -> Result<Option<String>> {
+    let Some(base) = config
+        .base_branch
+        .as_deref()
+        .filter(|base| !base.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    if base == AUTO_BASE_BRANCH {
+        resolve_main_branch(config, repo_path).map(Some)
+    } else {
+        Ok(Some(base.to_string()))
+    }
 }
 
 impl WorkflowContext {
@@ -65,12 +94,7 @@ impl WorkflowContext {
         let git_common_dir = git::get_git_common_dir_in(Some(&execution_dir))
             .context("Could not find the git common directory")?;
 
-        let main_branch = if let Some(ref branch) = config.main_branch {
-            branch.clone()
-        } else {
-            git::get_default_branch_in(Some(&execution_dir))
-                .context("Failed to determine the main branch")?
-        };
+        let main_branch = resolve_main_branch(&config, &execution_dir)?;
 
         let prefix = config.window_prefix().to_string();
 
