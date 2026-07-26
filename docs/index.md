@@ -201,6 +201,18 @@ description: Terminal-first workflow for parallel AI agents using git worktrees
         <blockquote>"I have to mention workmux at every opportunity because it's the perfect glue between worktrees, agents and tmux windows."</blockquote>
         <cite>— @dedbrizz <a href="https://www.threads.com/@dedbrizz/post/DVt1DtLkr_l">via Threads</a></cite>
       </div>
+      <div class="ed-testimonial">
+        <blockquote>"Since I discovered workmux I'm cooking. Amazing parallel-agent driver if you like tmux and want to keep your config."</blockquote>
+        <cite>— @MatijaSosic <a href="https://x.com/MatijaSosic/status/2080022087281127659">via X</a></cite>
+      </div>
+      <div class="ed-testimonial">
+        <blockquote>"Using workmux with a well-configured tmux has been a breath of fresh air"</blockquote>
+        <cite>— @sbeirakh_il <a href="https://x.com/sbeirakh_il/status/2080279929778733305">via X</a></cite>
+      </div>
+      <div class="ed-testimonial">
+        <blockquote>"I've been using it for about a month now, and it's been nothing but great."</blockquote>
+        <cite>— @gabrielrockson_ <a href="https://x.com/gabrielrockson_/status/2080386326566736189">via X</a></cite>
+      </div>
     </div>
   </div>
 </section>

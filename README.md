@@ -105,6 +105,16 @@ New to worktrees? See [Why git worktrees?](#why-git-worktrees)
 > between worktrees, agents and tmux windows."  
 > — @dedbrizz [🔗](https://www.threads.com/@dedbrizz/post/DVt1DtLkr_l)
 
+> "Since I discovered workmux I'm cooking. Amazing parallel-agent driver if you
+> like tmux and want to keep your config."  
+> — @MatijaSosic [🔗](https://x.com/MatijaSosic/status/2080022087281127659)
+
+> "Using workmux with a well-configured tmux has been a breath of fresh air"  
+> — @sbeirakh_il [🔗](https://x.com/sbeirakh_il/status/2080279929778733305)
+
+> "I've been using it for about a month now, and it's been nothing but great."  
+> — @gabrielrockson_ [🔗](https://x.com/gabrielrockson_/status/2080386326566736189)
+
 ## Installation
 
 ### Bash YOLO
