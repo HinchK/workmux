@@ -1825,6 +1825,7 @@ impl SandboxConfig {
                 "claude" => Some(home.join(".claude")),
                 "copilot" => Some(home.join(".copilot")),
                 "gemini" => Some(home.join(".gemini")),
+                "agy" => Some(home.join(".gemini/antigravity-cli")),
                 "codex" => Some(home.join(".codex")),
                 "opencode" => Some(home.join(".local/share/opencode")),
                 "pi" => Some(home.join(".pi/agent")),
@@ -4124,6 +4125,10 @@ extra_mounts:
             .unwrap();
         let home = home::home_dir().unwrap();
         assert_eq!(dir, home.join(".claude"));
+        let dir = config
+            .resolved_agent_config_dir_with_env("agy", |_| None)
+            .unwrap();
+        assert_eq!(dir, home.join(".gemini/antigravity-cli"));
         let dir = config
             .resolved_agent_config_dir_with_env("omp", |_| None)
             .unwrap();
