@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.229 (2026-07-26)
+
+- Run Docker or Podman sandboxes with an alternative OCI runtime such as Kata Containers for hardware-backed VM isolation by setting `sandbox.container.oci_runtime` in the global config. ([#196](https://github.com/raine/workmux/issues/196)) ([#198](https://github.com/raine/workmux/pull/198))
+
 ## v0.1.228 (2026-07-26)
 
 - Use Antigravity CLI (`agy`) with automatic detection, prompt injection, branch name generation, and status tracking setup. ([#168](https://github.com/raine/workmux/issues/168)) ([#183](https://github.com/raine/workmux/pull/183))
