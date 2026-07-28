@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.231 (2026-07-28)
+
+- Clear acknowledged waiting or completed statuses from the sidebar immediately when you focus an agent pane.
+
 ## v0.1.230 (2026-07-28)
 
 - Prevent `workmux merge` from deleting the main worktree when its branch is selected as the merge source. ([#204](https://github.com/raine/workmux/issues/204))
