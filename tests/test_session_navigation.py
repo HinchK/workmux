@@ -70,10 +70,8 @@ def run_workmux_in_session(
     log file (not stderr), so the log content is appended to stderr in the
     returned result.
 
-    Note: After the command completes, the session may be killed by deferred
-    scripts (e.g., after workmux remove). The exit code and output are
-    captured before deferred scripts run (they have a 300ms sleep), so they
-    are still available.
+    The script ignores the pane's hangup signal so it can capture the command's
+    exit code after a deferred cleanup kills the session.
     """
     scripts_dir = get_scripts_dir(env)
     stdout_file = scripts_dir / "in_session_stdout.txt"
@@ -99,7 +97,6 @@ def run_workmux_in_session(
         rust_log_line = f"export RUST_LOG={shlex.quote(rust_log)}"
 
     script_content = f"""#!/bin/sh
-trap 'echo $? > {shlex.quote(str(exit_code_file))}' EXIT
 export PATH={shlex.quote(env.env["PATH"])}
 export TMPDIR={shlex.quote(env.env.get("TMPDIR", "/tmp"))}
 export HOME={shlex.quote(env.env.get("HOME", ""))}
@@ -108,12 +105,18 @@ export WORKMUX_TEST=1
 {rust_log_line}
 cd {shlex.quote(str(workdir))}
 {shlex.quote(str(workmux_exe_path))} {command} > {shlex.quote(str(stdout_file))} 2> {shlex.quote(str(stderr_file))}
+status=$?
+echo "$status" > {shlex.quote(str(exit_code_file))}
+exit "$status"
 """
     script_file.write_text(script_content)
     script_file.chmod(0o755)
 
-    # Send the script to the target session's pane (not the test session)
-    env.send_keys(f"={session_name}:", str(script_file))
+    # Ignore the pane hangup so deferred session removal cannot interrupt capture.
+    env.send_keys(
+        f"={session_name}:",
+        f"nohup {shlex.quote(str(script_file))} >/dev/null 2>&1 &",
+    )
 
     # Wait for completion (longer timeout to account for deferred scripts)
     if not poll_until_file_has_content(exit_code_file, timeout=10.0):

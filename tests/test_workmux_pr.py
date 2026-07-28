@@ -280,6 +280,9 @@ def test_add_pr_fork_with_main_branch(mux_server, workmux_exe_path, remote_repo_
     env.run_command(
         ["git", "clone", str(fork_repo_path), str(fork_work)], cwd=repo_path
     )
+    env.run_command(
+        ["git", "switch", "--force-create", "main", "origin/main"], cwd=fork_work
+    )
     env.run_command(["git", "config", "user.name", "Fork User"], cwd=fork_work)
     env.run_command(["git", "config", "user.email", "fork@example.com"], cwd=fork_work)
     env.run_command(
