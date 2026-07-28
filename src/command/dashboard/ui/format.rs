@@ -15,7 +15,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 
 use crate::config::StatusIcons;
 use crate::git::GitStatus;
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::AgentStatus;
 use crate::nerdfont;
 use crate::nerdfont::GitIcons;
@@ -278,15 +278,17 @@ pub fn format_git_status(
     }
 }
 
-/// Format PR status as styled spans for dashboard display
+/// Format GitHub PR and check status as styled spans for dashboard display
 pub fn format_pr_status(
     pr: Option<&PrSummary>,
+    checks: Option<&CheckSummary>,
     show_check_counts: bool,
     spinner_frame: u8,
     palette: &ThemePalette,
 ) -> Vec<(String, Style)> {
-    crate::ui::pr_status::format_pr_status(
+    crate::ui::pr_status::format_github_status(
         pr,
+        checks,
         PrStatusOptions {
             include_number: true,
             show_check_counts,

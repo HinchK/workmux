@@ -149,8 +149,8 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App) {
 }
 
 fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
-    // Check if we should show the PR column (only when at least one agent has a PR)
-    let show_pr_column = app.has_any_pr();
+    // Show the GitHub column when at least one agent has a PR or checks.
+    let show_pr_column = app.has_any_github_status();
     let show_check_counts = app.config.dashboard.show_check_counts();
 
     let header = format::resource_table_header(
@@ -249,8 +249,10 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
             // Get PR status for this agent (only if column is shown)
             let pr_spans = if show_pr_column {
                 let pr = app.get_pr_for_agent(agent);
+                let checks = app.get_checks_for_agent(agent);
                 Some(format_pr_status(
                     pr,
+                    checks,
                     show_check_counts,
                     app.spinner_frame,
                     &app.palette,

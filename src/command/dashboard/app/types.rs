@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::git::GitStatus;
-use crate::github::{PrListEntry, PrSummary};
+use crate::github::{BranchSummary, PrListEntry};
 use crate::workflow::types::WorktreeInfo;
 
 use super::super::diff::DiffView;
@@ -16,8 +16,8 @@ pub enum AppEvent {
     Terminal(crossterm::event::Event),
     /// Git status update for a worktree path
     GitStatus(PathBuf, GitStatus),
-    /// PR status update for a repo root
-    PrStatus(PathBuf, HashMap<String, PrSummary>),
+    /// GitHub status update for a repo root
+    GithubStatus(PathBuf, HashMap<String, BranchSummary>),
     /// Full worktree list from background fetch
     WorktreeList(Vec<WorktreeInfo>),
     /// Git log preview for a worktree path

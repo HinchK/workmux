@@ -13,7 +13,7 @@ use crate::agent_display::{extract_project_name, extract_worktree_name, resolve_
 use crate::cmd::Cmd;
 use crate::config::{AgentIcons, Config, SidebarPosition, SidebarWidth, StatusIcons};
 use crate::git::GitStatus;
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use ratatui::style::Color;
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -164,12 +164,12 @@ const DEFAULT_COMPACT_TEMPLATE: &str = "{status_icon} {primary} {pane_suffix} {f
 const DEFAULT_TILE_TEMPLATES: &[&str] = &[
     "{primary} {pane_suffix} {fill} {elapsed}",
     "{secondary} {fill} {git_stats}",
-    "{pane_title}",
+    "{pane_title} {fill} {pr_checks}",
 ];
 const DEFAULT_HORIZONTAL_TEMPLATES: &[&str] = &[
     "{status_icon} {primary} {pane_suffix} {fill} {elapsed}",
     "{secondary} {fill} {git_stats}",
-    "{pane_title}",
+    "{pane_title} {fill} {pr_checks}",
 ];
 
 /// Parsed templates for one sidebar instance.
@@ -234,6 +234,8 @@ pub struct SidebarApp {
     pub git_statuses: HashMap<PathBuf, GitStatus>,
     /// PR summary per worktree path (received from daemon snapshots).
     pub pr_statuses: HashMap<PathBuf, PrSummary>,
+    /// GitHub check summary per worktree path (received from daemon snapshots).
+    pub check_statuses: HashMap<PathBuf, CheckSummary>,
     /// Pane IDs of agents detected as interrupted by the daemon.
     pub interrupted_pane_ids: std::collections::HashSet<String>,
     /// Pane IDs of agents manually marked as sleeping by the user.
@@ -311,6 +313,7 @@ impl SidebarApp {
             selection_mode: SelectionMode::FollowHost,
             git_statuses: HashMap::new(),
             pr_statuses: HashMap::new(),
+            check_statuses: HashMap::new(),
             interrupted_pane_ids: std::collections::HashSet::new(),
             sleeping_pane_ids: std::collections::HashSet::new(),
             templates: ParsedTemplates {
@@ -393,6 +396,7 @@ impl SidebarApp {
             selection_mode: SelectionMode::FollowHost,
             git_statuses: HashMap::new(),
             pr_statuses: HashMap::new(),
+            check_statuses: HashMap::new(),
             interrupted_pane_ids: std::collections::HashSet::new(),
             sleeping_pane_ids: std::collections::HashSet::new(),
             templates,
@@ -440,6 +444,7 @@ impl SidebarApp {
         self.filter_mode = snapshot.filter_mode;
         self.git_statuses = snapshot.git_statuses;
         self.pr_statuses = snapshot.pr_statuses;
+        self.check_statuses = snapshot.check_statuses;
         self.interrupted_pane_ids = snapshot.interrupted_pane_ids;
         self.sleeping_pane_ids = snapshot.sleeping_pane_ids;
 
@@ -1197,6 +1202,18 @@ fn detect_host_window() -> (Option<String>, Option<String>) {
 mod tests {
     use super::*;
     use crate::config::{AgentIconConfig, AgentIconDetails};
+
+    #[test]
+    fn default_multiline_templates_show_checks() {
+        assert_eq!(
+            DEFAULT_TILE_TEMPLATES.last(),
+            Some(&"{pane_title} {fill} {pr_checks}")
+        );
+        assert_eq!(
+            DEFAULT_HORIZONTAL_TEMPLATES.last(),
+            Some(&"{pane_title} {fill} {pr_checks}")
+        );
+    }
 
     #[test]
     fn resolved_icons_legacy_string() {

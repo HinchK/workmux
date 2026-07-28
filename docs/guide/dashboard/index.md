@@ -40,8 +40,8 @@ See [command reference](/reference/commands/dashboard) for CLI options.
 
 The dashboard has two views, toggled with `Tab`:
 
-- **Agents**: Shows all running agent panes with their status, git info, and live terminal preview
-- **Worktrees**: Shows all git worktrees with branch, PR status, and agent summary. Press `r` to remove a worktree (kills agent, removes worktree, deletes branch).
+- **Agents**: Shows all running agent panes with their status, git info, GitHub branch checks, and live terminal preview
+- **Worktrees**: Shows all git worktrees with branch, PR status, GitHub branch checks, and agent summary. Press `r` to remove a worktree (kills agent, removes worktree, deletes branch).
 
 ## Keybindings (Agents view)
 

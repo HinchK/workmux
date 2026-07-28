@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::git::{self, GitStatus};
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::{AgentPane, Multiplexer};
 use crate::state::StateStore;
 use crate::workflow::types::WorktreeInfo;
@@ -73,6 +73,8 @@ pub struct App {
     pub is_git_fetching: Arc<AtomicBool>,
     /// PR info indexed by repo root, then branch name
     pr_statuses: HashMap<PathBuf, HashMap<String, PrSummary>>,
+    /// GitHub check info indexed by repo root, then branch name
+    check_statuses: HashMap<PathBuf, HashMap<String, CheckSummary>>,
     /// Last PR fetch time
     last_pr_fetch: std::time::Instant,
     /// Flag to prevent concurrent PR fetches
@@ -198,6 +200,7 @@ impl App {
         let launch_session = mux.current_session();
         let git_statuses = git::load_status_cache();
         let pr_statuses = crate::github::load_pr_cache();
+        let check_statuses = crate::github::load_check_cache();
         let hide_stale = load_hide_stale();
         let last_pane_id = load_last_pane_id();
 
@@ -225,6 +228,7 @@ impl App {
             last_git_fetch: std::time::Instant::now() - Duration::from_secs(60),
             is_git_fetching: Arc::new(AtomicBool::new(false)),
             pr_statuses,
+            check_statuses,
             // Set to past to trigger immediate fetch on first refresh
             last_pr_fetch: std::time::Instant::now() - PR_FETCH_INTERVAL,
             is_pr_fetching: Arc::new(AtomicBool::new(false)),

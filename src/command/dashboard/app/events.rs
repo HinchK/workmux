@@ -12,14 +12,27 @@ impl App {
             AppEvent::GitStatus(path, status) => {
                 self.git_statuses.insert(path, status);
             }
-            AppEvent::PrStatus(repo_root, prs) => {
-                // Clear stale state when a repo has no PRs, otherwise update
+            AppEvent::GithubStatus(repo_root, summaries) => {
+                let mut prs = std::collections::HashMap::new();
+                let mut checks = std::collections::HashMap::new();
+                for (branch, summary) in summaries {
+                    if let Some(pr) = summary.pr {
+                        prs.insert(branch.clone(), pr);
+                    }
+                    if let Some(check_summary) = summary.checks {
+                        checks.insert(branch, check_summary);
+                    }
+                }
                 if prs.is_empty() {
                     self.pr_statuses.remove(&repo_root);
                 } else {
-                    self.pr_statuses.insert(repo_root, prs);
+                    self.pr_statuses.insert(repo_root.clone(), prs);
                 }
-                // Re-apply worktree filters to merge new PR data
+                if checks.is_empty() {
+                    self.check_statuses.remove(&repo_root);
+                } else {
+                    self.check_statuses.insert(repo_root, checks);
+                }
                 if !self.all_worktrees.is_empty() {
                     self.apply_worktree_filters();
                 }

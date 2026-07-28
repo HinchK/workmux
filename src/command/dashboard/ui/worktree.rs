@@ -25,8 +25,10 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let show_check_counts = app.config.dashboard.show_check_counts();
 
-    // Only show PR column when at least one worktree has a PR
-    let show_pr_column = app.worktrees.iter().any(|w| w.pr_info.is_some());
+    // Show the GitHub column when at least one worktree has a PR or checks.
+    let show_pr_column = app.worktrees.iter().any(|worktree| {
+        worktree.pr_info.is_some() || app.get_checks_for_worktree(worktree).is_some()
+    });
 
     let header = format::resource_table_header(
         format::ResourceHeaderState {
@@ -74,6 +76,7 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
             let pr_spans = if show_pr_column {
                 Some(format_pr_status(
                     wt.pr_info.as_ref(),
+                    app.get_checks_for_worktree(wt),
                     show_check_counts,
                     app.spinner_frame,
                     &app.palette,

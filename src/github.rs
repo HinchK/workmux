@@ -6,6 +6,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use tracing::debug;
 
 use crate::util::write_atomic;
@@ -81,6 +82,27 @@ pub struct CheckMeta {
     /// Name of the first failing check, if any
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failing_name: Option<String>,
+}
+
+/// Aggregated checks for a GitHub commit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CheckSummary {
+    pub state: CheckState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<CheckMeta>,
+}
+
+impl CheckSummary {
+    pub fn should_display_for_branch(&self, branch: &str) -> bool {
+        !matches!(branch, "main" | "master") || matches!(self.state, CheckState::Failure { .. })
+    }
+}
+
+/// GitHub state associated with a branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BranchSummary {
+    pub pr: Option<PrSummary>,
+    pub checks: Option<CheckSummary>,
 }
 
 /// Handles both CheckRun (status/conclusion) and StatusContext (state) from GitHub API
@@ -242,6 +264,11 @@ fn aggregate_checks(checks: &[CheckRollupItem]) -> (Option<CheckState>, Option<C
     };
 
     (Some(state), meta)
+}
+
+fn summarize_checks(checks: &[CheckRollupItem]) -> Option<CheckSummary> {
+    let (state, meta) = aggregate_checks(checks);
+    state.map(|state| CheckSummary { state, meta })
 }
 
 /// Get current Unix timestamp in seconds
@@ -530,21 +557,37 @@ pub fn list_prs() -> Result<HashMap<String, PrSummary>> {
     Ok(pr_map)
 }
 
-/// Fetch PR status for specific branches using a single GraphQL query.
-/// Falls back to per-branch REST calls if GraphQL fails.
-pub fn list_prs_for_branches(
+/// Fetch GitHub state for specific branches using a single GraphQL query.
+/// Falls back to per-branch PR calls if GraphQL fails.
+pub fn list_branch_summaries(
     repo_root: &Path,
     branches: &[String],
-) -> Result<HashMap<String, PrSummary>> {
+) -> Result<HashMap<String, BranchSummary>> {
     if branches.is_empty() {
         return Ok(HashMap::new());
     }
 
-    match list_prs_for_branches_graphql(repo_root, branches) {
+    match list_branch_summaries_graphql(repo_root, branches) {
         Ok(map) => Ok(map),
         Err(e) => {
             debug!("github:graphql batch failed, falling back to per-branch REST: {e}");
-            list_prs_for_branches_rest(repo_root, branches)
+            list_prs_for_branches_rest(repo_root, branches).map(|prs| {
+                prs.into_iter()
+                    .map(|(branch, pr)| {
+                        let checks = pr.checks.clone().map(|state| CheckSummary {
+                            state,
+                            meta: pr.check_meta.clone(),
+                        });
+                        (
+                            branch,
+                            BranchSummary {
+                                pr: Some(pr),
+                                checks,
+                            },
+                        )
+                    })
+                    .collect()
+            })
         }
     }
 }
@@ -559,18 +602,27 @@ fn branch_to_alias(index: usize, branch: &str) -> String {
     format!("br{}_{}", index, sanitized)
 }
 
-/// Build a GraphQL query fragment for a single branch alias.
+/// Build GraphQL query fragments for one branch.
 fn build_branch_fragment(alias: &str, branch: &str) -> String {
-    // Escape any quotes in branch name for safety
-    let escaped = branch.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = branch
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     format!(
-        r#"    {alias}: pullRequests(headRefName: "{escaped}", first: 1, states: [OPEN, MERGED, CLOSED], orderBy: {{field: CREATED_AT, direction: DESC}}) {{
+        r#"    pr_{alias}: pullRequests(headRefName: "{escaped}", first: 1, states: [OPEN, MERGED, CLOSED], orderBy: {{field: CREATED_AT, direction: DESC}}) {{
       nodes {{
-        number title state isDraft headRefName url
+        number title state isDraft url
         commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{
           nodes {{ __typename ... on CheckRun {{ name status conclusion startedAt }} ... on StatusContext {{ context state createdAt }} }}
         }} }} }} }} }}
       }}
+    }}
+    ref_{alias}: ref(qualifiedName: "refs/heads/{escaped}") {{
+      target {{ ... on Commit {{ statusCheckRollup {{ contexts(first: 100) {{
+        nodes {{ __typename ... on CheckRun {{ name status conclusion startedAt }} ... on StatusContext {{ context state createdAt }} }}
+      }} }} }} }}
     }}"#
     )
 }
@@ -587,15 +639,20 @@ struct GraphqlError {
     message: String,
 }
 
-/// The `data.repository` value is a map of alias -> PullRequestConnection
+/// The `data.repository` value is a map of dynamic aliases.
 #[derive(Debug, Deserialize)]
 struct GraphqlData {
-    repository: HashMap<String, GraphqlPrConnection>,
+    repository: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphqlPrConnection {
     nodes: Vec<GraphqlPrNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlBranchRef {
+    target: Option<GraphqlCommit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -605,8 +662,6 @@ struct GraphqlPrNode {
     state: String,
     #[serde(rename = "isDraft")]
     is_draft: bool,
-    #[serde(rename = "headRefName")]
-    head_ref_name: String,
     url: String,
     commits: GraphqlCommits,
 }
@@ -625,6 +680,21 @@ struct GraphqlCommitNode {
 struct GraphqlCommit {
     #[serde(rename = "statusCheckRollup")]
     status_check_rollup: Option<GraphqlCheckRollup>,
+}
+
+fn check_items_for_commit(commit: &GraphqlCommit) -> Vec<CheckRollupItem> {
+    commit
+        .status_check_rollup
+        .as_ref()
+        .map(|rollup| {
+            rollup
+                .contexts
+                .nodes
+                .iter()
+                .map(GraphqlCheckNode::to_rollup_item)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Deserialize)]
@@ -692,10 +762,28 @@ struct RepoContext {
     url: String,
 }
 
+type ResolvedRepoContext = (String, String, String);
+static REPO_CONTEXT_CACHE: OnceLock<Mutex<HashMap<PathBuf, ResolvedRepoContext>>> = OnceLock::new();
+
+fn repo_context_cache_key(repo_root: &Path) -> PathBuf {
+    crate::git::get_git_common_dir_in(Some(repo_root))
+        .ok()
+        .and_then(|path| path.canonicalize().ok().or(Some(path)))
+        .unwrap_or_else(|| repo_root.to_path_buf())
+}
+
 /// Get the repo owner, name, and API hostname using `gh repo view`.
 /// This delegates repo resolution to `gh` so it works correctly with forks,
 /// `gh repo set-default`, and GitHub Enterprise.
-fn get_repo_context(repo_root: &Path) -> Result<(String, String, String)> {
+fn get_repo_context(repo_root: &Path) -> Result<ResolvedRepoContext> {
+    let cache_key = repo_context_cache_key(repo_root);
+    let cache = REPO_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock()
+        && let Some(context) = cache.get(&cache_key)
+    {
+        return Ok(context.clone());
+    }
+
     let output = Command::new("gh")
         .current_dir(repo_root)
         .args(["repo", "view", "--json", "owner,name,url"])
@@ -719,17 +807,20 @@ fn get_repo_context(repo_root: &Path) -> Result<(String, String, String)> {
         .unwrap_or("github.com")
         .to_string();
 
-    Ok((ctx.owner.login, ctx.name, hostname))
+    let context = (ctx.owner.login, ctx.name, hostname);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(cache_key, context.clone());
+    }
+    Ok(context)
 }
 
-/// Fetch PR status for multiple branches in a single GraphQL API call.
-fn list_prs_for_branches_graphql(
+/// Fetch branch and PR status for multiple branches in one GraphQL API call.
+fn list_branch_summaries_graphql(
     repo_root: &Path,
     branches: &[String],
-) -> Result<HashMap<String, PrSummary>> {
+) -> Result<HashMap<String, BranchSummary>> {
     let (owner, repo_name, hostname) = get_repo_context(repo_root)?;
 
-    // Build query fragments with one alias per branch
     let fragments: Vec<String> = branches
         .iter()
         .enumerate()
@@ -739,7 +830,6 @@ fn list_prs_for_branches_graphql(
         })
         .collect();
 
-    // Use GraphQL variables for owner/name to avoid injection from crafted repo names
     let query = format!(
         "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{\n{}\n  }} }}",
         fragments.join("\n")
@@ -792,39 +882,60 @@ fn list_prs_for_branches_graphql(
     let data = response
         .data
         .ok_or_else(|| anyhow!("No data in GraphQL response"))?;
-    let repo = data.repository;
+    parse_branch_summaries(data.repository, branches)
+}
 
+fn parse_branch_summaries(
+    mut repo: HashMap<String, serde_json::Value>,
+    branches: &[String],
+) -> Result<HashMap<String, BranchSummary>> {
     let mut map = HashMap::new();
-    for (_alias, connection) in repo {
-        for node in connection.nodes {
-            let check_items: Vec<CheckRollupItem> = node
+
+    for (index, branch) in branches.iter().enumerate() {
+        let alias = branch_to_alias(index, branch);
+        let pr_value = repo
+            .remove(&format!("pr_{alias}"))
+            .ok_or_else(|| anyhow!("Missing PR data for branch {branch}"))?;
+        let connection: GraphqlPrConnection =
+            serde_json::from_value(pr_value).context("Failed to parse GraphQL PR data")?;
+        let ref_value = repo
+            .remove(&format!("ref_{alias}"))
+            .ok_or_else(|| anyhow!("Missing ref data for branch {branch}"))?;
+        let branch_ref: Option<GraphqlBranchRef> =
+            serde_json::from_value(ref_value).context("Failed to parse GraphQL ref data")?;
+
+        let pr = connection.nodes.into_iter().next().map(|node| {
+            let check_items = node
                 .commits
                 .nodes
                 .first()
-                .and_then(|c| c.commit.status_check_rollup.as_ref())
-                .map(|rollup| {
-                    rollup
-                        .contexts
-                        .nodes
-                        .iter()
-                        .map(|n| n.to_rollup_item())
-                        .collect()
-                })
+                .map(|node| check_items_for_commit(&node.commit))
                 .unwrap_or_default();
+            let (checks, check_meta) = aggregate_checks(&check_items);
+            PrSummary {
+                number: node.number,
+                title: node.title,
+                state: node.state,
+                is_draft: node.is_draft,
+                checks,
+                check_meta,
+                url: Some(node.url),
+            }
+        });
+        let branch_checks = branch_ref
+            .and_then(|branch_ref| branch_ref.target)
+            .and_then(|commit| summarize_checks(&check_items_for_commit(&commit)));
+        let checks = pr
+            .as_ref()
+            .and_then(|pr| {
+                pr.checks.clone().map(|state| CheckSummary {
+                    state,
+                    meta: pr.check_meta.clone(),
+                })
+            })
+            .or(branch_checks);
 
-            map.insert(node.head_ref_name, {
-                let (checks, check_meta) = aggregate_checks(&check_items);
-                PrSummary {
-                    number: node.number,
-                    title: node.title,
-                    state: node.state,
-                    is_draft: node.is_draft,
-                    checks,
-                    check_meta,
-                    url: Some(node.url),
-                }
-            });
-        }
+        map.insert(branch.clone(), BranchSummary { pr, checks });
     }
 
     Ok(map)
@@ -928,6 +1039,56 @@ pub fn save_pr_cache(statuses: &HashMap<PathBuf, HashMap<String, PrSummary>>) {
             merged.remove(repo);
         } else {
             merged.insert(repo.clone(), prs.clone());
+        }
+    }
+    let Ok(content) = serde_json::to_string(&merged) else {
+        return;
+    };
+    let _ = write_atomic(&path, content.as_bytes());
+}
+
+fn get_check_cache_path() -> Result<PathBuf> {
+    let cache_dir = crate::xdg::cache_dir()?;
+    std::fs::create_dir_all(&cache_dir)?;
+    Ok(cache_dir.join("check_status_cache.json"))
+}
+
+pub fn load_check_cache() -> HashMap<PathBuf, HashMap<String, CheckSummary>> {
+    if let Ok(path) = get_check_cache_path()
+        && path.exists()
+        && let Ok(content) = std::fs::read_to_string(&path)
+    {
+        return serde_json::from_str(&content).unwrap_or_default();
+    }
+    HashMap::new()
+}
+
+pub fn save_check_cache(statuses: &HashMap<PathBuf, HashMap<String, CheckSummary>>) {
+    let Ok(path) = get_check_cache_path() else {
+        return;
+    };
+    let lock_path = path.with_extension("json.lock");
+    let lock_file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+    let Ok(_lock) = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_file, errno)| errno)
+    else {
+        return;
+    };
+
+    let mut merged = load_check_cache();
+    for (repo, checks) in statuses {
+        if checks.is_empty() {
+            merged.remove(repo);
+        } else {
+            merged.insert(repo.clone(), checks.clone());
         }
     }
     let Ok(content) = serde_json::to_string(&merged) else {
@@ -1178,6 +1339,137 @@ mod tests {
         assert_eq!(item.conclusion, None);
         assert_eq!(item.name.as_deref(), Some("ci/circleci"));
         assert_eq!(item.started_at.as_deref(), Some("2026-03-24T14:00:00Z"));
+    }
+
+    #[test]
+    fn main_branch_checks_only_display_failures() {
+        let success = CheckSummary {
+            state: CheckState::Success,
+            meta: None,
+        };
+        let pending = CheckSummary {
+            state: CheckState::Pending {
+                passed: 1,
+                total: 2,
+            },
+            meta: None,
+        };
+        let failure = CheckSummary {
+            state: CheckState::Failure {
+                passed: 1,
+                total: 2,
+            },
+            meta: None,
+        };
+
+        assert!(!success.should_display_for_branch("main"));
+        assert!(!pending.should_display_for_branch("main"));
+        assert!(failure.should_display_for_branch("main"));
+        assert!(!success.should_display_for_branch("master"));
+        assert!(success.should_display_for_branch("feature"));
+        assert!(pending.should_display_for_branch("feature"));
+    }
+
+    #[test]
+    fn parses_branch_checks_without_pr() {
+        let repository = serde_json::from_value(serde_json::json!({
+            "pr_br0_feature": { "nodes": [] },
+            "ref_br0_feature": {
+                "target": {
+                    "statusCheckRollup": {
+                        "contexts": {
+                            "nodes": [
+                                {
+                                    "__typename": "CheckRun",
+                                    "name": "build",
+                                    "status": "COMPLETED",
+                                    "conclusion": "SUCCESS",
+                                    "startedAt": "2026-03-24T14:00:00Z"
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let summaries = parse_branch_summaries(repository, &["feature".to_string()]).unwrap();
+        let summary = summaries.get("feature").unwrap();
+
+        assert!(summary.pr.is_none());
+        assert_eq!(
+            summary.checks.as_ref().map(|checks| &checks.state),
+            Some(&CheckState::Success)
+        );
+    }
+
+    #[test]
+    fn pr_checks_take_precedence_over_branch_checks() {
+        let repository = serde_json::from_value(serde_json::json!({
+            "pr_br0_feature": {
+                "nodes": [{
+                    "number": 42,
+                    "title": "Feature",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "url": "https://github.com/owner/repo/pull/42",
+                    "commits": {
+                        "nodes": [{
+                            "commit": {
+                                "statusCheckRollup": {
+                                    "contexts": {
+                                        "nodes": [{
+                                            "__typename": "CheckRun",
+                                            "name": "test",
+                                            "status": "COMPLETED",
+                                            "conclusion": "FAILURE",
+                                            "startedAt": null
+                                        }]
+                                    }
+                                }
+                            }
+                        }]
+                    }
+                }]
+            },
+            "ref_br0_feature": {
+                "target": {
+                    "statusCheckRollup": {
+                        "contexts": {
+                            "nodes": [{
+                                "__typename": "CheckRun",
+                                "name": "build",
+                                "status": "COMPLETED",
+                                "conclusion": "SUCCESS",
+                                "startedAt": null
+                            }]
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let summaries = parse_branch_summaries(repository, &["feature".to_string()]).unwrap();
+        let summary = summaries.get("feature").unwrap();
+
+        assert_eq!(summary.pr.as_ref().map(|pr| pr.number), Some(42));
+        assert_eq!(
+            summary.checks.as_ref().map(|checks| &checks.state),
+            Some(&CheckState::Failure {
+                passed: 0,
+                total: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn branch_fragment_escapes_control_characters() {
+        let fragment = build_branch_fragment("br0", "feat/\"line\nnext");
+
+        assert!(fragment.contains("headRefName: \"feat/\\\"line\\nnext\""));
+        assert!(fragment.contains("refs/heads/feat/\\\"line\\nnext"));
     }
 
     #[test]

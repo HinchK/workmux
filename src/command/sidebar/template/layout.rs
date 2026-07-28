@@ -508,7 +508,7 @@ mod tests {
     use super::super::parser::{Token, TokenId};
     use super::*;
     use crate::git::GitStatus;
-    use crate::github::{CheckState, PrSummary};
+    use crate::github::{CheckState, CheckSummary, PrSummary};
     use crate::multiplexer::AgentPane;
     use crate::ui::theme::ThemePalette;
     use std::path::PathBuf;
@@ -555,6 +555,7 @@ mod tests {
             pane_title: None,
             git_status: None,
             pr_summary: None,
+            check_summary: None,
             is_stale: false,
             is_active: false,
             is_selected: false,
@@ -663,9 +664,31 @@ mod tests {
         }
     }
 
-    fn make_pr_context<'a>(agent: &'a AgentPane, pr: &'a PrSummary) -> RowContext<'a> {
+    fn test_checks() -> CheckSummary {
+        CheckSummary {
+            state: CheckState::Failure {
+                passed: 2,
+                total: 3,
+            },
+            meta: None,
+        }
+    }
+
+    fn successful_checks() -> CheckSummary {
+        CheckSummary {
+            state: CheckState::Success,
+            meta: None,
+        }
+    }
+
+    fn make_pr_context<'a>(
+        agent: &'a AgentPane,
+        pr: &'a PrSummary,
+        checks: &'a CheckSummary,
+    ) -> RowContext<'a> {
         let mut ctx = make_context(agent);
         ctx.pr_summary = Some(pr);
+        ctx.check_summary = Some(checks);
         ctx
     }
 
@@ -673,16 +696,57 @@ mod tests {
     fn pr_checks_renders_as_single_composite_token() {
         let agent = test_agent("pr");
         let pr = test_pr();
-        let ctx = make_pr_context(&agent, &pr);
+        let checks = test_checks();
+        let ctx = make_pr_context(&agent, &pr, &checks);
         let text = render_text(&ctx, &[Token::Field(TokenId::PrChecks)], 20);
         assert!(!text.trim().is_empty(), "{text:?}");
+    }
+
+    #[test]
+    fn pr_checks_render_without_pr_identity() {
+        let agent = test_agent("branch");
+        let checks = test_checks();
+        let mut ctx = make_context(&agent);
+        ctx.check_summary = Some(&checks);
+
+        let text = render_text(&ctx, &tokens("{pr_number} {pr_checks}"), 20);
+
+        assert!(ctx.pr_summary.is_none());
+        assert!(text.contains("2/3"), "{text:?}");
+    }
+
+    #[test]
+    fn main_branch_only_renders_failed_checks() {
+        let agent = test_agent("main");
+        let status = GitStatus {
+            branch: Some("main".to_string()),
+            ..Default::default()
+        };
+        let success = successful_checks();
+        let failure = test_checks();
+        let mut ctx = make_git_context(&agent, &status);
+
+        ctx.check_summary = Some(&success);
+        assert!(
+            render_text(&ctx, &tokens("{pr_checks}"), 20)
+                .trim()
+                .is_empty(),
+            "successful main checks should be hidden"
+        );
+
+        ctx.check_summary = Some(&failure);
+        assert!(
+            render_text(&ctx, &tokens("{pr_checks}"), 20).contains("2/3"),
+            "failed main checks should be visible"
+        );
     }
 
     #[test]
     fn pr_checks_self_fits_when_narrow() {
         let agent = test_agent("pr");
         let pr = test_pr();
-        let ctx = make_pr_context(&agent, &pr);
+        let checks = test_checks();
+        let ctx = make_pr_context(&agent, &pr, &checks);
         let wide = render_text(&ctx, &[Token::Field(TokenId::PrChecks)], 20);
         let narrow = render_text(&ctx, &[Token::Field(TokenId::PrChecks)], 1);
         assert!(wide.contains("2/3"), "{wide:?}");

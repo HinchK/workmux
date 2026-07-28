@@ -232,8 +232,9 @@ pub fn run(
     // Save git status cache before exiting
     git::save_status_cache(&app.git_statuses);
 
-    // Save PR status cache before exiting
+    // Save GitHub status caches before exiting
     github::save_pr_cache(app.pr_statuses());
+    github::save_check_cache(app.check_statuses());
 
     // Restore terminal
     disable_raw_mode()?;

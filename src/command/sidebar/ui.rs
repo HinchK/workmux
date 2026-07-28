@@ -150,20 +150,18 @@ fn apply_selection_bg(spans: &mut [Span<'static>], bg: Color) {
     }
 }
 
-/// Format PR check status for sidebar display, fitting within `available_width`.
-pub(crate) fn format_sidebar_pr_status(
-    pr: Option<&crate::github::PrSummary>,
+/// Format GitHub check status for sidebar display, fitting within `available_width`.
+pub(crate) fn format_sidebar_check_status(
+    summary: Option<&crate::github::CheckSummary>,
     palette: &ThemePalette,
     is_stale: bool,
     spinner_frame: u8,
     available_width: usize,
 ) -> (Vec<(String, Style)>, usize) {
-    let Some(pr) = pr else {
+    let Some(summary) = summary else {
         return (Vec::new(), 0);
     };
-    let Some(checks) = pr.checks.as_ref() else {
-        return (Vec::new(), 0);
-    };
+    let checks = &summary.state;
 
     let check_icons = crate::nerdfont::check_icons();
     let (icon, color, counts) = match checks {

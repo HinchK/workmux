@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::style::Style;
 
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::{AgentPane, AgentStatus};
 
 use super::DashboardTab;
@@ -496,21 +496,52 @@ impl App {
         self.pr_statuses.get(repo_root)?.get(branch)
     }
 
+    pub fn get_checks_for_agent(&self, agent: &AgentPane) -> Option<&CheckSummary> {
+        let repo_root = self.repo_roots.get(&agent.path)?;
+        let branch = self.git_statuses.get(&agent.path)?.branch.as_ref()?;
+        self.check_statuses
+            .get(repo_root)?
+            .get(branch)
+            .filter(|summary| summary.should_display_for_branch(branch))
+    }
+
+    pub fn get_checks_for_worktree(
+        &self,
+        worktree: &crate::workflow::types::WorktreeInfo,
+    ) -> Option<&CheckSummary> {
+        let project = agent::extract_project_name(&worktree.path);
+        let repo_root = self
+            .all_worktrees
+            .iter()
+            .find(|candidate| {
+                candidate.is_main && agent::extract_project_name(&candidate.path) == project
+            })
+            .map(|candidate| &candidate.path)?;
+        self.check_statuses
+            .get(repo_root)?
+            .get(&worktree.branch)
+            .filter(|summary| summary.should_display_for_branch(&worktree.branch))
+    }
+
     /// Whether a PR fetch is currently in progress
     pub fn is_pr_fetching(&self) -> bool {
         self.is_pr_fetching.load(Ordering::Relaxed)
     }
 
-    /// Whether any agent has a matching PR (for column visibility)
-    pub fn has_any_pr(&self) -> bool {
-        self.agents
-            .iter()
-            .any(|agent| self.get_pr_for_agent(agent).is_some())
+    /// Whether any agent has a matching PR or GitHub checks.
+    pub fn has_any_github_status(&self) -> bool {
+        self.agents.iter().any(|agent| {
+            self.get_pr_for_agent(agent).is_some() || self.get_checks_for_agent(agent).is_some()
+        })
     }
 
     /// Get PR statuses for caching
     pub fn pr_statuses(&self) -> &HashMap<PathBuf, HashMap<String, PrSummary>> {
         &self.pr_statuses
+    }
+
+    pub fn check_statuses(&self) -> &HashMap<PathBuf, HashMap<String, CheckSummary>> {
+        &self.check_statuses
     }
 
     /// Open the PR associated with the selected agent or worktree in the browser.

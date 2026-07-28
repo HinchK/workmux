@@ -1,4 +1,4 @@
-//! Background thread spawning for git status and PR status fetches.
+//! Background thread spawning for git and GitHub status fetches.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -51,7 +51,7 @@ impl App {
         });
     }
 
-    /// Spawn a background thread to fetch PR status for all repos.
+    /// Spawn a background thread to fetch GitHub status for all repos.
     /// Returns true if a fetch was started, false if one is already in progress.
     pub(super) fn spawn_pr_status_fetch(&self) -> bool {
         // Skip if already fetching
@@ -74,9 +74,6 @@ impl App {
             let Some(ref branch) = status.branch else {
                 continue;
             };
-            if branch == "main" || branch == "master" {
-                continue;
-            }
             if let Some(repo_root) = self.repo_roots.get(&agent.path) {
                 repo_branches
                     .entry(repo_root.clone())
@@ -97,9 +94,6 @@ impl App {
             })
             .collect();
         for wt in &self.all_worktrees {
-            if wt.is_main || wt.branch == "main" || wt.branch == "master" {
-                continue;
-            }
             let project = agent::extract_project_name(&wt.path);
             if let Some(repo_root) = main_paths.get(&project) {
                 repo_branches
@@ -168,13 +162,13 @@ impl App {
                             else {
                                 break;
                             };
-                            match crate::github::list_prs_for_branches(&repo_root, &branches) {
-                                Ok(prs) => {
-                                    let _ = tx.send(AppEvent::PrStatus(repo_root, prs));
+                            match crate::github::list_branch_summaries(&repo_root, &branches) {
+                                Ok(summaries) => {
+                                    let _ = tx.send(AppEvent::GithubStatus(repo_root, summaries));
                                 }
                                 Err(e) => {
                                     tracing::warn!(
-                                        "Failed to fetch PRs for {:?}: {}",
+                                        "Failed to fetch GitHub status for {:?}: {}",
                                         repo_root,
                                         e
                                     );

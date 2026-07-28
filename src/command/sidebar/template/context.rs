@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::agent_display::{extract_project_name, extract_worktree_name, sanitize_pane_title};
 use crate::agent_identity::AgentKind;
 use crate::git::GitStatus;
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::agent::resolve_profile_for_display;
 use crate::multiplexer::{AgentPane, AgentStatus};
 use crate::ui::theme::ThemePalette;
@@ -34,6 +34,8 @@ pub struct RowContext<'a> {
     pub git_status: Option<&'a GitStatus>,
     /// PR summary for this agent's path.
     pub pr_summary: Option<&'a PrSummary>,
+    /// GitHub check summary for this agent's path.
+    pub check_summary: Option<&'a CheckSummary>,
     /// Row flags.
     pub is_stale: bool,
     pub is_active: bool,
@@ -91,6 +93,7 @@ impl<'a> RowContext<'a> {
         let pane_title = build_pane_title(agent, &primary, &secondary, app.window_prefix());
         let git_status = app.git_statuses.get(&agent.path);
         let pr_summary = app.pr_statuses.get(&agent.path);
+        let check_summary = app.check_statuses.get(&agent.path);
         let kind =
             effective_agent_kind(agent.agent_kind.as_deref(), agent.agent_command.as_deref());
         let agent_icon = resolve_agent_icon(kind, &app.agent_icons);
@@ -108,6 +111,7 @@ impl<'a> RowContext<'a> {
             pane_title,
             git_status,
             pr_summary,
+            check_summary,
             is_stale,
             is_active,
             is_selected,
@@ -261,8 +265,12 @@ impl<'a> RowContext<'a> {
 
     /// Render PR checks with a given allocated width, returning styled spans and actual width.
     pub fn pr_check_spans(&self, allocated_width: usize) -> (Vec<(String, Style)>, usize) {
-        super::super::ui::format_sidebar_pr_status(
-            self.pr_summary,
+        let branch = self.git_status.and_then(|status| status.branch.as_deref());
+        let check_summary = self.check_summary.filter(|summary| {
+            branch.is_none_or(|branch| summary.should_display_for_branch(branch))
+        });
+        super::super::ui::format_sidebar_check_status(
+            check_summary,
             self.palette,
             self.is_stale,
             self.spinner_frame,
@@ -586,13 +594,14 @@ mod tests {
         git: Option<&'a GitStatus>,
         idx: usize,
     ) -> RowContext<'a> {
-        make_context_with_pr(agent, git, None, idx)
+        make_context_with_pr(agent, git, None, None, idx)
     }
 
     fn make_context_with_pr<'a>(
         agent: &'a AgentPane,
         git: Option<&'a GitStatus>,
         pr: Option<&'a PrSummary>,
+        checks: Option<&'a CheckSummary>,
         idx: usize,
     ) -> RowContext<'a> {
         RowContext {
@@ -606,6 +615,7 @@ mod tests {
             pane_title: None,
             git_status: git,
             pr_summary: pr,
+            check_summary: checks,
             is_stale: false,
             is_active: false,
             is_selected: false,
@@ -784,7 +794,11 @@ mod tests {
             check_meta: None,
             url: None,
         };
-        let ctx = make_context_with_pr(&agent, None, Some(&pr), 0);
+        let checks = CheckSummary {
+            state: CheckState::Success,
+            meta: None,
+        };
+        let ctx = make_context_with_pr(&agent, None, Some(&pr), Some(&checks), 0);
         assert_eq!(ctx.resolve(TokenId::PrNumber), "#123");
         assert_eq!(ctx.resolve(TokenId::PrChecks), "");
         assert!(ctx.natural_width(TokenId::PrChecks) > 0);

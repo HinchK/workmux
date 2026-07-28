@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{SidebarPosition, StatusIcons};
 use crate::git::GitStatus;
-use crate::github::PrSummary;
+use crate::github::{CheckSummary, PrSummary};
 use crate::multiplexer::{AgentPane, AgentStatus};
 
 use super::app::{SidebarFilterMode, SidebarLayoutMode};
@@ -16,6 +16,12 @@ use super::app::{SidebarFilterMode, SidebarLayoutMode};
 pub(crate) struct PrPathEntry {
     pub branch: String,
     pub summary: PrSummary,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CheckPathEntry {
+    pub branch: String,
+    pub summary: CheckSummary,
 }
 
 /// A complete sidebar state snapshot, pushed from daemon to clients.
@@ -37,6 +43,9 @@ pub struct SidebarSnapshot {
     /// PR summary per worktree path (computed by daemon background worker).
     #[serde(default)]
     pub pr_statuses: HashMap<PathBuf, PrSummary>,
+    /// GitHub check summary per worktree path (computed by daemon background worker).
+    #[serde(default)]
+    pub check_statuses: HashMap<PathBuf, CheckSummary>,
     /// Pane IDs of agents detected as interrupted (working but no pane output change).
     #[serde(default)]
     pub interrupted_pane_ids: HashSet<String>,
@@ -65,6 +74,7 @@ pub fn build_snapshot(
     status_icons: &StatusIcons,
     git_statuses: HashMap<PathBuf, GitStatus>,
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
+    check_statuses: HashMap<PathBuf, CheckPathEntry>,
     sleeping_pane_ids: &HashSet<String>,
 ) -> SidebarSnapshot {
     let done_icon = status_icons.done();
@@ -137,6 +147,18 @@ pub fn build_snapshot(
         })
         .collect();
 
+    let check_statuses = check_statuses
+        .into_iter()
+        .filter_map(|(path, entry)| {
+            let branch = git_statuses.get(&path)?.branch.as_deref()?;
+            if live_paths.contains(&path) && branch == entry.branch {
+                Some((path, entry.summary))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     SidebarSnapshot {
         position,
         layout_mode,
@@ -146,6 +168,7 @@ pub fn build_snapshot(
         window_pane_counts,
         git_statuses,
         pr_statuses,
+        check_statuses,
         interrupted_pane_ids: HashSet::new(),
         sleeping_pane_ids: live_sleeping,
         agents,
@@ -193,10 +216,29 @@ mod tests {
         }
     }
 
+    fn check_entry(branch: &str) -> CheckPathEntry {
+        CheckPathEntry {
+            branch: branch.to_string(),
+            summary: CheckSummary {
+                state: crate::github::CheckState::Success,
+                meta: None,
+            },
+        }
+    }
+
     fn build(
         agents: Vec<AgentPane>,
         git_statuses: HashMap<PathBuf, GitStatus>,
         pr_statuses: HashMap<PathBuf, PrPathEntry>,
+    ) -> SidebarSnapshot {
+        build_with_checks(agents, git_statuses, pr_statuses, HashMap::new())
+    }
+
+    fn build_with_checks(
+        agents: Vec<AgentPane>,
+        git_statuses: HashMap<PathBuf, GitStatus>,
+        pr_statuses: HashMap<PathBuf, PrPathEntry>,
+        check_statuses: HashMap<PathBuf, CheckPathEntry>,
     ) -> SidebarSnapshot {
         build_snapshot(
             agents,
@@ -211,6 +253,7 @@ mod tests {
             &StatusIcons::default(),
             git_statuses,
             pr_statuses,
+            check_statuses,
             &HashSet::new(),
         )
     }
@@ -231,6 +274,43 @@ mod tests {
         );
 
         assert!(!snapshot.pr_statuses.contains_key(&path));
+    }
+
+    #[test]
+    fn check_statuses_include_main_branch_paths() {
+        let path = PathBuf::from("/repo");
+        let git = GitStatus {
+            branch: Some("main".to_string()),
+            base_branch: "main".to_string(),
+            ..Default::default()
+        };
+
+        let snapshot = build_with_checks(
+            vec![agent("/repo")],
+            HashMap::from([(path.clone(), git)]),
+            HashMap::new(),
+            HashMap::from([(path.clone(), check_entry("main"))]),
+        );
+
+        assert!(snapshot.check_statuses.contains_key(&path));
+    }
+
+    #[test]
+    fn check_statuses_exclude_mismatched_branch() {
+        let path = PathBuf::from("/repo");
+        let git = GitStatus {
+            branch: Some("feature-b".to_string()),
+            ..Default::default()
+        };
+
+        let snapshot = build_with_checks(
+            vec![agent("/repo")],
+            HashMap::from([(path.clone(), git)]),
+            HashMap::new(),
+            HashMap::from([(path.clone(), check_entry("feature-a"))]),
+        );
+
+        assert!(!snapshot.check_statuses.contains_key(&path));
     }
 
     #[test]

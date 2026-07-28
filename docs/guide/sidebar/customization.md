@@ -17,13 +17,13 @@ sidebar:
     tiles:
       - "{primary} {pane_suffix} {fill} {elapsed}"
       - "{secondary} {fill} {git_stats}"
-      - "{pane_title}"
+      - "{pane_title} {fill} {pr_checks}"
 
     # Horizontal mode: one string per visual line in each top bar chip.
     horizontal:
       - "{status_icon} {primary} {pane_suffix} {fill} {elapsed}"
       - "{secondary} {fill} {git_stats}"
-      - "{pane_title}"
+      - "{pane_title} {fill} {pr_checks}"
 ```
 
 The values shown above are also the built-in defaults, so leaving these keys
@@ -53,7 +53,7 @@ sidebars without a restart.
 | `{git_stats}`    | Composite git diff stats: committed (`+1278 -400`), pen icon, uncommitted (`+21`). Self-degrades to fit the space it gets. |
 | `{git_branch}`   | Current branch name. Empty when detached HEAD or git status unavailable.                                                   |
 | `{pr_number}`    | Pull request number as `#123`. Empty when the current branch has no matching PR.                                           |
-| `{pr_checks}`    | Pull request check status icon, with counts when space allows. Empty when no PR or no checks are known.                    |
+| `{pr_checks}`    | GitHub check status for the current remote branch, with counts when space allows. Empty when no checks are known.          |
 | `{git_ahead}`    | Commits ahead of upstream as `↑N` when N greater than 0. Empty when 0 or no upstream.                                      |
 | `{git_behind}`   | Commits behind upstream as `↓N` when N greater than 0. Empty when 0 or no upstream.                                        |
 | `{git_dirty}`    | Diff glyph when the working tree is dirty. Empty when clean.                                                               |
@@ -68,11 +68,15 @@ wrap them with another `↑` / `↓` literal in your template, otherwise a stray
 glyph would remain when the count is zero. The same applies to `{git_dirty}`
 and `{git_conflict}`, which are self-contained glyph indicators.
 
-`{pr_number}` and `{pr_checks}` are populated from the current git branch's
-matching GitHub pull request. They render empty on `main`/`master`, when the
-branch has no PR, when git status is unavailable, or while PR data has not been
-fetched yet. Check status shows an icon and, when space allows, passed/total
-counts for pending or failing checks.
+`{pr_number}` is populated from the current git branch's matching GitHub pull
+request. It renders empty on `main`/`master`, when the branch has no PR, when git
+status is unavailable, or while PR data has not been fetched yet.
+
+`{pr_checks}` is populated from the matching pull request's head commit when a PR
+exists, then from the remote branch tip when the branch has no PR check data.
+On `main` and `master`, only failing checks render. Local-only branches and
+commits that have not been pushed render empty. Check status shows an icon and,
+when space allows, passed/total counts for pending or failing checks.
 
 Unknown tokens or unbalanced braces cause that template section to be rejected
 and the previous valid section (or the built-in default) is kept. The sidebar
@@ -127,7 +131,7 @@ sidebar:
     tiles:
       - "#[fg=cyan,bold]{primary}#[default] {pane_suffix} {fill} {elapsed}"
       - "{secondary} {fill} #[fg=green]{git_stats}#[default]"
-      - "{pane_title}"
+      - "{pane_title} {fill} {pr_checks}"
 ```
 
 Supported attributes are `fg=`, `bg=`, `bold`, `dim`, `italics`,
@@ -259,7 +263,7 @@ sidebar:
     tiles:
       - "{agent_icon} {primary} {pane_suffix} {fill} {elapsed}"
       - "{secondary} {fill} {git_stats}"
-      - "{pane_title}"
+      - "{pane_title} {fill} {pr_checks}"
 ```
 
 Configure only two tile lines and show git stats inline on line one:
@@ -272,7 +276,7 @@ sidebar:
       - "{secondary} {fill} {elapsed}"
 ```
 
-Show pull request number and check status in tile mode:
+Show pull request number and GitHub check status in tile mode:
 
 ```yaml
 sidebar:

@@ -22,6 +22,11 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## Unreleased
+
+- Show GitHub checks for remote branches without pull requests in the sidebar and dashboard, with check indicators in the default tile and horizontal sidebar layouts and failure-only indicators on main branches.
+- Batch sidebar GitHub polling across linked worktrees and reuse repository metadata so each repository stays within one status request per polling interval.
+
 ## v0.1.231 (2026-07-28)
 
 - Clear acknowledged waiting or completed statuses from the sidebar immediately when you focus an agent pane.
