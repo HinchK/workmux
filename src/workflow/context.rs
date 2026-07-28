@@ -55,6 +55,13 @@ pub fn resolve_configured_base_branch(
     }
 }
 
+fn paths_identify_same_worktree(path: &Path, main_worktree_root: &Path) -> bool {
+    match (path.canonicalize(), main_worktree_root.canonicalize()) {
+        (Ok(canonical_path), Ok(canonical_main)) => canonical_path == canonical_main,
+        _ => path == main_worktree_root,
+    }
+}
+
 impl WorkflowContext {
     /// Create a new workflow context
     ///
@@ -128,6 +135,11 @@ impl WorkflowContext {
         })
     }
 
+    /// Return whether a path identifies the main worktree.
+    pub fn is_main_worktree(&self, path: &Path) -> bool {
+        paths_identify_same_worktree(path, &self.main_worktree_root)
+    }
+
     /// Ensure the terminal multiplexer is running, returning an error if not
     ///
     /// Call this at the start of workflows that require a multiplexer.
@@ -165,5 +177,42 @@ impl WorkflowContext {
                 self.main_worktree_root.display()
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paths_identify_same_worktree;
+    use tempfile::tempdir;
+
+    #[test]
+    fn main_worktree_path_comparison_handles_existing_and_missing_paths() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let sibling = temp.path().join("sibling");
+        std::fs::create_dir(&main).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+
+        assert!(paths_identify_same_worktree(&main, &main));
+        assert!(!paths_identify_same_worktree(&sibling, &main));
+
+        let missing = temp.path().join("missing");
+        assert!(paths_identify_same_worktree(&missing, &missing));
+        assert!(!paths_identify_same_worktree(
+            &temp.path().join("other-missing"),
+            &missing
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn main_worktree_path_comparison_resolves_symlinks() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&main).unwrap();
+        std::os::unix::fs::symlink(&main, &alias).unwrap();
+
+        assert!(paths_identify_same_worktree(&alias, &main));
     }
 }

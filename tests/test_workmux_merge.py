@@ -84,6 +84,75 @@ def test_merge_from_within_worktree_succeeds(
     assert branch_name not in branch_list_result.stdout
 
 
+def test_merge_refuses_main_worktree_as_source(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    """Verifies merge never treats the main worktree as a disposable source."""
+    env = mux_server
+    branch_name = "feature-in-main-worktree"
+    write_workmux_config(repo_path, env=env)
+    env.run_command(["git", "switch", "-c", branch_name], cwd=repo_path)
+    create_commit(env, repo_path, "feat: work in main worktree")
+
+    main_before = env.run_command(
+        ["git", "rev-parse", "main"], cwd=repo_path
+    ).stdout.strip()
+    feature_before = env.run_command(
+        ["git", "rev-parse", branch_name], cwd=repo_path
+    ).stdout.strip()
+
+    def assert_main_worktree_unchanged() -> None:
+        assert repo_path.is_dir()
+        assert (repo_path / ".git").is_dir()
+        assert (
+            env.run_command(
+                ["git", "branch", "--show-current"], cwd=repo_path
+            ).stdout.strip()
+            == branch_name
+        )
+        assert (
+            env.run_command(["git", "rev-parse", "main"], cwd=repo_path).stdout.strip()
+            == main_before
+        )
+        assert (
+            env.run_command(
+                ["git", "rev-parse", branch_name], cwd=repo_path
+            ).stdout.strip()
+            == feature_before
+        )
+        assert not list(repo_path.parent.glob(f".workmux_trash_{repo_path.name}_*"))
+
+    invocations = [
+        {"branch_name": None},
+        {"branch_name": None, "keep": True},
+        {"branch_name": repo_path.name},
+        {"branch_name": branch_name},
+    ]
+    for invocation in invocations:
+        run_workmux_merge(
+            env,
+            workmux_exe_path,
+            repo_path,
+            expect_fail=True,
+            **invocation,
+        )
+        assert_main_worktree_unchanged()
+
+    linked_worktree = repo_path.parent / "observer-worktree"
+    env.run_command(
+        ["git", "worktree", "add", "-b", "observer", str(linked_worktree), "main"],
+        cwd=repo_path,
+    )
+    result = env.run_command(
+        [str(workmux_exe_path), "merge", repo_path.name],
+        check=False,
+        cwd=linked_worktree,
+    )
+    assert result.returncode != 0
+    assert "checked out in the main worktree" in result.stderr
+    assert_main_worktree_unchanged()
+
+
 def test_merge_rebase_strategy_succeeds(
     mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):

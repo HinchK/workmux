@@ -97,23 +97,7 @@ fn remove_with_hook_output(
     let mode = get_worktree_mode(actual_handle);
 
     // Safety Check: Prevent deleting the main worktree itself, regardless of branch.
-    let is_main_worktree = match (
-        worktree_path.canonicalize(),
-        context.main_worktree_root.canonicalize(),
-    ) {
-        (Ok(canon_wt_path), Ok(canon_main_path)) => {
-            // Best case: both paths exist and can be resolved. This is the most reliable check.
-            canon_wt_path == canon_main_path
-        }
-        _ => {
-            // Fallback: If canonicalization fails on either path (e.g., directory was
-            // manually removed, broken symlink), compare the raw paths provided by git.
-            // This is a critical safety net.
-            worktree_path == context.main_worktree_root
-        }
-    };
-
-    if is_main_worktree {
+    if context.is_main_worktree(&worktree_path) {
         return Err(anyhow!(
             "Cannot remove branch '{}' because it is checked out in the main worktree at '{}'. \
             Switch the main worktree to a different branch first, or create a linked worktree for '{}'.",

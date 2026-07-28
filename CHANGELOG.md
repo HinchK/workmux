@@ -22,6 +22,10 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## Unreleased
+
+- Prevent `workmux merge` from deleting the main worktree when its branch is selected as the merge source. ([#204](https://github.com/raine/workmux/issues/204))
+
 ## v0.1.229 (2026-07-26)
 
 - Run Docker or Podman sandboxes with an alternative OCI runtime such as Kata Containers for hardware-backed VM isolation by setting `sandbox.container.oci_runtime` in the global config. ([#196](https://github.com/raine/workmux/issues/196)) ([#198](https://github.com/raine/workmux/pull/198))

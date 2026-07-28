@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use regex::Regex;
 use std::path::Path;
 use std::time::SystemTime;
@@ -226,6 +226,13 @@ pub fn cleanup(
     no_hooks: bool,
     show_hook_output: bool,
 ) -> Result<CleanupResult> {
+    if context.is_main_worktree(worktree_path) {
+        return Err(anyhow!(
+            "Refusing to clean up the main worktree at '{}'",
+            context.main_worktree_root.display()
+        ));
+    }
+
     // Determine if this worktree was created as a session or window
     let mode = get_worktree_mode(handle);
     let target_name = if mode == MuxMode::Session {

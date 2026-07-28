@@ -45,6 +45,16 @@ pub fn merge(
         )
     })?;
 
+    if context.is_main_worktree(&worktree_path) {
+        return Err(anyhow!(
+            "Cannot merge branch '{}' because it is checked out in the main worktree at '{}'. \
+            Create a linked worktree for '{}' first.",
+            branch_to_merge,
+            context.main_worktree_root.display(),
+            branch_to_merge
+        ));
+    }
+
     // The handle is the basename of the worktree directory (used for tmux operations)
     let handle = worktree_path
         .file_name()
