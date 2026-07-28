@@ -22,7 +22,7 @@ description: Release notes and version history for workmux
 
 # Changelog
 
-## Unreleased
+## v0.1.230 (2026-07-28)
 
 - Prevent `workmux merge` from deleting the main worktree when its branch is selected as the merge source. ([#204](https://github.com/raine/workmux/issues/204))
 
