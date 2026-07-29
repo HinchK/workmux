@@ -44,10 +44,13 @@ jobs:
           python-version: '3.13'
           cache: pip
           cache-dependency-path: tests/requirements.txt
-      - name: Install tmux, just, and Python dependencies
+      - uses: hustcer/setup-nu@v3
+        with:
+          version: '0.114.1'
+      - name: Install shells, tmux, just, and Python dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes tmux
+          sudo apt-get install --yes fish tmux zsh
           cargo install just --locked
           python -m venv tests/venv
           tests/venv/bin/pip install -r tests/requirements.txt
