@@ -49,6 +49,10 @@ build:
 install:
     cargo install --offline --path . --locked
 
+# Install release binary globally from GitHub Actions
+install-ci:
+    scripts/install-ci
+
 # Install release binary globally from GitHub releases
 install-release:
     #!/usr/bin/env bash
