@@ -411,6 +411,47 @@ pub fn calc_column_width(items: &[String], min: usize, max: usize, padding: usiz
         .saturating_add(padding) as u16
 }
 
+/// Color elapsed time by age without using the destructive-action color.
+pub(crate) fn elapsed_time_style(secs: Option<u64>, palette: &ThemePalette) -> Style {
+    let color = match secs {
+        None => palette.dimmed,
+        Some(secs) if secs < 5 * 60 => palette.success,
+        Some(secs) if secs < 60 * 60 => palette.warning,
+        Some(_) => palette.accent,
+    };
+    Style::default().fg(color)
+}
+
+/// Render zero-valued clock units with less emphasis than active units.
+pub(crate) fn elapsed_time_line(
+    duration: String,
+    secs: Option<u64>,
+    palette: &ThemePalette,
+) -> Line<'static> {
+    let base = elapsed_time_style(secs, palette);
+    let inactive = base.add_modifier(Modifier::DIM);
+    let mut parts = duration.split(':');
+    let (Some(hours), Some(minutes), Some(seconds), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Line::styled(duration, inactive);
+    };
+
+    Line::from(vec![
+        Span::styled(
+            hours.to_string(),
+            if hours == "00" { inactive } else { base },
+        ),
+        Span::styled(":", inactive),
+        Span::styled(
+            minutes.to_string(),
+            if minutes == "00" { inactive } else { base },
+        ),
+        Span::styled(":", inactive),
+        Span::styled(seconds.to_string(), base),
+    ])
+}
+
 /// Create a style for a table row based on whether it's the current or main worktree.
 pub fn make_row_style(is_current: bool, is_main: bool, palette: &ThemePalette) -> Style {
     if is_current {
@@ -419,5 +460,43 @@ pub fn make_row_style(is_current: bool, is_main: bool, palette: &ThemePalette) -
         Style::default().fg(palette.dimmed)
     } else {
         Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ThemeMode, ThemeScheme};
+
+    #[test]
+    fn elapsed_time_dims_inactive_clock_units() {
+        let palette = ThemePalette::for_scheme(ThemeScheme::Default, ThemeMode::Dark);
+        let line = elapsed_time_line("00:01:11".to_string(), Some(71), &palette);
+
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert!(!line.spans[2].style.add_modifier.contains(Modifier::DIM));
+        assert!(!line.spans[4].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn elapsed_time_color_progresses_with_age() {
+        let palette = ThemePalette::for_scheme(ThemeScheme::Default, ThemeMode::Dark);
+        assert_eq!(elapsed_time_style(None, &palette).fg, Some(palette.dimmed));
+        assert_eq!(
+            elapsed_time_style(Some(5 * 60 - 1), &palette).fg,
+            Some(palette.success)
+        );
+        assert_eq!(
+            elapsed_time_style(Some(5 * 60), &palette).fg,
+            Some(palette.warning)
+        );
+        assert_eq!(
+            elapsed_time_style(Some(60 * 60 - 1), &palette).fg,
+            Some(palette.warning)
+        );
+        assert_eq!(
+            elapsed_time_style(Some(60 * 60), &palette).fg,
+            Some(palette.accent)
+        );
     }
 }

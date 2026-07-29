@@ -230,11 +230,15 @@ pub fn render_worktree_table(f: &mut Frame, app: &mut App, area: Rect) {
     ]);
     constraints.push(Constraint::Fill(1)); // Agent
 
+    let highlight_symbol = Text::from(Line::from(Span::styled(
+        "▌ ",
+        Style::default().fg(app.palette.info),
+    )));
     let table = Table::new(rows, constraints)
         .header(header)
         .block(Block::default())
         .row_highlight_style(Style::default().bg(app.palette.highlight_row_bg))
-        .highlight_symbol("> ");
+        .highlight_symbol(highlight_symbol);
 
     f.render_stateful_widget(table, area, &mut app.worktree_table_state);
 }

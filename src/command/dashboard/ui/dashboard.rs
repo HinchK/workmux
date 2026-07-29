@@ -236,10 +236,11 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 })
                 .unwrap_or_default();
             let status_spans = app.get_status_display(agent);
-            let duration = app
-                .get_elapsed(agent)
+            let elapsed = app.get_elapsed(agent);
+            let duration = elapsed
                 .map(|d| app.format_duration(d))
                 .unwrap_or_else(|| "-".to_string());
+            let duration_line = format::elapsed_time_line(duration, elapsed, &app.palette);
 
             // Get git status for this worktree (may be None if not yet fetched)
             let git_status = app.git_statuses.get(&agent.path);
@@ -269,7 +270,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 git_spans,
                 pr_spans,
                 status_spans,
-                duration,
+                duration_line,
                 title,
             )
         })
@@ -332,7 +333,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 git_spans,
                 pr_spans,
                 status_spans,
-                duration,
+                duration_line,
                 title,
             )| {
                 let worktree_style = format::make_row_style(is_current, is_main, &app.palette);
@@ -366,7 +367,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
                 let status_line = format::spans_to_line(status_spans);
                 cells.extend(vec![
                     Cell::from(status_line),
-                    Cell::from(duration),
+                    Cell::from(duration_line),
                     Cell::from(title),
                 ]);
 
@@ -399,11 +400,15 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Fill(1),    // Title: takes remaining space
     ]);
 
+    let highlight_symbol = Text::from(Line::from(Span::styled(
+        "▌ ",
+        Style::default().fg(app.palette.info),
+    )));
     let table = Table::new(rows, constraints)
         .header(header)
         .block(Block::default())
         .row_highlight_style(Style::default().bg(app.palette.highlight_row_bg))
-        .highlight_symbol("> ");
+        .highlight_symbol(highlight_symbol);
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
