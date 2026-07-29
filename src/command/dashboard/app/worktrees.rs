@@ -299,6 +299,18 @@ impl App {
         self.update_worktree_preview();
     }
 
+    pub fn select_worktree(&mut self, index: usize) {
+        if index >= self.worktrees.len() {
+            return;
+        }
+        self.worktree_table_state.select(Some(index));
+        self.selected_worktree_path = self
+            .worktrees
+            .get(index)
+            .map(|worktree| worktree.path.clone());
+        self.update_worktree_preview();
+    }
+
     pub fn worktree_next(&mut self) {
         if self.worktrees.is_empty() {
             return;
@@ -309,9 +321,7 @@ impl App {
         } else {
             i + 1
         };
-        self.worktree_table_state.select(Some(next));
-        self.selected_worktree_path = self.worktrees.get(next).map(|w| w.path.clone());
-        self.update_worktree_preview();
+        self.select_worktree(next);
     }
 
     pub fn worktree_previous(&mut self) {
@@ -324,9 +334,7 @@ impl App {
         } else {
             i - 1
         };
-        self.worktree_table_state.select(Some(prev));
-        self.selected_worktree_path = self.worktrees.get(prev).map(|w| w.path.clone());
-        self.update_worktree_preview();
+        self.select_worktree(prev);
     }
 
     pub fn worktree_jump_to_index(&mut self, index: usize) {

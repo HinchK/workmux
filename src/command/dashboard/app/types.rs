@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::git::GitStatus;
 use crate::github::{BranchSummary, PrListEntry};
@@ -33,6 +34,7 @@ pub enum AppEvent {
 }
 
 use clap::ValueEnum;
+use ratatui::layout::Rect;
 
 /// Which tab is active in the dashboard
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -40,6 +42,18 @@ pub enum DashboardTab {
     #[default]
     Agents,
     Worktrees,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MouseRowId {
+    Agent(String),
+    Worktree(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub struct MouseRowClick {
+    pub id: MouseRowId,
+    pub at: Instant,
 }
 
 /// Current view mode of the dashboard
@@ -425,6 +439,80 @@ impl CommandPaletteState {
             .collect();
         scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
         scored.into_iter().map(|(i, _)| i).collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowContextKind {
+    Agent,
+    Worktree,
+}
+
+pub struct RowContextMenu {
+    pub kind: RowContextKind,
+    pub commands: Vec<PaletteCommand>,
+    pub cursor: usize,
+    pub column: u16,
+    pub row: u16,
+}
+
+impl RowContextMenu {
+    pub fn move_next(&mut self) {
+        if !self.commands.is_empty() {
+            self.cursor = (self.cursor + 1).min(self.commands.len() - 1);
+        }
+    }
+
+    pub fn move_previous(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn selected_action(&self) -> Option<super::super::actions::Action> {
+        self.commands
+            .get(self.cursor)
+            .map(|command| command.action.clone())
+    }
+
+    pub fn action_for_hint(&self, hint: &str) -> Option<super::super::actions::Action> {
+        self.commands
+            .iter()
+            .find(|command| command.key_hint == hint)
+            .map(|command| command.action.clone())
+    }
+
+    pub fn area(&self, terminal: Rect) -> Rect {
+        let content_width = self
+            .commands
+            .iter()
+            .map(|command| 4 + command.label.len() + command.key_hint.len())
+            .max()
+            .unwrap_or(20);
+        let width = (content_width as u16 + 2).clamp(24, 48).min(terminal.width);
+        let height = (self.commands.len() as u16 + 2).min(terminal.height);
+        let x = self
+            .column
+            .min(terminal.right().saturating_sub(width))
+            .max(terminal.x);
+        let y = self
+            .row
+            .min(terminal.bottom().saturating_sub(height))
+            .max(terminal.y);
+        Rect::new(x, y, width, height)
+    }
+
+    pub fn item_at(&self, terminal: Rect, column: u16, row: u16) -> Option<usize> {
+        let area = self.area(terminal);
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        if column < inner.x || column >= inner.right() || row < inner.y || row >= inner.bottom() {
+            return None;
+        }
+        let index = usize::from(row - inner.y);
+        (index < self.commands.len()).then_some(index)
     }
 }
 

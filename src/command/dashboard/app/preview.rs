@@ -41,6 +41,17 @@ impl App {
             .and_then(|pane_id| self.mux.capture_pane(pane_id, PREVIEW_LINES));
     }
 
+    pub fn scroll_preview_lines(&mut self, delta: isize) {
+        let max_scroll = self.preview_line_count.saturating_sub(self.preview_height);
+        let current = self.preview_scroll.unwrap_or(max_scroll);
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs() as u16)
+        } else {
+            current.saturating_add(delta as u16).min(max_scroll)
+        };
+        self.preview_scroll = (next < max_scroll).then_some(next);
+    }
+
     /// Scroll preview up (toward older content). Returns the amount to scroll by.
     pub fn scroll_preview_up(&mut self, visible_height: u16, total_lines: u16) {
         let max_scroll = total_lines.saturating_sub(visible_height);

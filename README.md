@@ -1634,6 +1634,19 @@ Useful for monitoring multiple parallel agents and quickly jumping between them.
 | `:`       | Open command palette                    |
 | `q`/`Esc` | Quit                                    |
 
+#### Mouse controls
+
+The dashboard captures mouse input while it is open. Click the **Agents** and
+**Worktrees** tabs to switch views, click a table row to select it, and
+double-click a row to jump to its agent or worktree. Right-click a row to open
+its action menu, then click an action or use `j`/`k` and `Enter`. Click a footer
+command to run it. Use the mouse wheel over a table to change the selection
+without wrapping, or over the live preview to scroll its output.
+
+In diff view, use the wheel to scroll and click a file in the sidebar to jump to
+its diff. Visible diff and patch footer commands are clickable. Mouse capture is
+released when the dashboard exits.
+
 #### Live preview
 
 The bottom half shows a live preview of the selected agent's terminal output.

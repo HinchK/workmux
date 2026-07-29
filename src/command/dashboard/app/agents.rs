@@ -204,6 +204,15 @@ impl App {
         self.refresh();
     }
 
+    pub fn select_agent(&mut self, index: usize) {
+        if index >= self.agents.len() {
+            return;
+        }
+        self.table_state.select(Some(index));
+        self.selected_pane_id = self.agents.get(index).map(|agent| agent.pane_id.clone());
+        self.update_preview();
+    }
+
     pub fn next(&mut self) {
         if self.agents.is_empty() {
             return;
@@ -218,9 +227,7 @@ impl App {
             }
             None => 0,
         };
-        self.table_state.select(Some(i));
-        self.selected_pane_id = self.agents.get(i).map(|a| a.pane_id.clone());
-        self.update_preview();
+        self.select_agent(i);
     }
 
     pub fn previous(&mut self) {
@@ -237,9 +244,7 @@ impl App {
             }
             None => 0,
         };
-        self.table_state.select(Some(i));
-        self.selected_pane_id = self.agents.get(i).map(|a| a.pane_id.clone());
-        self.update_preview();
+        self.select_agent(i);
     }
 
     /// Switch to a pane and track the previous pane for toggle feature.

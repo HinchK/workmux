@@ -11,6 +11,7 @@ mod worktrees;
 pub use types::*;
 
 use anyhow::Result;
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,6 +37,8 @@ use super::sort::{SortMode, WorktreeSortMode};
 
 /// App state for the TUI
 pub struct App {
+    /// Terminal area used to route mouse coordinates against the rendered frame.
+    pub terminal_area: Rect,
     /// The multiplexer backend
     pub mux: Arc<dyn Multiplexer>,
     pub agents: Vec<AgentPane>,
@@ -157,6 +160,10 @@ pub struct App {
     pub interrupted_pane_ids: std::collections::HashSet<String>,
     /// Pending command palette state (shown in command palette modal)
     pub pending_command_palette: Option<CommandPaletteState>,
+    /// Context actions opened for an agent or worktree row.
+    pub pending_row_context: Option<RowContextMenu>,
+    /// Last selected row click used to recognize double-click activation.
+    pub last_mouse_row_click: Option<MouseRowClick>,
 }
 
 impl App {
@@ -205,6 +212,7 @@ impl App {
         let last_pane_id = load_last_pane_id();
 
         let mut app = Self {
+            terminal_area: Rect::default(),
             mux,
             agents: Vec::new(),
             all_agents: Vec::new(),
@@ -271,6 +279,8 @@ impl App {
             show_sidebar_tip: crate::tips::should_show_sidebar_tip(),
             interrupted_pane_ids: std::collections::HashSet::new(),
             pending_command_palette: None,
+            pending_row_context: None,
+            last_mouse_row_click: None,
             sweep_progress: None,
         };
 
