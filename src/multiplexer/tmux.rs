@@ -597,6 +597,14 @@ impl Multiplexer for TmuxBackend {
             .filter(|s| !s.is_empty())
     }
 
+    fn client_session(&self) -> Option<String> {
+        self.tmux_query(&["display-message", "-p", "#{client_session}"])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.current_session())
+    }
+
     fn get_all_window_names(&self) -> Result<HashSet<String>> {
         let windows = self
             .tmux_query(&["list-windows", "-F", "#{window_name}"])

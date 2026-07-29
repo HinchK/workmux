@@ -204,7 +204,7 @@ impl App {
         } else {
             ScopeMode::load()
         };
-        let launch_session = mux.current_session();
+        let launch_session = mux.client_session();
         let git_statuses = git::load_status_cache();
         let pr_statuses = crate::github::load_pr_cache();
         let check_statuses = crate::github::load_check_cache();
@@ -355,11 +355,8 @@ impl App {
         }
 
         // Apply session scope filter after caching repo roots
-        if self.scope_mode == ScopeMode::Session
-            && let Some(ref session) = self.launch_session
-        {
-            self.all_agents.retain(|a| a.session == *session);
-        }
+        self.scope_mode
+            .retain_agents(&mut self.all_agents, self.launch_session.as_deref());
 
         // Trigger background git status fetch every 5 seconds
         if self.last_git_fetch.elapsed() >= Duration::from_secs(5) {

@@ -714,6 +714,13 @@ pub trait Multiplexer: Send + Sync {
         None // Default: can't determine
     }
 
+    /// Get the session/workspace displayed by the active client.
+    ///
+    /// Backends without distinct client context use the current session.
+    fn client_session(&self) -> Option<String> {
+        self.current_session()
+    }
+
     /// Get all window names across ALL sessions/workspaces.
     ///
     /// Default implementation returns same as get_all_window_names() (single session).
