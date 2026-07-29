@@ -51,6 +51,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes fish tmux zsh
+          zsh -f -c 'autoload -Uz compaudit; compaudit' | xargs -r sudo chmod go-w
           cargo install just --locked
           python -m venv tests/venv
           tests/venv/bin/pip install -r tests/requirements.txt
