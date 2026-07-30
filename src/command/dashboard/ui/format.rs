@@ -415,13 +415,14 @@ pub fn calc_column_width(items: &[String], min: usize, max: usize, padding: usiz
 
 /// Color elapsed time by age without using the destructive-action color.
 pub(crate) fn elapsed_time_style(secs: Option<u64>, palette: &ThemePalette) -> Style {
-    let color = match secs {
-        None => palette.dimmed,
-        Some(secs) if secs < 5 * 60 => palette.success,
-        Some(secs) if secs < 60 * 60 => palette.warning,
-        Some(_) => palette.accent,
-    };
-    Style::default().fg(color)
+    match secs {
+        None => Style::default().fg(palette.dimmed),
+        Some(secs) if secs < 5 * 60 => Style::default().fg(palette.success),
+        Some(secs) if secs < 60 * 60 => Style::default().fg(palette.warning),
+        Some(_) => Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::DIM),
+    }
 }
 
 /// Render zero-valued clock units with less emphasis than active units.
@@ -496,9 +497,8 @@ mod tests {
             elapsed_time_style(Some(60 * 60 - 1), &palette).fg,
             Some(palette.warning)
         );
-        assert_eq!(
-            elapsed_time_style(Some(60 * 60), &palette).fg,
-            Some(palette.accent)
-        );
+        let long_running = elapsed_time_style(Some(60 * 60), &palette);
+        assert_eq!(long_running.fg, Some(palette.accent));
+        assert!(long_running.add_modifier.contains(Modifier::DIM));
     }
 }
