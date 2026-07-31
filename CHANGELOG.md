@@ -22,10 +22,13 @@ description: Release notes and version history for workmux
 
 # Changelog
 
-## Unreleased
+## v0.1.232 (2026-07-31)
 
-- Show GitHub checks for remote branches without pull requests in the sidebar and dashboard, with check indicators in the default tile and horizontal sidebar layouts and failure-only indicators on main branches.
-- Batch sidebar GitHub polling across linked worktrees and reuse repository metadata so each repository stays within one status request per polling interval.
+- Use the mouse throughout the dashboard to switch tabs, select or open rows, run actions, scroll previews and diffs, and navigate files.
+- Show GitHub checks for remote branches without pull requests in the sidebar and dashboard, including failure indicators for main branches.
+- Keep sidebar GitHub status refreshes efficient across linked worktrees, reducing redundant requests for the same repository.
+- Keep the dashboard's current-session filter tied to the active tmux session when opened in a popup.
+- Make dashboard selections and elapsed times easier to scan with clearer highlighting and subdued long-running timers.
 
 ## v0.1.231 (2026-07-28)
 
