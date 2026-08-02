@@ -28,7 +28,7 @@ pub fn generate_branch_name(
     let raw = run_generator_command(command, model, &full_prompt)?;
     tracing::info!(raw_output = raw.trim(), "raw output from generator");
 
-    let branch_name = sanitize_branch_name(raw.trim());
+    let branch_name = sanitize_branch_name(raw.trim())?;
     tracing::info!(branch_name = branch_name, "sanitized branch name");
 
     if branch_name.is_empty() {
@@ -152,7 +152,7 @@ fn strip_ansi(s: &str) -> String {
     re.replace_all(s, "").into_owned()
 }
 
-fn sanitize_branch_name(raw: &str) -> String {
+fn sanitize_branch_name(raw: &str) -> Result<String> {
     // Strip ANSI escape sequences (some CLIs emit colors even when piped)
     let stripped = strip_ansi(raw);
 
@@ -165,65 +165,91 @@ fn sanitize_branch_name(raw: &str) -> String {
         .unwrap_or("")
         .trim();
 
-    // Use slug to ensure valid format
-    slug::slugify(cleaned)
+    if cleaned.is_empty() {
+        return Ok(String::new());
+    }
+
+    if crate::git::is_valid_branch_name(cleaned)? {
+        return Ok(cleaned.to_string());
+    }
+
+    Ok(slug::slugify(cleaned))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn sanitize(raw: &str) -> String {
+        sanitize_branch_name(raw).unwrap()
+    }
+
     #[test]
     fn sanitize_branch_name_simple() {
-        assert_eq!(sanitize_branch_name("add-user-auth"), "add-user-auth");
+        assert_eq!(sanitize("add-user-auth"), "add-user-auth");
+    }
+
+    #[test]
+    fn sanitize_branch_name_preserves_slashes() {
+        assert_eq!(sanitize("fix/issue-123"), "fix/issue-123");
+        assert_eq!(sanitize("feat/search/ui"), "feat/search/ui");
+    }
+
+    #[test]
+    fn sanitize_branch_name_preserves_valid_git_characters() {
+        assert_eq!(sanitize("Feature_Name"), "Feature_Name");
+    }
+
+    #[test]
+    fn sanitize_branch_name_slugifies_invalid_ref() {
+        assert_eq!(sanitize("fix//issue-123"), "fix-issue-123");
+    }
+
+    #[test]
+    fn sanitize_branch_name_preserves_slashes_in_code_block() {
+        assert_eq!(sanitize("```\nfix/issue-123\n```"), "fix/issue-123");
     }
 
     #[test]
     fn sanitize_branch_name_with_backticks() {
-        assert_eq!(sanitize_branch_name("`add-user-auth`"), "add-user-auth");
+        assert_eq!(sanitize("`add-user-auth`"), "add-user-auth");
     }
 
     #[test]
     fn sanitize_branch_name_with_triple_backticks() {
-        assert_eq!(
-            sanitize_branch_name("```\nadd-user-auth\n```"),
-            "add-user-auth"
-        );
+        assert_eq!(sanitize("```\nadd-user-auth\n```"), "add-user-auth");
     }
 
     #[test]
     fn sanitize_branch_name_multiline() {
-        assert_eq!(
-            sanitize_branch_name("add-user-auth\nsome explanation"),
-            "add-user-auth"
-        );
+        assert_eq!(sanitize("add-user-auth\nsome explanation"), "add-user-auth");
     }
 
     #[test]
     fn sanitize_branch_name_with_spaces() {
-        assert_eq!(sanitize_branch_name("add user auth"), "add-user-auth");
+        assert_eq!(sanitize("add user auth"), "add-user-auth");
     }
 
     #[test]
     fn sanitize_branch_name_with_special_chars() {
-        assert_eq!(sanitize_branch_name("Add User Auth!"), "add-user-auth");
+        assert_eq!(sanitize("Add User Auth!"), "add-user-auth");
     }
 
     #[test]
     fn sanitize_branch_name_empty() {
-        assert_eq!(sanitize_branch_name(""), "");
+        assert_eq!(sanitize(""), "");
     }
 
     #[test]
     fn sanitize_branch_name_whitespace_only() {
-        assert_eq!(sanitize_branch_name("   "), "");
+        assert_eq!(sanitize("   "), "");
     }
 
     #[test]
     fn sanitize_branch_name_strips_ansi_escapes() {
         // kiro-cli emits colored output with a bell character even when piped
         assert_eq!(
-            sanitize_branch_name("\x1b[38;5;141m> \x1b[0minvestigate-zero-report-slow-loading\x07"),
+            sanitize("\x1b[38;5;141m> \x1b[0minvestigate-zero-report-slow-loading\x07"),
             "investigate-zero-report-slow-loading"
         );
     }
@@ -232,7 +258,7 @@ mod tests {
     fn sanitize_branch_name_plain_after_ansi_fix() {
         // When the CLI stops emitting ANSI, stripping is a no-op
         assert_eq!(
-            sanitize_branch_name("investigate-zero-report-slow-loading"),
+            sanitize("investigate-zero-report-slow-loading"),
             "investigate-zero-report-slow-loading"
         );
     }

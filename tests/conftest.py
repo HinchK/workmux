@@ -1398,6 +1398,7 @@ def write_global_workmux_config(
     base_branch: Optional[str] = None,
     merge_keep: Optional[bool] = None,
     agents: Optional[Dict[str, Any]] = None,
+    auto_name: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Creates the global ~/.config/workmux/config.yaml file within the isolated HOME."""
     config: Dict[str, Any] = {}
@@ -1417,6 +1418,8 @@ def write_global_workmux_config(
         config["merge_keep"] = merge_keep
     if agents is not None:
         config["agents"] = agents
+    if auto_name is not None:
+        config["auto_name"] = auto_name
 
     config_dir = env.home_path / ".config" / "workmux"
     config_dir.mkdir(parents=True, exist_ok=True)

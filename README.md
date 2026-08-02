@@ -871,7 +871,9 @@ auto_name:
 ```
 
 To use a specific tool, set `auto_name.command`. The command string is split
-into program and arguments, and the composed prompt is piped via stdin.
+into program and arguments, and the composed prompt is piped via stdin. Valid
+Git branch names are preserved, including slash-separated prefixes such as
+`fix/issue-123`.
 
 ```yaml
 auto_name:

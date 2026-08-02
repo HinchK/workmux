@@ -276,7 +276,7 @@ auto_name:
 
 #### Using a custom command
 
-Set `auto_name.command` to use a specific tool for branch name generation. The command string is split into program and arguments, and the composed prompt (system prompt + user input) is piped via stdin.
+Set `auto_name.command` to use a specific tool for branch name generation. The command string is split into program and arguments, and the composed prompt (system prompt + user input) is piped via stdin. Valid Git branch names are preserved, including slash-separated prefixes such as `fix/issue-123`.
 
 ```yaml
 # Use Claude CLI

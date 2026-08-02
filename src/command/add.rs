@@ -516,12 +516,14 @@ pub fn run(
     // Create template environment
     let env = create_template_env();
 
-    // Detect remote branch and extract base name
-    // If we have a PR remote branch, use that; otherwise detect from branch_name
+    // Detect explicit remote branches and extract their base names. Generated names
+    // always identify local branches, even when their first component names a remote.
     // Only pass CLI --base to detect_remote_branch; config base_branch should not
     // interfere with remote/fork branch detection.
     let (remote_branch, template_base_name) = if let Some(ref pr_remote) = remote_branch_for_pr {
         (Some(pr_remote.clone()), branch_name.to_string())
+    } else if auto_name {
+        (None, branch_name.to_string())
     } else if dry_run {
         detect_remote_branch_dry_run(branch_name, cli_base)?
     } else {

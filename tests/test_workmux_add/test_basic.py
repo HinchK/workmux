@@ -18,6 +18,7 @@ from ..conftest import (
     get_worktree_path,
     run_workmux_add,
     run_workmux_command,
+    write_global_workmux_config,
     write_workmux_config,
 )
 from .conftest import add_branch_and_get_worktree
@@ -64,6 +65,56 @@ class TestDryRun:
         assert env.list_windows() == windows_before
         branches = env.run_command(["git", "branch", "--list", branch_name])
         assert branches.stdout.strip() == ""
+
+    def test_auto_name_dry_run_preserves_slashes(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = mux_server
+        branch_name = "fix/issue-123"
+        worktree_path = get_worktree_path(mux_repo_path, branch_name)
+        write_global_workmux_config(
+            env,
+            auto_name={
+                "command": "sh -c 'printf \"fix/issue-123\\n\"'",
+            },
+        )
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            'add --auto-name --prompt "Fix issue 123" --dry-run',
+        )
+
+        assert f"Branch:   {branch_name}" in result.stdout
+        assert f"Worktree: {worktree_path}" in result.stdout
+        assert not worktree_path.exists()
+
+    def test_auto_name_treats_remote_prefix_as_local_branch(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = mux_server
+        branch_name = "origin/topic"
+        env.run_command(["git", "remote", "add", "origin", "."], cwd=mux_repo_path)
+        env.run_command(
+            ["git", "update-ref", "refs/remotes/origin/topic", "HEAD"],
+            cwd=mux_repo_path,
+        )
+        write_global_workmux_config(
+            env,
+            auto_name={
+                "command": "sh -c 'printf \"origin/topic\\n\"'",
+            },
+        )
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            'add --auto-name --prompt "Add topic" --dry-run',
+        )
+
+        assert f"Branch:   {branch_name}" in result.stdout
 
 
 class TestWorktreeCreation:
