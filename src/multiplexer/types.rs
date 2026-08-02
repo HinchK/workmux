@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub struct WindowTarget {
     pub full_name: String,
     pub parent_session: Option<String>,
+    pub window_id: Option<String>,
 }
 
 impl WindowTarget {
@@ -16,12 +17,27 @@ impl WindowTarget {
         Self {
             full_name,
             parent_session,
+            window_id: None,
+        }
+    }
+
+    pub fn with_id(full_name: String, parent_session: Option<String>, window_id: String) -> Self {
+        Self {
+            full_name,
+            parent_session,
+            window_id: Some(window_id),
         }
     }
 
     pub fn parent_session(&self) -> Option<&str> {
         self.parent_session.as_deref()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedWindowTarget {
+    pub target: WindowTarget,
+    pub is_primary: bool,
 }
 
 /// How (if at all) to resume an existing agent conversation when launching.

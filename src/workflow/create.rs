@@ -175,6 +175,8 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
             target_window_name: options.target_window_name.clone(),
             target_session_name: options.target_session_name.clone(),
             window_session_name: options.window_session_name.clone(),
+            window_token: options.window_token.clone(),
+            primary_window: options.primary_window,
             resume_mode: options.resume_mode.clone(),
         };
 
@@ -467,6 +469,13 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
                 current_handle
             )
         })?;
+    }
+    if options.mode == MuxMode::Window && context.mux.supports_window_ownership() {
+        options.window_token = Some(git::ensure_worktree_window_token_in(
+            &current_handle,
+            Some(&context.execution_dir),
+        )?);
+        options.primary_window = true;
     }
     debug!(
         handle = %current_handle,

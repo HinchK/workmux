@@ -123,6 +123,24 @@ pub trait Multiplexer: Send + Sync {
         ))
     }
 
+    fn supports_window_ownership(&self) -> bool {
+        false
+    }
+
+    fn set_window_ownership(&self, pane_id: &str, token: &str, is_primary: bool) -> Result<()> {
+        let _ = (pane_id, token, is_primary);
+        Ok(())
+    }
+
+    fn owned_window_targets(&self, token: &str) -> Result<Vec<OwnedWindowTarget>> {
+        let _ = token;
+        Ok(Vec::new())
+    }
+
+    fn owned_window_tokens(&self) -> Result<HashSet<String>> {
+        Ok(HashSet::new())
+    }
+
     /// Switch to a session by prefix and name.
     /// For tmux, this switches the client to the session.
     /// For WezTerm, this may switch to a workspace.

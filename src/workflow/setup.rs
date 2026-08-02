@@ -219,6 +219,11 @@ pub fn setup_environment(
                 "setup_environment:window created"
             );
 
+            if let Some(token) = options.window_token.as_deref() {
+                mux.set_window_ownership(&initial_pane_id, token, options.primary_window)
+                    .context("Failed to attach worktree identity to window")?;
+            }
+
             let result = mux
                 .setup_panes(
                     &initial_pane_id,
@@ -748,6 +753,8 @@ mod tests {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: crate::multiplexer::types::ResumeMode::default(),
         }
     }

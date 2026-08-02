@@ -478,8 +478,58 @@ def test_remove_closes_all_duplicate_windows(
     assert len(matching) == 0, f"All windows should be closed, but found: {matching}"
 
 
-# =============================================================================
-# Prompt support tests
+@pytest.mark.tmux_only
+def test_remove_closes_renamed_duplicates_without_killing_reused_name(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-remove-renamed-dups"
+    base_window = get_window_name(branch_name)
+
+    write_workmux_config(repo_path)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+    run_workmux_open(env, workmux_exe_path, repo_path, branch_name, new_window=True)
+    run_workmux_open(env, workmux_exe_path, repo_path, branch_name, new_window=True)
+
+    owned = []
+    for line in env.tmux(
+        [
+            "list-windows",
+            "-a",
+            "-F",
+            "#{window_id}\t#{window_name}\t#{@workmux_token}",
+        ]
+    ).stdout.splitlines():
+        window_id, window_name, token = line.split("\t")
+        if token:
+            owned.append((window_id, window_name))
+
+    assert len(owned) == 3
+    for index, (window_id, _) in enumerate(owned):
+        env.tmux(["rename-window", "-t", window_id, f"renamed-owned-{index}"])
+
+    replacement_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            base_window,
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    run_workmux_remove(env, workmux_exe_path, repo_path, branch_name, force=True)
+
+    windows = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}\t#{window_name}"]
+    ).stdout.splitlines()
+    owned_ids = {window_id for window_id, _ in owned}
+    assert all(line.split("\t", 1)[0] not in owned_ids for line in windows)
+    assert f"{replacement_id}\t{base_window}" in windows
+
+
 # =============================================================================
 
 

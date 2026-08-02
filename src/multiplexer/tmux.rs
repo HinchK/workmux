@@ -140,6 +140,10 @@ impl TmuxBackend {
     }
 
     fn window_target_arg(target: &WindowTarget) -> String {
+        if let Some(window_id) = &target.window_id {
+            return window_id.clone();
+        }
+
         match target.parent_session() {
             Some(session) => format!("{}:={}", session, target.full_name),
             None => format!("={}", target.full_name),
@@ -422,6 +426,67 @@ impl Multiplexer for TmuxBackend {
         Ok(pane_id)
     }
 
+    fn supports_window_ownership(&self) -> bool {
+        true
+    }
+
+    fn set_window_ownership(&self, pane_id: &str, token: &str, is_primary: bool) -> Result<()> {
+        self.tmux_cmd(&[
+            "set-window-option",
+            "-q",
+            "-t",
+            pane_id,
+            "@workmux_token",
+            token,
+        ])?;
+        self.tmux_cmd(&[
+            "set-window-option",
+            "-q",
+            "-t",
+            pane_id,
+            "@workmux_primary",
+            if is_primary { "1" } else { "0" },
+        ])
+    }
+
+    fn owned_window_targets(&self, token: &str) -> Result<Vec<OwnedWindowTarget>> {
+        let output = self.tmux_query(&[
+            "list-windows",
+            "-a",
+            "-F",
+            "#{window_id}\t#{window_name}\t#{session_name}\t#{@workmux_token}\t#{@workmux_primary}",
+        ])?;
+
+        Ok(output
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split('\t');
+                let window_id = parts.next()?;
+                let window_name = parts.next()?;
+                let session_name = parts.next()?;
+                let candidate_token = parts.next()?;
+                let primary = parts.next().unwrap_or_default();
+                (candidate_token == token).then(|| OwnedWindowTarget {
+                    target: WindowTarget::with_id(
+                        window_name.to_string(),
+                        Some(session_name.to_string()),
+                        window_id.to_string(),
+                    ),
+                    is_primary: primary == "1",
+                })
+            })
+            .collect())
+    }
+
+    fn owned_window_tokens(&self) -> Result<HashSet<String>> {
+        let output = self.tmux_query(&["list-windows", "-a", "-F", "#{@workmux_token}"])?;
+        Ok(output
+            .lines()
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     fn switch_to_session(&self, prefix: &str, name: &str) -> Result<()> {
         let prefixed_name = util::prefixed(prefix, name);
         self.tmux_cmd(&["switch-client", "-t", &prefixed_name])
@@ -616,6 +681,11 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn window_target_exists(&self, target: &WindowTarget) -> Result<bool> {
+        if let Some(window_id) = &target.window_id {
+            let ids = self.tmux_query(&["list-windows", "-a", "-F", "#{window_id}"])?;
+            return Ok(ids.lines().any(|candidate| candidate == window_id));
+        }
+
         let windows = match target.parent_session() {
             Some(session) => self.get_window_names_in_session(session)?,
             None => self.get_all_window_names()?,
@@ -940,6 +1010,24 @@ mod tests {
     use super::*;
 
     const LIVE_PANE_LINE: &str = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2";
+
+    #[test]
+    fn window_target_prefers_stable_id() {
+        let target = WindowTarget::with_id(
+            "renamed".to_string(),
+            Some("parent".to_string()),
+            "@42".to_string(),
+        );
+
+        assert_eq!(TmuxBackend::window_target_arg(&target), "@42");
+    }
+
+    #[test]
+    fn window_target_falls_back_to_parent_qualified_exact_name() {
+        let target = WindowTarget::new("work".to_string(), Some("parent".to_string()));
+
+        assert_eq!(TmuxBackend::window_target_arg(&target), "parent:=work");
+    }
 
     #[test]
     fn live_pane_query_returns_parsed_pane() {

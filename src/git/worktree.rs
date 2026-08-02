@@ -281,6 +281,26 @@ pub fn get_worktree_meta_in(handle: &str, key: &str, workdir: Option<&Path>) -> 
     cmd.run_and_capture_stdout().ok().filter(|s| !s.is_empty())
 }
 
+pub fn get_worktree_window_token(handle: &str) -> Option<String> {
+    get_worktree_meta_in(handle, "window-token", None)
+}
+
+pub fn get_worktree_window_token_in(handle: &str, workdir: Option<&Path>) -> Option<String> {
+    get_worktree_meta_in(handle, "window-token", workdir)
+}
+
+pub fn ensure_worktree_window_token_in(handle: &str, workdir: Option<&Path>) -> Result<String> {
+    if let Some(token) = get_worktree_window_token_in(handle, workdir) {
+        return Ok(token);
+    }
+
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).context("Failed to generate worktree window token")?;
+    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    set_worktree_meta_in(handle, "window-token", &token, workdir)?;
+    Ok(token)
+}
+
 pub fn get_worktree_target_window(handle: &str) -> Option<String> {
     get_worktree_target_window_in(handle, None)
 }

@@ -75,6 +75,8 @@ pub fn run(dry_run: bool) -> Result<()> {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: crate::multiplexer::types::ResumeMode::Continue,
         };
 

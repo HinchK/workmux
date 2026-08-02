@@ -126,26 +126,55 @@ pub fn open(
     if prior_mode != mode {
         match prior_mode {
             MuxMode::Window => {
-                // Kill all matching window targets (base + any -N numeric duplicates only)
-                let all_names = context.mux.get_all_window_names()?;
-                let prior_window_name =
-                    git::get_worktree_target_window_in(&base_handle, Some(&context.execution_dir))
-                        .unwrap_or_else(|| base_handle.clone());
-                let full_base = prefixed(&context.prefix, &prior_window_name);
-                let full_base_dash = format!("{}-", full_base);
-                for name in &all_names {
-                    let is_exact = *name == full_base;
-                    let is_numeric_suffix = name
-                        .strip_prefix(&full_base_dash)
-                        .is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+                let window_token = context
+                    .mux
+                    .supports_window_ownership()
+                    .then(|| {
+                        git::get_worktree_window_token_in(
+                            &base_handle,
+                            Some(&context.execution_dir),
+                        )
+                    })
+                    .flatten();
+                let owned_targets = window_token
+                    .as_deref()
+                    .map(|token| context.mux.owned_window_targets(token))
+                    .transpose()?
+                    .unwrap_or_default();
 
-                    if is_exact || is_numeric_suffix {
+                if window_token.is_none() {
+                    let all_names = context.mux.get_all_window_names()?;
+                    let prior_window_name = git::get_worktree_target_window_in(
+                        &base_handle,
+                        Some(&context.execution_dir),
+                    )
+                    .unwrap_or_else(|| base_handle.clone());
+                    let full_base = prefixed(&context.prefix, &prior_window_name);
+                    let full_base_dash = format!("{}-", full_base);
+                    for name in &all_names {
+                        let is_exact = *name == full_base;
+                        let is_numeric_suffix =
+                            name.strip_prefix(&full_base_dash).is_some_and(|s| {
+                                !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+                            });
+
+                        if is_exact || is_numeric_suffix {
+                            info!(
+                                handle = base_handle,
+                                window = name,
+                                "open:closing window before mode conversion"
+                            );
+                            MuxHandle::kill_full(context.mux.as_ref(), prior_mode, name)?;
+                        }
+                    }
+                } else {
+                    for owned in owned_targets {
                         info!(
                             handle = base_handle,
-                            window = name,
+                            window = owned.target.full_name,
                             "open:closing window before mode conversion"
                         );
-                        MuxHandle::kill_full(context.mux.as_ref(), prior_mode, name)?;
+                        MuxHandle::kill_window_target(context.mux.as_ref(), &owned.target)?;
                     }
                 }
             }
@@ -178,7 +207,7 @@ pub fn open(
     });
 
     // Update options with the resolved mode
-    let options = SetupOptions {
+    let mut options = SetupOptions {
         mode,
         target_window_name: if mode == MuxMode::Window {
             target_window_name.clone()
@@ -203,9 +232,29 @@ pub fn open(
         MuxMode::Session => target_session_name.as_deref().unwrap_or(&base_handle),
     };
     let target = MuxHandle::new(context.mux.as_ref(), mode, &context.prefix, target_name);
-    let window_target = WindowTarget::new(target.full_name(), window_session_name.clone());
+    let fallback_window_target = WindowTarget::new(target.full_name(), window_session_name.clone());
+    let window_token = if mode == MuxMode::Window && context.mux.supports_window_ownership() {
+        git::get_worktree_window_token_in(&base_handle, Some(&context.execution_dir))
+    } else {
+        None
+    };
+    let owned_primary = window_token
+        .as_deref()
+        .map(|token| context.mux.owned_window_targets(token))
+        .transpose()?
+        .and_then(|targets| {
+            targets
+                .iter()
+                .find(|owned| owned.is_primary)
+                .map(|owned| owned.target.clone())
+        });
+    let window_target = owned_primary.unwrap_or(fallback_window_target);
     let target_exists = if mode == MuxMode::Window {
-        context.mux.window_target_exists(&window_target)?
+        if window_token.is_some() && window_target.window_id.is_none() {
+            false
+        } else {
+            context.mux.window_target_exists(&window_target)?
+        }
     } else {
         target.exists()?
     };
@@ -251,7 +300,9 @@ pub fn open(
             }
         }
         if options.focus_window {
-            if mode == MuxMode::Window && window_target.parent_session().is_some() {
+            if mode == MuxMode::Window
+                && (window_target.parent_session().is_some() || window_target.window_id.is_some())
+            {
                 context.mux.select_window_target(&window_target)?;
             } else {
                 target.select()?;
@@ -327,6 +378,14 @@ pub fn open(
             Some(&context.execution_dir),
         )
         .context("Failed to persist window session")?;
+    }
+
+    if mode == MuxMode::Window && context.mux.supports_window_ownership() {
+        options.window_token = Some(git::ensure_worktree_window_token_in(
+            &base_handle,
+            Some(&context.execution_dir),
+        )?);
+        options.primary_window = !new_window || !target_exists;
     }
 
     // Determine handle: use suffix if forcing new target and one exists

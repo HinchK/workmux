@@ -48,7 +48,7 @@ pub fn run(name: Option<&str>) -> Result<()> {
 
     // When no name is provided, prefer the current window/session name
     // This handles duplicate windows/sessions (e.g., wm:feature-2) correctly
-    let (full_target_name, is_current_target) = match name {
+    let (mut full_target_name, mut is_current_target) = match name {
         Some(_) => {
             // Explicit name provided - worktree already validated above
             let target = MuxHandle::new(mux.as_ref(), mode, prefix, &target_name);
@@ -83,10 +83,57 @@ pub fn run(name: Option<&str>) -> Result<()> {
         }
     };
 
+    let window_token = if mode == crate::config::MuxMode::Window && mux.supports_window_ownership()
+    {
+        git::get_worktree_window_token(&resolved_handle)
+    } else {
+        None
+    };
+    let owned_targets = window_token
+        .as_deref()
+        .map(|token| mux.owned_window_targets(token))
+        .transpose()?
+        .unwrap_or_default();
+    let current_window_id = if mode == crate::config::MuxMode::Window {
+        mux.current_window_id()?
+    } else {
+        None
+    };
+    let owned_target = if name.is_none() {
+        current_window_id.as_deref().and_then(|current_id| {
+            owned_targets
+                .iter()
+                .find(|owned| owned.target.window_id.as_deref() == Some(current_id))
+        })
+    } else {
+        owned_targets
+            .iter()
+            .find(|owned| owned.is_primary)
+            .or_else(|| {
+                owned_targets
+                    .iter()
+                    .find(|owned| owned.target.full_name == full_target_name)
+            })
+    };
+
+    let window_target = if let Some(owned) = owned_target {
+        full_target_name = owned.target.full_name.clone();
+        is_current_target = current_window_id
+            .as_deref()
+            .zip(owned.target.window_id.as_deref())
+            .is_some_and(|(current, target)| current == target);
+        owned.target.clone()
+    } else {
+        WindowTarget::new(full_target_name.clone(), window_session.clone())
+    };
+
     let kind = mode_label(mode);
-    let window_target = WindowTarget::new(full_target_name.clone(), window_session.clone());
     let target_exists = if mode == crate::config::MuxMode::Window {
-        mux.window_target_exists(&window_target)?
+        if window_token.is_some() && window_target.window_id.is_none() {
+            false
+        } else {
+            mux.window_target_exists(&window_target)?
+        }
     } else {
         MuxHandle::exists_full(mux.as_ref(), mode, &full_target_name)?
     };

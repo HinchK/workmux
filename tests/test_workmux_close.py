@@ -138,6 +138,105 @@ def test_close_window_in_parent_session(
     assert worktree_path.exists(), "Worktree should still exist after close"
 
 
+@pytest.mark.tmux_only
+def test_close_uses_stable_id_after_rename_and_name_reuse(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-close-renamed"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+
+    original_id = env.tmux(
+        ["display-message", "-p", "-t", f"={window_name}", "#{window_id}"]
+    ).stdout.strip()
+    env.tmux(["rename-window", "-t", original_id, "user-renamed"])
+    replacement_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
+
+    windows = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}\t#{window_name}"]
+    ).stdout.splitlines()
+    assert all(not line.startswith(f"{original_id}\t") for line in windows)
+    assert f"{replacement_id}\t{window_name}" in windows
+
+
+@pytest.mark.tmux_only
+def test_close_from_inside_renamed_window_uses_stable_id(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-self-close-renamed"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    window_id = env.tmux(
+        ["display-message", "-p", "-t", f"={window_name}", "#{window_id}"]
+    ).stdout.strip()
+    env.tmux(["rename-window", "-t", window_id, "user-renamed-self"])
+
+    env.send_keys(window_id, f"{workmux_exe_path} close", enter=True)
+
+    def window_is_gone():
+        windows = env.tmux(
+            ["list-windows", "-a", "-F", "#{window_id}"], check=False
+        ).stdout.splitlines()
+        return window_id not in windows
+
+    assert poll_until(window_is_gone, timeout=5.0)
+    assert get_worktree_path(mux_repo_path, branch_name).exists()
+
+
+@pytest.mark.tmux_only
+def test_close_survives_parent_session_and_window_renames(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-parent-and-window-renamed"
+    parent_session = "original-parent"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_command(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        f"add {branch_name} --parent-session {parent_session} --background",
+    )
+    window_id = env.tmux(
+        [
+            "display-message",
+            "-p",
+            "-t",
+            f"{parent_session}:={window_name}",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+    env.tmux(["rename-session", "-t", parent_session, "renamed-parent"])
+    env.tmux(["rename-window", "-t", window_id, "renamed-child"])
+
+    run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
+
+    window_ids = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}"], check=False
+    ).stdout.splitlines()
+    assert window_id not in window_ids
+
+
 def test_close_fails_when_no_window_exists(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):

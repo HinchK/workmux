@@ -128,6 +128,10 @@ pub struct SetupOptions {
     pub target_session_name: Option<String>,
     /// Raw tmux parent session for window mode.
     pub window_session_name: Option<String>,
+    /// Stable ownership token attached to windows created for this worktree.
+    pub window_token: Option<String>,
+    /// Whether the created window is the primary worktree window.
+    pub primary_window: bool,
     /// How to resume a conversation (continue last, fork specific session, or none).
     pub resume_mode: ResumeMode,
 }
@@ -149,6 +153,8 @@ impl SetupOptions {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: ResumeMode::default(),
         }
     }
@@ -168,6 +174,8 @@ impl SetupOptions {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: ResumeMode::default(),
         }
     }
@@ -193,6 +201,8 @@ impl SetupOptions {
             target_window_name: None,
             target_session_name: None,
             window_session_name: None,
+            window_token: None,
+            primary_window: true,
             resume_mode: ResumeMode::default(),
         }
     }
