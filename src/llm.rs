@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use regex::Regex;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{ErrorKind, Write};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::OnceLock;
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"Generate a short, valid git branch name (kebab-case) based on the user's input.
@@ -53,6 +53,18 @@ fn run_generator_command(
     }
 }
 
+fn write_prompt(stdin: Option<ChildStdin>, full_prompt: &str) -> Result<()> {
+    let Some(mut stdin) = stdin else {
+        return Ok(());
+    };
+
+    match stdin.write_all(full_prompt.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn run_custom_command(cmdline: &str, full_prompt: &str) -> Result<String> {
     let parts = shlex::split(cmdline).ok_or_else(|| {
         anyhow!(
@@ -82,9 +94,7 @@ fn run_custom_command(cmdline: &str, full_prompt: &str) -> Result<String> {
         .spawn()
         .with_context(|| format!("Failed to execute custom command '{}'", program))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(full_prompt.as_bytes())?;
-    }
+    write_prompt(child.stdin.take(), full_prompt)?;
 
     let output = child.wait_with_output()?;
 
@@ -127,9 +137,7 @@ fn run_llm_command(model: Option<&str>, full_prompt: &str) -> Result<String> {
         .spawn()
         .context("Failed to run 'llm' command. Is it installed? (pipx install llm)")?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(full_prompt.as_bytes())?;
-    }
+    write_prompt(child.stdin.take(), full_prompt)?;
 
     let output = child.wait_with_output()?;
 
@@ -313,6 +321,13 @@ mod tests {
                 err
             );
         }
+    }
+
+    #[test]
+    fn custom_command_can_exit_without_reading_prompt() {
+        let prompt = "x".repeat(1024 * 1024);
+        let output = run_custom_command("sh -c 'printf \"fix/issue-123\\n\"'", &prompt).unwrap();
+        assert_eq!(output, "fix/issue-123\n");
     }
 
     #[test]
