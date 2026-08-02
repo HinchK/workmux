@@ -743,8 +743,8 @@ pub trait Multiplexer: Send + Sync {
 
     /// Get live pane info including PID and current command.
     ///
-    /// Returns None if pane does not exist. Used during state reconciliation
-    /// to validate stored state against actual pane state.
+    /// Returns None only when the backend can establish that the pane does not
+    /// exist. Query failures and unparseable responses return an error.
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>>;
 
     /// Get live pane info for all panes at once (batched query).

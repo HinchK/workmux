@@ -56,6 +56,51 @@ fn parse_live_pane_line(line: &str) -> Option<(String, LivePaneInfo)> {
     ))
 }
 
+fn classify_live_pane_query<F>(
+    pane_id: &str,
+    query_result: Result<String>,
+    list_pane_ids: F,
+) -> Result<Option<LivePaneInfo>>
+where
+    F: FnOnce() -> Result<String>,
+{
+    match query_result {
+        Ok(output) => {
+            let (queried_id, info) = parse_live_pane_line(output.trim())
+                .filter(|(queried_id, _)| queried_id == pane_id)
+                .ok_or_else(|| {
+                    anyhow!("tmux returned malformed live pane information for {pane_id}")
+                })?;
+            debug_assert_eq!(queried_id, pane_id);
+            Ok(Some(info))
+        }
+        Err(query_error) => {
+            let pane_ids = list_pane_ids()
+                .with_context(|| format!("failed to confirm whether tmux pane {pane_id} exists"))?;
+            let mut pane_is_present = false;
+            for candidate in pane_ids.lines() {
+                let valid_id = candidate.strip_prefix('%').is_some_and(|number| {
+                    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+                });
+                if !valid_id {
+                    return Err(anyhow!(
+                        "tmux returned malformed pane identifier while checking {pane_id}: {candidate:?}"
+                    ));
+                }
+                pane_is_present |= candidate == pane_id;
+            }
+
+            if pane_is_present {
+                Err(query_error.context(format!(
+                    "tmux pane {pane_id} exists but its live information could not be queried"
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
 impl TmuxBackend {
     /// Create a new TmuxBackend instance.
     pub fn new() -> Self {
@@ -837,15 +882,12 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
-        // Use display-message to query a specific pane
-        let output = self.tmux_query(&["display-message", "-t", pane_id, "-p", LIVE_PANE_FORMAT]);
+        let query_result =
+            self.tmux_query(&["display-message", "-t", pane_id, "-p", LIVE_PANE_FORMAT]);
 
-        let output = match output {
-            Ok(o) => o,
-            Err(_) => return Ok(None), // Pane doesn't exist or error querying
-        };
-
-        Ok(parse_live_pane_line(output.trim()).map(|(_, info)| info))
+        classify_live_pane_query(pane_id, query_result, || {
+            self.tmux_query(&["list-panes", "-a", "-F", "#{pane_id}"])
+        })
     }
 
     fn server_boot_id(&self) -> Result<Option<String>> {
@@ -897,6 +939,77 @@ fn inject_status_format(format: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LIVE_PANE_LINE: &str = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2";
+
+    #[test]
+    fn live_pane_query_returns_parsed_pane() {
+        let result = classify_live_pane_query("%7", Ok(LIVE_PANE_LINE.to_string()), || {
+            panic!("pane listing should not run after a successful query")
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.pid, Some(12345));
+        assert_eq!(result.current_command.as_deref(), Some("node"));
+        assert_eq!(result.working_dir, PathBuf::from("/repo"));
+        assert_eq!(result.session.as_deref(), Some("main"));
+        assert_eq!(result.window.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn live_pane_query_returns_none_when_listing_confirms_absence() {
+        let result = classify_live_pane_query("%7", Err(anyhow!("query failed")), || {
+            Ok("%1\n%3".to_string())
+        })
+        .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn live_pane_query_preserves_error_when_listing_finds_pane() {
+        let error = classify_live_pane_query("%7", Err(anyhow!("query failed")), || {
+            Ok("%1\n%7".to_string())
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("exists"));
+    }
+
+    #[test]
+    fn live_pane_query_preserves_error_when_confirmation_fails() {
+        let error = classify_live_pane_query("%7", Err(anyhow!("query failed")), || {
+            Err(anyhow!("listing failed"))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("failed to confirm"));
+    }
+
+    #[test]
+    fn live_pane_query_rejects_malformed_output() {
+        let error = classify_live_pane_query("%7", Ok("unexpected output".to_string()), || {
+            panic!("pane listing should not run after a successful query")
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("malformed live pane information")
+        );
+    }
+
+    #[test]
+    fn live_pane_query_rejects_malformed_confirmation_output() {
+        let error = classify_live_pane_query("%7", Err(anyhow!("query failed")), || {
+            Ok("not-a-pane-id".to_string())
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("malformed pane identifier"));
+    }
 
     #[test]
     fn auto_clear_status_hook_signals_daemon_after_clearing_status() {
