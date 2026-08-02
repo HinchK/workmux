@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -22,6 +23,11 @@ struct StatusEntry {
     elapsed_secs: Option<u64>,
     title: Option<String>,
     pane_id: String,
+    workdir: PathBuf,
+    agent_kind: Option<String>,
+    session: Option<String>,
+    window_name: Option<String>,
+    updated_ts: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<GitInfo>,
 }
@@ -93,6 +99,10 @@ fn status_label(status: Option<AgentStatus>) -> String {
         Some(AgentStatus::Done) => "done".to_string(),
         None => "-".to_string(),
     }
+}
+
+fn optional_name(name: &str) -> Option<String> {
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Compute git info for a worktree path.
@@ -188,6 +198,11 @@ pub fn run(worktrees: &[String], json: bool, show_git: bool) -> Result<()> {
                     elapsed_secs,
                     title: agent.pane_title.clone(),
                     pane_id: agent.pane_id.clone(),
+                    workdir: agent.path.clone(),
+                    agent_kind: agent.agent_kind.clone(),
+                    session: optional_name(&agent.session),
+                    window_name: optional_name(&agent.window_name),
+                    updated_ts: agent.updated_ts,
                     git: git_info.clone(),
                 });
             }
@@ -222,6 +237,11 @@ pub fn run(worktrees: &[String], json: bool, show_git: bool) -> Result<()> {
                             elapsed_secs,
                             title: agent.pane_title.clone(),
                             pane_id: agent.pane_id.clone(),
+                            workdir: agent.path.clone(),
+                            agent_kind: agent.agent_kind.clone(),
+                            session: optional_name(&agent.session),
+                            window_name: optional_name(&agent.window_name),
+                            updated_ts: agent.updated_ts,
                             git: git_info.clone(),
                         });
                     }
