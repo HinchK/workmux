@@ -22,6 +22,12 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.233 (2026-08-02)
+
+- Preserve valid auto-generated Git branch names, including slash-separated names such as `fix/issue-123`. ([#206](https://github.com/raine/workmux/issues/206))
+- Include agent type, working directory, tmux session and window, and last-update time in `workmux status --json`. ([#210](https://github.com/raine/workmux/issues/210))
+- Keep agents visible in status views when a tmux pane query fails temporarily. ([#209](https://github.com/raine/workmux/issues/209))
+
 ## v0.1.232 (2026-07-31)
 
 - Use the mouse throughout the dashboard to switch tabs, select or open rows, run actions, scroll previews and diffs, and navigate files.
