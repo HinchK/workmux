@@ -227,18 +227,14 @@ tmux list-sessions -F '#{session_name} #{session_path}'
 Then create the worktree in the target session:
 
 ```bash
-# If the session exists:
-tmux new-window -t <session> -c <project-path> \
-  "workmux add <branch> -b -P <prompt-file>; exit"
-
-# If the session does not exist, create it first:
-tmux new-session -d -s <session> -c <project-path> && \
+tmux new-session -d -s <session> -c <project-path> 2>/dev/null || true
 tmux new-window -t <session> -c <project-path> \
   "workmux add <branch> -b -P <prompt-file>; exit"
 ```
 
 The temporary window closes when `workmux add` finishes; the worktree
-window that workmux creates stays in the session.
+window that workmux creates stays in the session. Run `workmux` commands
+from inside the target repo.
 
 Do NOT research before dispatching. Use context you already have, but
 do not explore or read code just to write the prompt. Worktree agents
