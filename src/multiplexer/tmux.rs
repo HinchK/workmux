@@ -64,40 +64,39 @@ fn classify_live_pane_query<F>(
 where
     F: FnOnce() -> Result<String>,
 {
-    match query_result {
+    let query_error = match query_result {
         Ok(output) => {
-            let (queried_id, info) = parse_live_pane_line(output.trim())
-                .filter(|(queried_id, _)| queried_id == pane_id)
-                .ok_or_else(|| {
-                    anyhow!("tmux returned malformed live pane information for {pane_id}")
-                })?;
-            debug_assert_eq!(queried_id, pane_id);
-            Ok(Some(info))
-        }
-        Err(query_error) => {
-            let pane_ids = list_pane_ids()
-                .with_context(|| format!("failed to confirm whether tmux pane {pane_id} exists"))?;
-            let mut pane_is_present = false;
-            for candidate in pane_ids.lines() {
-                let valid_id = candidate.strip_prefix('%').is_some_and(|number| {
-                    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
-                });
-                if !valid_id {
-                    return Err(anyhow!(
-                        "tmux returned malformed pane identifier while checking {pane_id}: {candidate:?}"
-                    ));
-                }
-                pane_is_present |= candidate == pane_id;
+            if let Some((_, info)) =
+                parse_live_pane_line(output.trim()).filter(|(queried_id, _)| queried_id == pane_id)
+            {
+                return Ok(Some(info));
             }
+            anyhow!("tmux returned malformed live pane information for {pane_id}")
+        }
+        Err(query_error) => query_error,
+    };
 
-            if pane_is_present {
-                Err(query_error.context(format!(
-                    "tmux pane {pane_id} exists but its live information could not be queried"
-                )))
-            } else {
-                Ok(None)
-            }
+    let pane_ids = list_pane_ids()
+        .with_context(|| format!("failed to confirm whether tmux pane {pane_id} exists"))?;
+    let mut pane_is_present = false;
+    for candidate in pane_ids.lines() {
+        let valid_id = candidate.strip_prefix('%').is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if !valid_id {
+            return Err(anyhow!(
+                "tmux returned malformed pane identifier while checking {pane_id}: {candidate:?}"
+            ));
         }
+        pane_is_present |= candidate == pane_id;
+    }
+
+    if pane_is_present {
+        Err(query_error.context(format!(
+            "tmux pane {pane_id} exists but its live information could not be queried"
+        )))
+    } else {
+        Ok(None)
     }
 }
 
@@ -988,17 +987,31 @@ mod tests {
     }
 
     #[test]
-    fn live_pane_query_rejects_malformed_output() {
+    fn live_pane_query_returns_none_when_empty_output_confirms_absence() {
+        let result =
+            classify_live_pane_query("%7", Ok(String::new()), || Ok("%1\n%3".to_string())).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn live_pane_query_preserves_malformed_error_when_listing_finds_pane() {
         let error = classify_live_pane_query("%7", Ok("unexpected output".to_string()), || {
-            panic!("pane listing should not run after a successful query")
+            Ok("%1\n%7".to_string())
         })
         .unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("malformed live pane information")
-        );
+        assert!(error.to_string().contains("exists"));
+        assert!(format!("{error:#}").contains("malformed live pane information"));
+    }
+
+    #[test]
+    fn live_pane_query_preserves_malformed_error_when_confirmation_fails() {
+        let error =
+            classify_live_pane_query("%7", Ok(String::new()), || Err(anyhow!("listing failed")))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("failed to confirm"));
     }
 
     #[test]
