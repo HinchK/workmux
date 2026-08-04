@@ -53,7 +53,10 @@ Key flags:
 - `-a <agent>`: override the agent (can specify multiple for multi-worktree)
 - `-w, --with-changes`: move uncommitted changes to the new worktree
 - `--base <branch>`: branch from a specific base
-- `--name <name>`: override the handle name
+- `--name <name>`: override the worktree handle
+- `--target-name <name>`: override the workmux-managed tmux window or session name
+- `--parent-session <session>`: put a window-mode target in this tmux session,
+  creating the parent session when it does not exist
 - `-o, --open-if-exists`: open existing worktree if it exists (idempotent)
 - `-W, --wait`: block until the tmux window is closed
 - `-n, --count <N>`: create N worktree instances
@@ -214,27 +217,21 @@ For full lifecycle orchestration (spawn, monitor, merge), use
 
 ### Cross-project worktree creation
 
-`workmux add` creates worktrees in the current git repo and adds the
-window to the current tmux session. To create a worktree in a different
-project, run `workmux add` inside that project's tmux session.
-
-Discover project paths from existing sessions:
-
-```bash
-tmux list-sessions -F '#{session_name} #{session_path}'
-```
-
-Then create the worktree in the target session:
+`workmux add` creates a worktree in the current working repository. Set the
+command's working directory to the target project and pass `--parent-session`
+to place the managed window directly in a specific tmux session. Workmux creates
+the parent session when it does not exist, so do not bootstrap it with
+`tmux new-window` or `tmux new-session`.
 
 ```bash
-tmux new-session -d -s <session> -c <project-path> 2>/dev/null || true
-tmux new-window -t <session> -c <project-path> \
-  "workmux add <branch> -b -P <prompt-file>; exit"
+# Run with the command working directory set to <project-path>
+workmux add <branch> -b -P <prompt-file> --parent-session <session>
 ```
 
-The temporary window closes when `workmux add` finishes; the worktree
-window that workmux creates stays in the session. Run `workmux` commands
-from inside the target repo.
+Use `--target-name <name>` only when the managed tmux target needs a name that
+differs from the worktree-derived default. Run `workmux` commands from the
+target repository so it creates the worktree from the correct Git repository
+and base branch.
 
 Do NOT research before dispatching. Use context you already have, but
 do not explore or read code just to write the prompt. Worktree agents
