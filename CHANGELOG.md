@@ -22,6 +22,15 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.234 (2026-08-04)
+
+- Sort sidebar rows by recent activity or tmux window order with `sidebar.sort`, and show native tmux window numbers in custom layouts with `{window_index}`. ([#214](https://github.com/raine/workmux/issues/214)) ([#215](https://github.com/raine/workmux/pull/215))
+- Prevent filesystem reads from triggering continuous sidebar refreshes on Linux, eliminating config reload loops and unnecessary CPU use. ([#217](https://github.com/raine/workmux/issues/217)) ([#218](https://github.com/raine/workmux/pull/218))
+- Keep agent views available and clean up stale state when a tmux pane disappears. ([#213](https://github.com/raine/workmux/issues/213))
+- Preserve the exact spelling and capitalization of parent tmux session names passed to `workmux add` or `workmux open`.
+- Accept branch names from automatic naming commands that exit without reading the prompt from stdin.
+- Let bundled agent skills dispatch cross-project worktrees directly into the requested tmux session without an intermediate window.
+
 ## v0.1.233 (2026-08-02)
 
 - Preserve valid auto-generated Git branch names, including slash-separated names such as `fix/issue-123`. ([#206](https://github.com/raine/workmux/issues/206))
