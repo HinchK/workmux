@@ -1011,18 +1011,20 @@ def test_open_target_name_owner_can_switch_existing_target(
 
 
 @pytest.mark.tmux_only
-def test_open_parent_session_routes_window_mode_window(
+def test_open_parent_session_preserves_exact_existing_session(
     mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
 ):
-    """Verifies open can route a window-mode worktree into a named tmux session."""
     env = mux_server
     branch_name = "feature-open-parent-session"
-    session_name = "prs"
-    custom_window = f"{DEFAULT_WINDOW_PREFIX}review-open-session"
+    handle = slugify(branch_name)
+    session_name = "WalkingMateOpen"
+    target_name = "Review Open Session"
+    custom_window = f"{DEFAULT_WINDOW_PREFIX}{slugify(target_name)}"
 
     write_workmux_config(repo_path)
     run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
     env.kill_window(get_window_name(branch_name))
+    env.tmux(["new-session", "-d", "-s", session_name])
 
     run_workmux_open(
         env,
@@ -1030,14 +1032,27 @@ def test_open_parent_session_routes_window_mode_window(
         repo_path,
         branch_name,
         parent_session=session_name,
-        target_name="review-open-session",
+        target_name=target_name,
     )
 
     assert_session_exists(env, session_name)
+    assert_session_not_exists(env, session_name.lower())
     result = env.tmux(
         ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"]
     )
     assert custom_window in [w for w in result.stdout.strip().split("\n") if w]
+
+    metadata = env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--get",
+            f"workmux.worktree.{handle}.window-session",
+        ],
+        cwd=repo_path,
+    )
+    assert metadata.stdout.strip() == session_name
 
 
 @pytest.mark.tmux_only

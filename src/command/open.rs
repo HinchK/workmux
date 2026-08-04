@@ -57,7 +57,7 @@ pub fn run(
         .transpose()?;
     let parent_session = parent_session
         .as_deref()
-        .map(crate::naming::derive_target_name)
+        .map(crate::naming::validate_parent_session)
         .transpose()?;
 
     let (config, config_location) = config::Config::load_with_location(None, config_override)?;

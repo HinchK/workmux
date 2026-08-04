@@ -425,7 +425,7 @@ pub fn run(
         .transpose()?;
     let parent_session = parent_session
         .as_deref()
-        .map(crate::naming::derive_target_name)
+        .map(crate::naming::validate_parent_session)
         .transpose()?;
     if mode == MuxMode::Session && parent_session.is_some() {
         return Err(anyhow!("--parent-session requires window mode"));
