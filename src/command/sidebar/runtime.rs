@@ -101,6 +101,7 @@ pub fn run_sidebar() -> Result<()> {
     spawn_input_thread(tx);
 
     let mut needs_render = true;
+    let mut needs_clear = false;
     let startup = std::time::Instant::now();
     let startup_grace = Duration::from_secs(3);
     let tick_rate = Duration::from_millis(250);
@@ -109,6 +110,10 @@ pub fn run_sidebar() -> Result<()> {
     loop {
         // Render before blocking (redraws only when state changed)
         if needs_render {
+            if needs_clear {
+                terminal.clear()?;
+                needs_clear = false;
+            }
             terminal.draw(|f| render_sidebar(f, &mut app))?;
             needs_render = false;
         }
@@ -154,6 +159,7 @@ pub fn run_sidebar() -> Result<()> {
                 &startup,
                 startup_grace,
                 &mut needs_render,
+                &mut needs_clear,
             );
         }
 
@@ -166,6 +172,7 @@ pub fn run_sidebar() -> Result<()> {
                 &startup,
                 startup_grace,
                 &mut needs_render,
+                &mut needs_clear,
             );
         }
 
@@ -214,6 +221,18 @@ fn advance_spinner_if_due(
     }
 }
 
+fn handle_resize_event(
+    app: &mut SidebarApp,
+    cols: u16,
+    rows: u16,
+    needs_render: &mut bool,
+    needs_clear: &mut bool,
+) {
+    app.on_resize_event(cols, rows);
+    *needs_render = true;
+    *needs_clear = true;
+}
+
 fn schedule_current_pane_kill() {
     let pane = Cmd::new("tmux")
         .args(&["display-message", "-p", "#{pane_id}"])
@@ -239,6 +258,7 @@ fn process_event(
     startup: &std::time::Instant,
     startup_grace: Duration,
     needs_render: &mut bool,
+    needs_clear: &mut bool,
 ) {
     match event {
         AppEvent::SnapshotReady => {
@@ -280,8 +300,7 @@ fn process_event(
             *needs_render = true;
         }
         AppEvent::Input(Event::Resize(cols, rows)) => {
-            app.on_resize_event(cols, rows);
-            *needs_render = true;
+            handle_resize_event(app, cols, rows, needs_render, needs_clear);
         }
         AppEvent::Input(_) => {}
     }
@@ -331,6 +350,18 @@ mod tests {
             location: String::new(),
             message: String::new(),
         })
+    }
+
+    #[test]
+    fn resize_requests_full_redraw() {
+        let mut app = test_app();
+        let mut needs_render = false;
+        let mut needs_clear = false;
+
+        handle_resize_event(&mut app, 120, 3, &mut needs_render, &mut needs_clear);
+
+        assert!(needs_render);
+        assert!(needs_clear);
     }
 
     #[test]
