@@ -79,13 +79,8 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
         return Ok(());
     }
 
-    // Codex compatibility: hook stdin may identify a specific parent/subagent
-    // turn. Use it to avoid a child Stop hook marking the pane done early.
-    let codex_context = crate::state::codex_status::detect_context_from_stdin();
-
     // Inside a sandbox guest, route through RPC to the host supervisor
     if crate::sandbox::guest::is_sandbox_guest() {
-        // Codex nested hook workaround is host-path only in v1.
         return run_via_rpc(cmd);
     }
 
@@ -96,13 +91,7 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
             let mux = create_backend_for_instance(target.backend, &target.instance);
             match mux.get_live_pane_info(&target.pane_id) {
                 Ok(Some(_)) => {
-                    return apply_status_update(
-                        &cmd,
-                        &config,
-                        codex_context.as_ref(),
-                        &*mux,
-                        &target.pane_id,
-                    );
+                    return apply_status_update(&cmd, &config, &*mux, &target.pane_id);
                 }
                 Ok(None) => {
                     warn!(
@@ -137,7 +126,7 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     for backend in status_backend_candidates() {
         let mux = create_backend(backend);
         if let Some(pane_id) = resolve_status_pane_id(&*mux) {
-            return apply_status_update(&cmd, &config, codex_context.as_ref(), &*mux, &pane_id);
+            return apply_status_update(&cmd, &config, &*mux, &pane_id);
         }
     }
 
@@ -147,45 +136,19 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
 fn apply_status_update(
     cmd: &SetWindowStatusCommand,
     config: &Config,
-    codex_context: Option<&crate::state::codex_status::CodexHookContext>,
     mux: &dyn Multiplexer,
     pane_id: &str,
 ) -> Result<()> {
-    let pane_key = crate::state::PaneKey {
-        backend: mux.name().to_string(),
-        instance: mux.instance_id(),
-        pane_id: pane_id.to_string(),
-    };
-
     match cmd {
-        SetWindowStatusCommand::Clear => {
-            if let Err(error) = crate::state::codex_status::clear_pane(&pane_key) {
-                warn!(%pane_id, error = %error, "failed to clear Codex status workaround state");
-            }
-            mux.clear_status(&pane_id)?;
-        }
+        SetWindowStatusCommand::Clear => mux.clear_status(&pane_id)?,
         SetWindowStatusCommand::Working
         | SetWindowStatusCommand::Waiting
         | SetWindowStatusCommand::Done => {
-            let requested_status = match cmd {
+            let status = match cmd {
                 SetWindowStatusCommand::Working => AgentStatus::Working,
                 SetWindowStatusCommand::Waiting => AgentStatus::Waiting,
                 SetWindowStatusCommand::Done => AgentStatus::Done,
                 SetWindowStatusCommand::Clear => unreachable!(),
-            };
-
-            let status = if let Some(context) = codex_context {
-                let applied =
-                    crate::state::codex_status::apply_status(&pane_key, context, requested_status);
-                match applied {
-                    Ok(status) => status,
-                    Err(error) => {
-                        warn!(%pane_id, ?requested_status, error = %error, "failed to update Codex status workaround state");
-                        requested_status
-                    }
-                }
-            } else {
-                requested_status
             };
 
             let (icon, auto_clear) = match status {

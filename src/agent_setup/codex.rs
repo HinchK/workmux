@@ -64,7 +64,7 @@ fn check_at(path: &Path) -> Result<StatusCheck> {
         ("PermissionRequest", "waiting"),
         ("PostToolUse", "working"),
         ("SubagentStart", "working"),
-        ("SubagentStop", "done"),
+        ("SubagentStop", "working"),
         ("Stop", "done"),
     ];
 
@@ -200,7 +200,45 @@ fn has_hooks_feature_key(content: &str) -> bool {
     })
 }
 
+fn normalize_subagent_stop_status(config: &mut Value) -> bool {
+    let Some(groups) = config["hooks"]["SubagentStop"].as_array_mut() else {
+        return false;
+    };
+
+    let mut modified = false;
+    for hook in groups
+        .iter_mut()
+        .filter_map(|group| group.get_mut("hooks").and_then(Value::as_array_mut))
+        .flatten()
+    {
+        let Some(command) = hook.get_mut("command") else {
+            continue;
+        };
+        if command.as_str() == Some("workmux set-window-status done") {
+            *command = Value::String("workmux set-window-status working".to_string());
+            modified = true;
+        }
+    }
+    modified
+}
+
+fn normalize_installed_hooks(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(path).context("Failed to read ~/.codex/hooks.json")?;
+    let mut config: Value =
+        serde_json::from_str(&content).context("~/.codex/hooks.json is not valid JSON")?;
+    if normalize_subagent_stop_status(&mut config) {
+        let output = serde_json::to_string_pretty(&config)?;
+        fs::write(path, output + "\n").context("Failed to write ~/.codex/hooks.json")?;
+    }
+    Ok(())
+}
+
 fn install_hooks_at(path: &Path) -> Result<()> {
+    normalize_installed_hooks(path)?;
     json_config::json_hook_install(
         path,
         &load_hooks()?,
@@ -268,6 +306,40 @@ mod tests {
         assert!(obj.contains_key("SubagentStart"));
         assert!(obj.contains_key("SubagentStop"));
         assert!(obj.contains_key("Stop"));
+    }
+
+    #[test]
+    fn test_install_normalizes_subagent_stop_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        let mut config: Value = serde_json::from_str(HOOKS_JSON).unwrap();
+        config["hooks"]["SubagentStop"][0]["hooks"][0]["command"] =
+            Value::String("workmux set-window-status done".to_string());
+        config["hooks"]["SubagentStop"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 my-hook.py"
+                }]
+            }));
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        install_hooks_at(&path).unwrap();
+        install_hooks_at(&path).unwrap();
+
+        let installed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(has_status_hook(&installed, "SubagentStop", "working"));
+        assert!(!has_status_hook(&installed, "SubagentStop", "done"));
+        assert!(
+            installed["hooks"]["SubagentStop"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().unwrap())
+                .any(|hook| hook["command"] == "python3 my-hook.py")
+        );
     }
 
     #[test]
