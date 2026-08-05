@@ -200,6 +200,14 @@ impl TemplateError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HostIdentity {
+    pub session_name: String,
+    pub session_id: String,
+    pub window_id: String,
+    pub pane_id: String,
+}
+
 /// Lightweight sidebar app state. No preview, git, PR, diff, or input mode.
 pub struct SidebarApp {
     pub mux: Arc<dyn Multiplexer>,
@@ -221,10 +229,8 @@ pub struct SidebarApp {
     pub list_area: Rect,
     /// Window prefix from config
     window_prefix: String,
-    /// The sidebar's own host session (immutable, detected once at startup via TMUX_PANE)
-    host_session: Option<String>,
-    /// Stable tmux window ID (e.g., @42) for active-window detection
-    host_window_id: Option<String>,
+    /// Stable identity of the sidebar's host pane, detected once at startup.
+    host_identity: Option<HostIdentity>,
     /// Index of the agent in the sidebar's host window (updated each snapshot)
     pub host_agent_idx: Option<usize>,
     /// Whether this sidebar's host window is the active window in the session
@@ -306,8 +312,7 @@ impl SidebarApp {
             layout_mode: SidebarLayoutMode::Compact,
             list_area: Rect::default(),
             window_prefix: "wm-".to_string(),
-            host_session: None,
-            host_window_id: None,
+            host_identity: None,
             host_agent_idx: None,
             host_window_active: true,
             selection_mode: SelectionMode::FollowHost,
@@ -357,7 +362,7 @@ impl SidebarApp {
         let window_prefix = config.window_prefix().to_string();
         let status_icons = config.status_icons.clone();
 
-        let (host_session, host_window_id) = detect_host_window();
+        let host_identity = detect_host_identity();
 
         let (templates, template_error) = parse_templates(&config);
         let (current_compact_str, current_tile_strs, current_horizontal_strs) =
@@ -389,8 +394,7 @@ impl SidebarApp {
             layout_mode: SidebarLayoutMode::default(),
             list_area: Rect::default(),
             window_prefix,
-            host_session,
-            host_window_id,
+            host_identity,
             host_agent_idx: None,
             host_window_active: true,
             selection_mode: SelectionMode::FollowHost,
@@ -430,7 +434,7 @@ impl SidebarApp {
         // not whatever was selected from the previous snapshot.
         self.host_agent_idx = host_agent_index(
             &snapshot.agents,
-            self.host_window_id.as_deref(),
+            self.host_window_id(),
             &snapshot.active_pane_ids,
         );
 
@@ -450,14 +454,13 @@ impl SidebarApp {
 
         // Check if host window is active
         let was_active = self.host_window_active;
-        self.host_window_active =
-            if let (Some(session), Some(window_id)) = (&self.host_session, &self.host_window_id) {
-                snapshot
-                    .active_windows
-                    .contains(&(session.clone(), window_id.clone()))
-            } else {
-                true
-            };
+        self.host_window_active = if let Some(identity) = &self.host_identity {
+            snapshot
+                .active_windows
+                .contains(&(identity.session_name.clone(), identity.window_id.clone()))
+        } else {
+            true
+        };
 
         // Re-arm FollowHost when window becomes active
         if !was_active && self.host_window_active {
@@ -475,13 +478,13 @@ impl SidebarApp {
 
         // Apply session filter: retain only agents in the sidebar's host session.
         if self.filter_mode == SidebarFilterMode::Session
-            && let Some(host_session) = self.host_session.as_deref()
+            && let Some(host_session) = self.host_session().map(str::to_owned)
         {
             self.agents.retain(|a| a.session == host_session);
             // Recompute host_agent_idx after filtering
             self.host_agent_idx = host_agent_index(
                 &self.agents,
-                self.host_window_id.as_deref(),
+                self.host_window_id(),
                 &snapshot.active_pane_ids,
             );
         }
@@ -560,12 +563,20 @@ impl SidebarApp {
         self.current_width = cfg.sidebar.width.clone();
     }
 
+    pub(super) fn host_identity(&self) -> Option<&HostIdentity> {
+        self.host_identity.as_ref()
+    }
+
     pub fn host_window_id(&self) -> Option<&str> {
-        self.host_window_id.as_deref()
+        self.host_identity
+            .as_ref()
+            .map(|identity| identity.window_id.as_str())
     }
 
     pub fn host_session(&self) -> Option<&str> {
-        self.host_session.as_deref()
+        self.host_identity
+            .as_ref()
+            .map(|identity| identity.session_name.as_str())
     }
 
     pub fn host_window_active(&self) -> bool {
@@ -1175,33 +1186,66 @@ fn try_reparse_templates(
     first_error
 }
 
-/// Detect this sidebar's host window using TMUX_PANE (stable, one-time).
-/// Returns (session, window_id).
-fn detect_host_window() -> (Option<String>, Option<String>) {
-    let pane_id = std::env::var("TMUX_PANE").ok().unwrap_or_default();
-    let mut args = vec!["display-message", "-p"];
-    if !pane_id.is_empty() {
-        args.extend_from_slice(&["-t", &pane_id]);
-    }
-    args.push("#{session_name}\t#{window_id}");
-    let output = Cmd::new("tmux")
-        .args(&args)
-        .run_and_capture_stdout()
+/// Detect the sidebar's stable host identity from its tmux pane.
+fn detect_host_identity() -> Option<HostIdentity> {
+    let pane_id = std::env::var("TMUX_PANE")
         .ok()
-        .unwrap_or_default();
-    let trimmed = output.trim();
-    let mut parts = trimmed
-        .split('\t')
-        .map(|s| (!s.is_empty()).then(|| s.to_string()));
-    let session = parts.next().flatten();
-    let window_id = parts.next().flatten();
-    (session, window_id)
+        .filter(|pane_id| !pane_id.is_empty())?;
+    let output = Cmd::new("tmux")
+        .args(&[
+            "display-message",
+            "-p",
+            "-t",
+            &pane_id,
+            "#{session_name}\t#{session_id}\t#{window_id}\t#{pane_id}",
+        ])
+        .run_and_capture_stdout()
+        .ok()?;
+
+    let identity = parse_host_identity(&output)?;
+    (identity.pane_id == pane_id).then_some(identity)
+}
+
+fn parse_host_identity(output: &str) -> Option<HostIdentity> {
+    let mut parts = output.trim().split('\t');
+    let identity = HostIdentity {
+        session_name: parts.next()?.to_string(),
+        session_id: parts.next()?.to_string(),
+        window_id: parts.next()?.to_string(),
+        pane_id: parts.next()?.to_string(),
+    };
+    if parts.next().is_some()
+        || identity.session_name.is_empty()
+        || identity.session_id.is_empty()
+        || identity.window_id.is_empty()
+        || identity.pane_id.is_empty()
+    {
+        return None;
+    }
+
+    Some(identity)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{AgentIconConfig, AgentIconDetails};
+
+    #[test]
+    fn parses_complete_host_identity() {
+        let identity = parse_host_identity("main\t$1\t@42\t%94").unwrap();
+
+        assert_eq!(identity.session_name, "main");
+        assert_eq!(identity.session_id, "$1");
+        assert_eq!(identity.window_id, "@42");
+        assert_eq!(identity.pane_id, "%94");
+    }
+
+    #[test]
+    fn rejects_incomplete_host_identity() {
+        assert!(parse_host_identity("main\t$1\t@42").is_none());
+        assert!(parse_host_identity("main\t\t@42\t%94").is_none());
+    }
 
     #[test]
     fn default_multiline_templates_show_checks() {

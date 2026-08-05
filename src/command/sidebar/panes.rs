@@ -7,6 +7,7 @@ use crate::cmd::Cmd;
 use crate::config::SidebarPosition;
 
 use super::SIDEBAR_ROLE_VALUE;
+use super::app::HostIdentity;
 use super::daemon_ctrl::kill_daemon;
 use super::hooks::remove_hooks;
 use super::layout_tree::{layout_after_sidebar_remove, reflow_after_sidebar_add};
@@ -258,6 +259,10 @@ pub(super) fn kill_all_sidebars_and_restore_layouts() {
     kill_panes_and_apply_layouts(&sidebars, &layouts);
 }
 
+fn is_own_sidebar(pane_id: &str, own_pane_id: &str) -> bool {
+    pane_id == own_pane_id
+}
+
 /// Shut down sidebars (called when any sidebar quits).
 /// Kills other sidebar panes immediately, then defers our own window's
 /// layout reflow so it fires after our process exits and the pane closes.
@@ -265,35 +270,18 @@ pub(super) fn kill_all_sidebars_and_restore_layouts() {
 /// In session-scoped mode, only kills sidebars in our session and removes
 /// our session from the scope set. Full cleanup (daemon, hooks) only happens
 /// when no scoped sessions remain.
-pub(super) fn shutdown_all_sidebars() {
+pub(super) fn shutdown_all_sidebars(identity: &HostIdentity) {
     let config = crate::config::Config::load(None).unwrap_or_default();
     let position = super::read_sidebar_position(&config);
-    let our_pane = Cmd::new("tmux")
-        .args(&["display-message", "-p", "#{pane_id}"])
-        .run_and_capture_stdout()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let our_window = Cmd::new("tmux")
-        .args(&["display-message", "-p", "#{window_id}"])
-        .run_and_capture_stdout()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let our_pane = identity.pane_id.as_str();
+    let our_window = identity.window_id.as_str();
+    let our_session_id = identity.session_id.as_str();
 
     let scope = super::current_scope();
 
-    // Determine our session_id for session-scoped filtering
-    let our_session_id = Cmd::new("tmux")
-        .args(&["display-message", "-p", "#{session_id}"])
-        .run_and_capture_stdout()
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-
     let sidebars = match &scope {
-        super::SidebarScope::Sessions(ids) if !our_session_id.is_empty() => {
-            // Session-scoped: only collect sidebars in our session
+        super::SidebarScope::Sessions(ids) => {
+            let our_sid = our_session_id;
             let output = Cmd::new("tmux")
                 .args(&[
                     "list-panes",
@@ -303,7 +291,6 @@ pub(super) fn shutdown_all_sidebars() {
                 ])
                 .run_and_capture_stdout()
                 .unwrap_or_default();
-            let our_sid = &our_session_id;
             let sidebars: Vec<_> = output
                 .lines()
                 .filter_map(|line| {
@@ -335,19 +322,19 @@ pub(super) fn shutdown_all_sidebars() {
 
     let other_sidebars: Vec<(String, String)> = sidebars
         .iter()
-        .filter(|(_, pane_id)| pane_id != &our_pane)
+        .filter(|(_, pane_id)| !is_own_sidebar(pane_id, our_pane))
         .cloned()
         .collect();
     let other_layouts: Vec<Option<String>> = sidebars
         .iter()
         .enumerate()
-        .filter(|(_, (_, pane_id))| pane_id != &our_pane)
+        .filter(|(_, (_, pane_id))| !is_own_sidebar(pane_id, our_pane))
         .map(|(i, _)| layouts[i].clone())
         .collect();
     let our_layout = sidebars
         .iter()
         .enumerate()
-        .find(|(_, (_, pane_id))| pane_id == &our_pane)
+        .find(|(_, (_, pane_id))| is_own_sidebar(pane_id, our_pane))
         .and_then(|(i, _)| layouts[i].clone());
 
     kill_panes_and_apply_layouts(&other_sidebars, &other_layouts);
@@ -363,14 +350,19 @@ pub(super) fn shutdown_all_sidebars() {
     }
 
     // Defer our own window's layout reflow until after our pane closes
-    if !our_window.is_empty()
-        && let Some(layout) = our_layout
-    {
-        let cmd = format!(
-            "sleep 0.1; tmux select-layout -t {win} '{layout}' 2>/dev/null",
-            win = our_window,
-            layout = layout,
-        );
+    if let Some(layout) = our_layout {
+        let cmd = format!("sleep 0.1; tmux select-layout -t {our_window} '{layout}' 2>/dev/null");
         let _ = Cmd::new("tmux").args(&["run-shell", "-b", &cmd]).run();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_sidebar_matches_captured_pane_id() {
+        assert!(is_own_sidebar("%12", "%12"));
+        assert!(!is_own_sidebar("%13", "%12"));
     }
 }

@@ -19,7 +19,7 @@ use crate::cmd::Cmd;
 use crate::multiplexer::{create_backend, detect_backend};
 use crate::shell::shell_quote;
 
-use super::app::SidebarApp;
+use super::app::{HostIdentity, SidebarApp};
 use super::client;
 use super::daemon_ctrl::ensure_daemon_running;
 use super::panes::shutdown_all_sidebars;
@@ -67,6 +67,10 @@ pub fn run_sidebar() -> Result<()> {
     // Create app BEFORE entering raw mode: terminal_light::luma() queries
     // the terminal via stdin, which would race with the input reader thread.
     let mut app = SidebarApp::new_client(mux)?;
+    let Some(host_identity) = app.host_identity().cloned() else {
+        tracing::error!("sidebar-run exiting: host pane identity unavailable");
+        return Ok(());
+    };
 
     // Ensure daemon is running (may have auto-exited or crashed)
     let sock_path = ensure_daemon_running()?;
@@ -192,9 +196,9 @@ pub fn run_sidebar() -> Result<()> {
                 "sidebar-run quitting"
             );
             if app.quit_silent {
-                schedule_current_pane_kill();
+                schedule_pane_kill(&host_identity.pane_id);
             } else {
-                shutdown_all_sidebars();
+                shutdown_all_sidebars(&host_identity);
             }
             break;
         }
@@ -233,22 +237,48 @@ fn handle_resize_event(
     *needs_clear = true;
 }
 
-fn schedule_current_pane_kill() {
-    let pane = Cmd::new("tmux")
-        .args(&["display-message", "-p", "#{pane_id}"])
-        .run_and_capture_stdout()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if pane.is_empty() {
-        return;
-    }
-
-    let cmd = format!(
+fn pane_kill_command(pane_id: &str) -> String {
+    format!(
         "sleep 0.05; tmux kill-pane -t {} 2>/dev/null || true",
-        shell_quote(&pane)
-    );
+        shell_quote(pane_id)
+    )
+}
+
+fn schedule_pane_kill(pane_id: &str) {
+    let cmd = pane_kill_command(pane_id);
     let _ = Cmd::new("tmux").args(&["run-shell", "-b", &cmd]).run();
+}
+
+fn sole_pane_is_sidebar(output: &str, pane_id: &str) -> bool {
+    let mut panes = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    panes.next() == Some(pane_id) && panes.next().is_none()
+}
+
+fn sidebar_is_only_pane(window_id: &str, pane_id: &str) -> bool {
+    Cmd::new("tmux")
+        .args(&["list-panes", "-t", window_id, "-F", "#{pane_id}"])
+        .run_and_capture_stdout()
+        .is_ok_and(|output| sole_pane_is_sidebar(&output, pane_id))
+}
+
+fn should_exit_for_last_pane(
+    startup_grace_elapsed: bool,
+    identity: Option<&HostIdentity>,
+    pane_counts: &std::collections::HashMap<String, usize>,
+    verify_live_panes: impl FnOnce(&str, &str) -> bool,
+) -> bool {
+    if !startup_grace_elapsed {
+        return false;
+    }
+    let Some(identity) = identity else {
+        return false;
+    };
+
+    pane_counts.get(&identity.window_id).copied().unwrap_or(2) <= 1
+        && verify_live_panes(&identity.window_id, &identity.pane_id)
 }
 
 fn process_event(
@@ -263,12 +293,18 @@ fn process_event(
     match event {
         AppEvent::SnapshotReady => {
             if let Some(snapshot) = snapshot_handle.take() {
-                // Check last-pane using snapshot data (with startup grace period)
-                if startup.elapsed() > startup_grace
-                    && let Some(wid) = app.host_window_id()
-                    && snapshot.window_pane_counts.get(wid).copied().unwrap_or(2) <= 1
-                {
-                    app.quit_reason = Some(format!("last-pane: window {} has <= 1 pane", wid));
+                let last_pane = should_exit_for_last_pane(
+                    startup.elapsed() > startup_grace,
+                    app.host_identity(),
+                    &snapshot.window_pane_counts,
+                    sidebar_is_only_pane,
+                );
+                if last_pane {
+                    let window_id = app.host_window_id().unwrap_or("unknown");
+                    app.quit_reason = Some(format!(
+                        "last-pane: sidebar is sole pane in window {}",
+                        window_id
+                    ));
                     app.quit_silent = true;
                     app.should_quit = true;
                 }
@@ -350,6 +386,75 @@ mod tests {
             location: String::new(),
             message: String::new(),
         })
+    }
+
+    fn test_identity() -> HostIdentity {
+        HostIdentity {
+            session_name: "main".to_string(),
+            session_id: "$1".to_string(),
+            window_id: "@42".to_string(),
+            pane_id: "%12".to_string(),
+        }
+    }
+
+    #[test]
+    fn last_pane_exit_requires_snapshot_and_live_confirmation() {
+        let identity = test_identity();
+        let one_pane = std::collections::HashMap::from([("@42".to_string(), 1)]);
+        let two_panes = std::collections::HashMap::from([("@42".to_string(), 2)]);
+
+        assert!(!should_exit_for_last_pane(
+            false,
+            Some(&identity),
+            &one_pane,
+            |_, _| panic!("startup grace must skip live verification")
+        ));
+        assert!(!should_exit_for_last_pane(
+            true,
+            None,
+            &one_pane,
+            |_, _| panic!("missing identity must skip live verification")
+        ));
+        assert!(!should_exit_for_last_pane(
+            true,
+            Some(&identity),
+            &std::collections::HashMap::new(),
+            |_, _| panic!("missing count must skip live verification")
+        ));
+        assert!(!should_exit_for_last_pane(
+            true,
+            Some(&identity),
+            &two_panes,
+            |_, _| panic!("multiple panes must skip live verification")
+        ));
+        assert!(!should_exit_for_last_pane(
+            true,
+            Some(&identity),
+            &one_pane,
+            |window_id, pane_id| window_id == "@42" && pane_id != "%12"
+        ));
+        assert!(should_exit_for_last_pane(
+            true,
+            Some(&identity),
+            &one_pane,
+            |window_id, pane_id| window_id == "@42" && pane_id == "%12"
+        ));
+    }
+
+    #[test]
+    fn pane_kill_command_targets_captured_sidebar_pane() {
+        assert_eq!(
+            pane_kill_command("%12"),
+            "sleep 0.05; tmux kill-pane -t '%12' 2>/dev/null || true"
+        );
+    }
+
+    #[test]
+    fn sole_pane_confirmation_requires_sidebar_identity() {
+        assert!(sole_pane_is_sidebar("%12\n", "%12"));
+        assert!(!sole_pane_is_sidebar("%12\n%13\n", "%12"));
+        assert!(!sole_pane_is_sidebar("%13\n", "%12"));
+        assert!(!sole_pane_is_sidebar("", "%12"));
     }
 
     #[test]
