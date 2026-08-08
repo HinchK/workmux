@@ -23,10 +23,23 @@ use super::{Multiplexer, PaneHandshake, util};
 #[derive(Debug, Default)]
 pub struct TmuxBackend;
 
-const LIVE_PANE_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{session_name}\t#{window_name}\t#{session_id}\t#{window_id}";
+const LIVE_PANE_RECORD_SEPARATOR: char = '\x1e';
+const LIVE_PANE_FIELD_SEPARATOR: char = '\x1f';
+const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}";
+
+fn live_pane_fields(line: &str) -> Vec<&str> {
+    if line.contains(LIVE_PANE_FIELD_SEPARATOR) {
+        line.split(LIVE_PANE_FIELD_SEPARATOR).collect()
+    } else {
+        line.split('\t').collect()
+    }
+}
 
 fn parse_live_pane_line(line: &str) -> Option<(String, LivePaneInfo)> {
-    let parts: Vec<&str> = line.split('\t').collect();
+    let line = line
+        .strip_prefix(LIVE_PANE_RECORD_SEPARATOR)
+        .unwrap_or(line);
+    let parts = live_pane_fields(line);
     if parts.len() < 7 {
         return None;
     }
@@ -54,6 +67,52 @@ fn parse_live_pane_line(line: &str) -> Option<(String, LivePaneInfo)> {
                 .filter(|value| !value.is_empty()),
         },
     ))
+}
+
+fn live_pane_records(output: &str) -> Vec<&str> {
+    if output.contains(LIVE_PANE_RECORD_SEPARATOR) {
+        output
+            .split(LIVE_PANE_RECORD_SEPARATOR)
+            .filter(|record| !record.is_empty())
+            .map(|record| record.strip_suffix('\n').unwrap_or(record))
+            .collect()
+    } else {
+        output.lines().collect()
+    }
+}
+
+fn parse_live_pane_snapshot_lossy(output: &str) -> HashMap<String, LivePaneInfo> {
+    live_pane_records(output)
+        .into_iter()
+        .filter_map(parse_live_pane_line)
+        .collect()
+}
+
+fn parse_live_pane_line_strict(line: &str) -> Result<(String, LivePaneInfo)> {
+    let parts = live_pane_fields(line);
+    if parts.len() != 9 || parts[0].is_empty() {
+        return Err(anyhow!(
+            "tmux returned malformed pane information: {line:?}"
+        ));
+    }
+    let pid = parts[1]
+        .parse()
+        .map_err(|_| anyhow!("tmux returned malformed pane PID: {:?}", parts[1]))?;
+    let (pane_id, mut info) = parse_live_pane_line(line)
+        .ok_or_else(|| anyhow!("tmux returned malformed pane information: {line:?}"))?;
+    info.pid = Some(pid);
+    Ok((pane_id, info))
+}
+
+fn parse_live_pane_snapshot(output: &str) -> Result<HashMap<String, LivePaneInfo>> {
+    let mut panes = HashMap::new();
+    for line in live_pane_records(output) {
+        let (pane_id, info) = parse_live_pane_line_strict(line)?;
+        if panes.insert(pane_id.clone(), info).is_some() {
+            return Err(anyhow!("tmux returned duplicate pane ID: {pane_id}"));
+        }
+    }
+    Ok(panes)
 }
 
 fn classify_live_pane_query<F>(
@@ -1058,23 +1117,29 @@ impl Multiplexer for TmuxBackend {
     // === State Reconciliation ===
 
     fn instance_id(&self) -> String {
+        self.resolve_instance_id()
+            .unwrap_or_else(|_| "default".to_string())
+    }
+
+    fn resolve_instance_id(&self) -> Result<String> {
         // TMUX env var format: /path/to/socket,pid,session_index
-        // We use only the socket path, which identifies the tmux server.
-        // All sessions on the same server share one socket, so instance_id
-        // is per-server, not per-session.
+        // The socket path identifies the server shared by all of its sessions.
         if let Some(socket_path) = std::env::var("TMUX")
             .ok()
             .and_then(|tmux| tmux.split(',').next().map(String::from))
             .filter(|socket_path| !socket_path.is_empty())
         {
-            return socket_path;
+            return Ok(socket_path);
         }
 
-        self.tmux_query(&["display-message", "-p", "#{socket_path}"])
-            .ok()
-            .map(|socket_path| socket_path.trim().to_string())
-            .filter(|socket_path| !socket_path.is_empty())
-            .unwrap_or_else(|| "default".to_string())
+        let socket_path = self
+            .tmux_query(&["display-message", "-p", "#{socket_path}"])
+            .context("failed to resolve tmux socket path")?;
+        let socket_path = socket_path.trim();
+        if socket_path.is_empty() {
+            return Err(anyhow!("tmux returned an empty socket path"));
+        }
+        Ok(socket_path.to_string())
     }
 
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
@@ -1098,14 +1163,20 @@ impl Multiplexer for TmuxBackend {
                     Some(trimmed)
                 }
             })
-            .or_else(|_| Ok(None))
     }
 
     fn get_all_live_pane_info(&self) -> Result<std::collections::HashMap<String, LivePaneInfo>> {
         // Use list-panes -a to query ALL panes across all sessions at once
         let output = self.tmux_query(&["list-panes", "-a", "-F", LIVE_PANE_FORMAT])?;
 
-        Ok(output.lines().filter_map(parse_live_pane_line).collect())
+        Ok(parse_live_pane_snapshot_lossy(&output))
+    }
+
+    fn get_all_live_pane_info_strict(
+        &self,
+    ) -> Result<std::collections::HashMap<String, LivePaneInfo>> {
+        let output = self.tmux_query(&["list-panes", "-a", "-F", LIVE_PANE_FORMAT])?;
+        parse_live_pane_snapshot(&output)
     }
 }
 /// Build the pane-focus hook that acknowledges a status and refreshes sidebar clients.
@@ -1141,6 +1212,55 @@ mod tests {
     fn live_pane(path: &str, session_id: &str) -> LivePaneInfo {
         let line = format!("%7\t12345\tnode\t{path}\tWorking\tmain\twork\t{session_id}\t@2");
         parse_live_pane_line(&line).unwrap().1
+    }
+
+    #[test]
+    fn live_pane_snapshot_rejects_malformed_rows() {
+        let error = parse_live_pane_snapshot(&format!("{LIVE_PANE_LINE}\nmalformed")).unwrap_err();
+
+        assert!(error.to_string().contains("malformed pane information"));
+    }
+
+    #[test]
+    fn live_pane_snapshot_preserves_newlines_inside_records() {
+        let output =
+            "\x1e%7\x1f12345\x1fnode\x1f/repo/a\nb\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2\n";
+
+        let panes = parse_live_pane_snapshot(output).unwrap();
+
+        assert_eq!(panes["%7"].working_dir, PathBuf::from("/repo/a\nb"));
+    }
+
+    #[test]
+    fn live_pane_snapshot_preserves_tabs_inside_fields() {
+        let output =
+            "\x1e%7\x1f12345\x1fnode\x1f/repo/a\tb\x1fWorking\x1fmain\x1fwork\x1f$1\x1f@2\n";
+
+        let panes = parse_live_pane_snapshot(output).unwrap();
+
+        assert_eq!(panes["%7"].working_dir, PathBuf::from("/repo/a\tb"));
+    }
+
+    #[test]
+    fn live_pane_snapshot_rejects_invalid_pid() {
+        let error =
+            parse_live_pane_snapshot("%7\tnot-a-pid\tnode\t/repo\tWorking\tmain\twork\t$1\t@2")
+                .unwrap_err();
+
+        assert!(error.to_string().contains("malformed pane PID"));
+    }
+
+    #[test]
+    fn lossy_live_pane_snapshot_skips_malformed_rows() {
+        let panes = parse_live_pane_snapshot_lossy(&format!("{LIVE_PANE_LINE}\nmalformed"));
+
+        assert_eq!(panes.len(), 1);
+        assert!(panes.contains_key("%7"));
+    }
+
+    #[test]
+    fn live_pane_snapshot_accepts_empty_output() {
+        assert!(parse_live_pane_snapshot("").unwrap().is_empty());
     }
 
     #[test]

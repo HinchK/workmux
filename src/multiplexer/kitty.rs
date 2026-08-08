@@ -682,6 +682,13 @@ impl Multiplexer for KittyBackend {
         std::env::var("KITTY_LISTEN_ON").unwrap_or_else(|_| "default".to_string())
     }
 
+    fn resolve_instance_id(&self) -> Result<String> {
+        std::env::var("KITTY_LISTEN_ON")
+            .ok()
+            .filter(|instance| !instance.trim().is_empty())
+            .ok_or_else(|| anyhow!("KITTY_LISTEN_ON is required to resolve the Kitty instance"))
+    }
+
     fn get_live_pane_info(&self, pane_id: &str) -> Result<Option<LivePaneInfo>> {
         // Parse pane ID, returning None if it's not a valid number
         let pane_id_num: u64 = match pane_id.parse() {

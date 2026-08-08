@@ -60,20 +60,25 @@ pub fn resolve_worktree_agents(
     name: &str,
     mux: &dyn Multiplexer,
 ) -> Result<(PathBuf, Vec<AgentPane>)> {
+    let agent_panes = StateStore::new().and_then(|store| store.load_reconciled_agents(mux))?;
+    resolve_worktree_agents_from_snapshot(name, &agent_panes)
+}
+
+/// Resolve a worktree name against one reconciled agent snapshot.
+pub fn resolve_worktree_agents_from_snapshot(
+    name: &str,
+    agent_panes: &[AgentPane],
+) -> Result<(PathBuf, Vec<AgentPane>)> {
     match AgentSelector::parse(name) {
         AgentSelector::Qualified { project, handle } => {
-            let agent_panes =
-                StateStore::new().and_then(|store| store.load_reconciled_agents(mux))?;
-            resolve_global_agents(&agent_panes, &handle, Some(&project))
+            resolve_global_agents(agent_panes, &handle, Some(&project))
         }
         AgentSelector::Local(local_name) => {
             // Try local git resolution first
-            let in_git_repo = git::is_git_repo().unwrap_or(false);
+            let in_git_repo = git::get_repo_root_if_present()?.is_some();
             let local_result = if in_git_repo {
                 match git::find_worktree(&local_name) {
                     Ok((worktree_path, _branch)) => {
-                        let agent_panes = StateStore::new()
-                            .and_then(|store| store.load_reconciled_agents(mux))?;
                         Some(Ok(resolve_local_agents(agent_panes, &worktree_path)))
                     }
                     Err(e) if e.downcast_ref::<git::WorktreeNotFound>().is_some() => None,
@@ -86,12 +91,7 @@ pub fn resolve_worktree_agents(
             match local_result {
                 Some(Ok(result)) => Ok(result),
                 Some(Err(e)) => Err(e),
-                None => {
-                    // Fall back to global resolution
-                    let agent_panes =
-                        StateStore::new().and_then(|store| store.load_reconciled_agents(mux))?;
-                    resolve_global_agents(&agent_panes, &local_name, None)
-                }
+                None => resolve_global_agents(agent_panes, &local_name, None),
             }
         }
     }
@@ -99,16 +99,17 @@ pub fn resolve_worktree_agents(
 
 /// Match agents against a known local worktree path.
 fn resolve_local_agents(
-    agent_panes: Vec<AgentPane>,
+    agent_panes: &[AgentPane],
     worktree_path: &Path,
 ) -> (PathBuf, Vec<AgentPane>) {
     let canon_wt_path = canon_or_self(worktree_path);
     let matching: Vec<AgentPane> = agent_panes
-        .into_iter()
+        .iter()
         .filter(|a| {
             let canon_agent_path = canon_or_self(&a.path);
             canon_agent_path == canon_wt_path || canon_agent_path.starts_with(&canon_wt_path)
         })
+        .cloned()
         .collect();
     (worktree_path.to_path_buf(), matching)
 }

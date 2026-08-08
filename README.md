@@ -1389,6 +1389,23 @@ api-work    1w   -      ✓    -         ~/project__worktrees/api-work
 
 ---
 
+### `workmux status [worktree...]`
+
+Queries tracked agents in the current repository or in explicitly requested
+worktrees. Use `project:handle` to target a worktree in another project.
+
+- `--json`: Emit an observation object containing the selected multiplexer
+  context, repository and target scope, state-file counts, the reconciled agent
+  count before scope filtering, and the scoped `agents` array.
+- `--git`: Include staged, unstaged, and unmerged commit information.
+
+Automation must check the command exit status before interpreting an empty
+`agents` array. See the
+[`status` command reference](https://workmux.dev/reference/commands/status/) for
+the JSON contract and fail-closed rules.
+
+---
+
 ### `workmux config edit`
 
 Opens the global configuration file (`~/.config/workmux/config.yaml`) in your

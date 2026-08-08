@@ -24,7 +24,45 @@ pub struct StateStore {
     base_path: PathBuf,
 }
 
+/// Agent observation and the state inventory used to produce it.
+pub struct ReconciledAgentReport {
+    pub backend: String,
+    pub instance: String,
+    pub state_files_total: usize,
+    pub state_files_invalid: usize,
+    pub state_files_invalid_unattributed: usize,
+    pub state_files_invalid_matching_context: usize,
+    pub state_files_matching_context: usize,
+    pub agents: Vec<crate::multiplexer::AgentPane>,
+}
+
+struct AgentInventory {
+    states: Vec<AgentState>,
+    total: usize,
+    invalid: Vec<Option<PaneKey>>,
+}
+
+fn unambiguous_pane_key_from_filename(filename: &str) -> Option<PaneKey> {
+    let stem = filename.strip_suffix(".json")?;
+    if stem.matches("__").count() != 2 || stem.contains("___") {
+        return None;
+    }
+    let key = PaneKey::from_filename(filename)?;
+    (!key.backend.is_empty()
+        && !key.instance.is_empty()
+        && !key.pane_id.is_empty()
+        && key.to_filename() == filename)
+        .then_some(key)
+}
+
 impl StateStore {
+    /// Open a StateStore without creating state directories.
+    pub fn open_read_only() -> Result<Self> {
+        Ok(Self {
+            base_path: get_state_dir()?,
+        })
+    }
+
     /// Create a new StateStore using XDG_STATE_HOME.
     ///
     /// Creates the base directory and agents subdirectory if they don't exist.
@@ -88,7 +126,7 @@ impl StateStore {
     /// List all agent states.
     ///
     /// Used for reconciliation and dashboard display.
-    /// Skips corrupted files (logs warning and deletes them).
+    /// Skips invalid files and preserves them for diagnosis.
     pub fn list_all_agents(&self) -> Result<Vec<AgentState>> {
         let agents_dir = self.agents_dir();
         if !agents_dir.exists() {
@@ -109,6 +147,60 @@ impl StateStore {
             }
         }
         Ok(agents)
+    }
+
+    fn inspect_agent_inventory(&self) -> Result<AgentInventory> {
+        let agents_dir = self.agents_dir();
+        if !agents_dir.exists() {
+            return Ok(AgentInventory {
+                states: Vec::new(),
+                total: 0,
+                invalid: Vec::new(),
+            });
+        }
+
+        let mut states = Vec::new();
+        let mut total = 0;
+        let mut invalid = Vec::new();
+        for entry in fs::read_dir(&agents_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json")
+                || path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".tmp"))
+            {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Failed to read agent state: {}", path.display())
+                    });
+                }
+            };
+            total += 1;
+            match serde_json::from_str(&content) {
+                Ok(state) => states.push(state),
+                Err(error) => {
+                    warn!(?path, %error, "invalid agent state file");
+                    invalid.push(
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .and_then(unambiguous_pane_key_from_filename),
+                    );
+                }
+            }
+        }
+
+        Ok(AgentInventory {
+            states,
+            total,
+            invalid,
+        })
     }
 
     /// Delete agent state.
@@ -354,9 +446,71 @@ impl StateStore {
         mux: &dyn crate::multiplexer::Multiplexer,
     ) -> Result<Vec<crate::multiplexer::AgentPane>> {
         let all_agents = self.list_all_agents()?;
+        let backend = mux.name();
+        let instance = mux.instance_id();
+        self.reconcile_agents_for_context(all_agents, mux, backend, &instance, false, true)
+    }
 
+    /// Observe reconciled agents together with the complete state-file census.
+    pub fn load_reconciled_agent_report(
+        &self,
+        mux: &dyn crate::multiplexer::Multiplexer,
+    ) -> Result<ReconciledAgentReport> {
+        let inventory = self.inspect_agent_inventory()?;
+        let backend = mux.name();
+        let instance = mux.resolve_instance_id()?;
+        let state_files_matching_context = inventory
+            .states
+            .iter()
+            .filter(|state| {
+                state.pane_key.backend == backend && state.pane_key.instance == instance
+            })
+            .count();
+        let state_files_invalid = inventory.invalid.len();
+        let state_files_invalid_unattributed =
+            inventory.invalid.iter().filter(|key| key.is_none()).count();
+        let state_files_invalid_matching_context = inventory
+            .invalid
+            .iter()
+            .filter_map(Option::as_ref)
+            .filter(|key| key.backend == backend && key.instance == instance)
+            .count();
+        let agents = self.reconcile_agents_for_context(
+            inventory.states,
+            mux,
+            backend,
+            &instance,
+            true,
+            false,
+        )?;
+
+        Ok(ReconciledAgentReport {
+            backend: backend.to_string(),
+            instance,
+            state_files_total: inventory.total,
+            state_files_invalid,
+            state_files_invalid_unattributed,
+            state_files_invalid_matching_context,
+            state_files_matching_context,
+            agents,
+        })
+    }
+
+    fn reconcile_agents_for_context(
+        &self,
+        all_agents: Vec<AgentState>,
+        mux: &dyn crate::multiplexer::Multiplexer,
+        backend: &str,
+        instance: &str,
+        strict_server_identity: bool,
+        prune_stale: bool,
+    ) -> Result<Vec<crate::multiplexer::AgentPane>> {
         // Fetch all live pane info in a single batched query
-        let live_panes = mux.get_all_live_pane_info()?;
+        let live_panes = if strict_server_identity {
+            mux.get_all_live_pane_info_strict()?
+        } else {
+            mux.get_all_live_pane_info()?
+        };
         let auto_renamed_tmux_windows = if mux.name() == "tmux" {
             tmux_auto_renamed_windows(&live_panes)
         } else {
@@ -364,11 +518,13 @@ impl StateStore {
         };
 
         // Get current server boot ID for crash detection
-        let current_boot_id = mux.server_boot_id().unwrap_or(None);
+        let current_boot_id = if strict_server_identity {
+            mux.server_boot_id()?
+        } else {
+            mux.server_boot_id().unwrap_or(None)
+        };
 
         let mut valid_agents = Vec::new();
-        let backend = mux.name();
-        let instance = mux.instance_id();
 
         for state in all_agents {
             // Skip agents from other backends/instances
@@ -398,9 +554,11 @@ impl StateStore {
                         );
                         valid_agents.push(agent_pane);
                     } else {
-                        info!(pane_id, "reconcile: removing agent, pane no longer exists");
-                        self.delete_agent(&state.pane_key)?;
-                        let _ = mux.clear_status(&state.pane_key.pane_id);
+                        info!(pane_id, "reconcile: agent pane no longer exists");
+                        if prune_stale {
+                            self.delete_agent(&state.pane_key)?;
+                            let _ = mux.clear_status(&state.pane_key.pane_id);
+                        }
                     }
                 }
                 Some(live) if live.pid.is_some_and(|pid| pid != state.pane_pid) => {
@@ -416,10 +574,12 @@ impl StateStore {
                             pane_id,
                             stored_pid = state.pane_pid,
                             live_pid = live.pid.unwrap_or(0),
-                            "reconcile: removing agent, pane PID changed (pane ID recycled)"
+                            "reconcile: pane PID changed (pane ID recycled)"
                         );
-                        self.delete_agent(&state.pane_key)?;
-                        let _ = mux.clear_status(&state.pane_key.pane_id);
+                        if prune_stale {
+                            self.delete_agent(&state.pane_key)?;
+                            let _ = mux.clear_status(&state.pane_key.pane_id);
+                        }
                     }
                 }
                 Some(live)
@@ -440,10 +600,12 @@ impl StateStore {
                             pane_id,
                             stored_command = state.command,
                             live_command = live.current_command.as_deref().unwrap_or(""),
-                            "reconcile: removing agent, foreground command changed"
+                            "reconcile: foreground command changed"
                         );
-                        self.delete_agent(&state.pane_key)?;
-                        let _ = mux.clear_status(&state.pane_key.pane_id);
+                        if prune_stale {
+                            self.delete_agent(&state.pane_key)?;
+                            let _ = mux.clear_status(&state.pane_key.pane_id);
+                        }
                     }
                 }
                 Some(live) => {
@@ -526,15 +688,13 @@ fn remap_full_name(name: &str, old_base: &str, new_base: &str) -> String {
 
 /// Read and parse an agent state file.
 ///
-/// Returns None if file doesn't exist.
-/// Deletes corrupted files and returns None (recoverable error).
+/// Returns None if the file doesn't exist or cannot be decoded.
 fn read_agent_file(path: &Path) -> Result<Option<AgentState>> {
     match fs::read_to_string(path) {
         Ok(content) => match serde_json::from_str(&content) {
             Ok(state) => Ok(Some(state)),
             Err(e) => {
-                warn!(?path, error = %e, "corrupted state file, deleting");
-                let _ = fs::remove_file(path);
+                warn!(?path, error = %e, "invalid agent state file");
                 Ok(None)
             }
         },
@@ -659,20 +819,16 @@ mod tests {
     }
 
     #[test]
-    fn test_corrupted_file_deleted() {
+    fn invalid_agent_file_is_preserved() {
         let (store, dir) = test_store();
         let key = test_pane_key();
-
-        // Write corrupted JSON
         let path = dir.path().join("agents").join(key.to_filename());
         fs::write(&path, "not valid json {{{").unwrap();
 
-        // Should return None, not error
         let result = store.get_agent(&key).unwrap();
-        assert!(result.is_none());
 
-        // File should be deleted
-        assert!(!path.exists());
+        assert!(result.is_none());
+        assert!(path.exists());
     }
 
     #[test]
@@ -765,6 +921,49 @@ mod tests {
 
         let agents = store.list_all_agents().unwrap();
         assert_eq!(agents.len(), 1);
+    }
+
+    #[test]
+    fn agent_inventory_counts_invalid_files_without_deleting_them() {
+        let (store, dir) = test_store();
+        store
+            .upsert_agent(&test_agent_state(test_pane_key()))
+            .unwrap();
+        let invalid_path = dir.path().join("agents").join("invalid.json");
+        fs::write(&invalid_path, "{").unwrap();
+
+        let inventory = store.inspect_agent_inventory().unwrap();
+
+        assert_eq!(inventory.total, 2);
+        assert_eq!(inventory.invalid.len(), 1);
+        assert_eq!(inventory.states.len(), 1);
+        assert!(invalid_path.exists());
+    }
+
+    #[test]
+    fn ambiguous_invalid_filename_is_not_attributed() {
+        assert!(unambiguous_pane_key_from_filename("tmux__instance__part__%1.json").is_none());
+        assert!(unambiguous_pane_key_from_filename("tmux__instance___%1.json").is_none());
+        assert!(unambiguous_pane_key_from_filename("tmux__%FF__%1.json").is_none());
+        assert!(unambiguous_pane_key_from_filename("tmux__instance__%251.json").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_inventory_ignores_files_that_disappear_before_read() {
+        let (store, dir) = test_store();
+        let agents_dir = dir.path().join("agents");
+        std::os::unix::fs::symlink(
+            agents_dir.join("already-gone"),
+            agents_dir.join("vanished.json"),
+        )
+        .unwrap();
+
+        let inventory = store.inspect_agent_inventory().unwrap();
+
+        assert_eq!(inventory.total, 0);
+        assert!(inventory.invalid.is_empty());
+        assert!(inventory.states.is_empty());
     }
 
     #[test]

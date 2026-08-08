@@ -501,6 +501,12 @@ impl Multiplexer for ZellijBackend {
         self.session_name().unwrap_or_else(|| "default".to_string())
     }
 
+    fn resolve_instance_id(&self) -> Result<String> {
+        self.session_name()
+            .filter(|instance| !instance.trim().is_empty())
+            .ok_or_else(|| anyhow!("Zellij session name is required to resolve the instance"))
+    }
+
     // === Session Management (not supported in Zellij) ===
 
     fn create_session(&self, _params: super::types::CreateSessionParams) -> Result<String> {

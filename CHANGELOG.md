@@ -22,6 +22,12 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## Unreleased
+
+- Make `workmux status --json` return a versioned observation object instead of
+  an array, with scope and state-file diagnostics. Unresolved explicit targets
+  return partial results with a nonzero exit status.
+
 ## v0.1.236 (2026-08-08)
 
 - Show working, waiting, and done status icons in Zellij tab titles. ([#220](https://github.com/raine/workmux/pull/220))

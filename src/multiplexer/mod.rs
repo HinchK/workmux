@@ -769,6 +769,15 @@ pub trait Multiplexer: Send + Sync {
     /// For WezTerm: mux domain ID or workspace name
     fn instance_id(&self) -> String;
 
+    /// Resolve the backend instance identifier without a fallback identity.
+    ///
+    /// Observation commands use this to avoid treating an unresolved instance
+    /// as an empty agent set. Backends with infallible identities may use the
+    /// default implementation.
+    fn resolve_instance_id(&self) -> Result<String> {
+        Ok(self.instance_id())
+    }
+
     /// Get live pane info including PID and current command.
     ///
     /// Returns None only when the backend can establish that the pane does not
@@ -780,6 +789,13 @@ pub trait Multiplexer: Send + Sync {
     /// Returns a HashMap from pane_id to LivePaneInfo. This is more efficient
     /// than calling get_live_pane_info repeatedly when validating many panes.
     fn get_all_live_pane_info(&self) -> Result<std::collections::HashMap<String, LivePaneInfo>>;
+
+    /// Get a live pane snapshot without dropping malformed backend output.
+    fn get_all_live_pane_info_strict(
+        &self,
+    ) -> Result<std::collections::HashMap<String, LivePaneInfo>> {
+        self.get_all_live_pane_info()
+    }
 
     /// Get the server's boot identifier for crash detection.
     ///
@@ -844,6 +860,23 @@ pub fn detect_backend() -> BackendType {
         }
     }
 
+    detect_backend_from_environment()
+}
+
+/// Detect the backend while rejecting an invalid explicit override.
+pub fn detect_backend_strict() -> Result<BackendType> {
+    if let Ok(value) = std::env::var("WORKMUX_BACKEND")
+        && !value.trim().is_empty()
+    {
+        return value.parse().map_err(|_| {
+            anyhow!("invalid WORKMUX_BACKEND={value:?}, expected tmux|wezterm|kitty|zellij")
+        });
+    }
+
+    Ok(detect_backend_from_environment())
+}
+
+fn detect_backend_from_environment() -> BackendType {
     resolve_backend(
         std::env::var("TMUX").is_ok(),
         std::env::var("WEZTERM_PANE").is_ok(),

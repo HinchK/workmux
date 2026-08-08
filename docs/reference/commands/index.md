@@ -14,6 +14,7 @@ description: Complete reference for all workmux commands
 | [`remove`](./remove)           | Remove worktrees without merging                    |
 | [`rename`](./rename)           | Rename a worktree, its tmux window, and branch      |
 | [`list`](./list)               | List all worktrees with status                      |
+| [`status`](./status)           | Query tracked agent status                          |
 | [`open`](./open)               | Open a tmux window for an existing worktree         |
 | [`close`](./close)             | Close a worktree's tmux window (keeps worktree)     |
 | [`resurrect`](./resurrect)     | Restore worktree windows after a crash              |

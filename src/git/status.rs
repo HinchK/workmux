@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::Command;
@@ -74,26 +74,33 @@ pub fn has_untracked_files(worktree_path: &Path) -> Result<bool> {
     Ok(false)
 }
 
+fn git_diff_has_changes(worktree_path: &Path, args: &[&str]) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("--no-optional-locks")
+        .args(args)
+        .current_dir(worktree_path)
+        .output()
+        .context("Failed to execute git diff")?;
+
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        code => Err(anyhow!(
+            "git diff failed with status {:?}: {}",
+            code,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
 /// Check if the worktree has staged changes
 pub fn has_staged_changes(worktree_path: &Path) -> Result<bool> {
-    // Exit code 0 = no changes, 1 = has changes
-    // So we invert the result of run_as_check
-    let no_changes = bg_git()
-        .workdir(worktree_path)
-        .args(&["diff", "--cached", "--quiet"])
-        .run_as_check()?;
-    Ok(!no_changes)
+    git_diff_has_changes(worktree_path, &["diff", "--cached", "--quiet"])
 }
 
 /// Check if the worktree has unstaged changes
 pub fn has_unstaged_changes(worktree_path: &Path) -> Result<bool> {
-    // Exit code 0 = no changes, 1 = has changes
-    // So we invert the result of run_as_check
-    let no_changes = bg_git()
-        .workdir(worktree_path)
-        .args(&["diff", "--quiet"])
-        .run_as_check()?;
-    Ok(!no_changes)
+    git_diff_has_changes(worktree_path, &["diff", "--quiet"])
 }
 
 /// Parse git status porcelain v2 output to extract branch info and dirty state.
