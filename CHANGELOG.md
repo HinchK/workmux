@@ -22,6 +22,13 @@ description: Release notes and version history for workmux
 
 # Changelog
 
+## v0.1.236 (2026-08-08)
+
+- Show working, waiting, and done status icons in Zellij tab titles. ([#220](https://github.com/raine/workmux/pull/220))
+- Keep agent status updates tied to the correct pane when background hooks run without `TMUX_PANE` (seems to happens with Claude Code occasionally).
+- Track Codex subagents through new dedicated stop hooks, keeping the pane marked as working until the root turn finishes.
+- Place new tmux windows in the session whose pane paths best match the current directory when pane context is unavailable, and return an actionable error when multiple sessions match equally well.
+
 ## v0.1.235 (2026-08-07)
 
 - Close and remove the correct tmux windows even after they are renamed, without affecting unrelated windows that reuse the original name. ([#212](https://github.com/raine/workmux/issues/212))
