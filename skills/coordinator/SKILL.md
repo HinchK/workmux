@@ -58,9 +58,16 @@ Write API tests...
 EOF
 
 # Step 2: Spawn all agents (in parallel, after ALL files exist)
-workmux add auth-module -b -P "$tmpfile_a"
-workmux add api-tests -b -P "$tmpfile_b"
+parent_session="the-intended-session"
+workmux add auth-module -b -P "$tmpfile_a" --parent-session "$parent_session"
+workmux add api-tests -b -P "$tmpfile_b" --parent-session "$parent_session"
 ```
+
+The working directory selects the Git repository, while `--parent-session`
+selects the tmux session. Background agent tools can omit `$TMUX_PANE`, so every
+coordinated spawn must pass the intended parent session explicitly. Use the
+session provided by the task or known coordinator context. If it is unknown, ask
+instead of inferring it from the repository name or working directory.
 
 Flags:
 
@@ -69,6 +76,7 @@ Flags:
 - `-p <text>`: inline prompt (short tasks only)
 - `--name <handle>`: explicit handle name (otherwise derived from branch)
 - `--base <branch>`: base branch to branch from (default: current)
+- `--parent-session <session>`: tmux session that receives the agent window
 
 ### Monitor Status
 
@@ -190,9 +198,10 @@ Spawn multiple agents, then review and merge each one as soon as it finishes:
 ```bash
 # 1. Write ALL prompt files first (see "Spawn Agents" above)
 # 2. Spawn agents in background
-workmux add auth-module -b -P "$tmpfile_auth"
-workmux add api-tests -b -P "$tmpfile_tests"
-workmux add docs-update -b -P "$tmpfile_docs"
+parent_session="the-intended-session"
+workmux add auth-module -b -P "$tmpfile_auth" --parent-session "$parent_session"
+workmux add api-tests -b -P "$tmpfile_tests" --parent-session "$parent_session"
+workmux add docs-update -b -P "$tmpfile_docs" --parent-session "$parent_session"
 
 # 3. Confirm they started
 workmux wait auth-module api-tests docs-update --status working --timeout 120
@@ -227,8 +236,9 @@ remaining handles. Keep finished handles out of subsequent wait commands.
 
 1. **Write ALL prompt files before spawning any agents.** Prompts should be
    self-contained with full context. Agents cannot see your conversation.
-2. **Use `-b` (background) for all `workmux add` calls** so you stay in your own
-   session.
+2. **Use `-b` and `--parent-session <session>` for every `workmux add`.** The
+   background flag keeps the coordinator in place, and the explicit parent
+   makes window placement deterministic even when `$TMUX_PANE` is unavailable.
 3. **Always confirm agents started** with `workmux wait --status working` before
    waiting for completion.
 4. **Wait with `--any` when multiple agents are running.** As soon as an agent
