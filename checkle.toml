@@ -33,7 +33,7 @@ command = ["bash", "-lc", "source tests/venv/bin/activate && pyright tests"]
 [[check]]
 name = "docs-check"
 mode = "auto"
-command = ["bash", "-lc", "missing=(); while IFS= read -r file; do if ! sed -n '1,20p' \"$file\" | grep -q '^description:'; then missing+=(\"$file\"); fi; done < <(find docs -name '*.md' -not -path '*/node_modules/*' -not -path 'docs/README.md'); if [ ${#missing[@]} -gt 0 ]; then echo 'Missing meta description in:'; printf '  %s\n' \"${missing[@]}\"; exit 1; fi"]
+command = ["node", "docs/scripts/check-content.mjs"]
 
 [[group]]
 name = "all"

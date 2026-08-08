@@ -1,0 +1,51 @@
+<section class="cta">
+  <div class="ed-container">
+    <h2 class="sr-only">Start using workmux</h2>
+    <div class="actions">
+      <a href="/guide/quick-start/" class="ed-btn-primary"
+        >Get started <span aria-hidden="true">→</span></a
+      >
+      <a href="https://github.com/raine/workmux" class="secondary"
+        >View on GitHub</a
+      >
+    </div>
+  </div>
+</section>
+
+<style>
+  .cta {
+    padding: 0 0 6rem;
+  }
+
+  .actions {
+    display: flex;
+    gap: 1.5rem;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .secondary {
+    display: inline-flex;
+    min-height: 2.4rem;
+    padding: 0.65rem 1.4rem;
+    align-items: center;
+    border: 1px solid var(--sl-color-hairline-light);
+    border-radius: 0.4rem;
+    color: var(--sl-color-white);
+    background: var(--sl-color-bg-nav);
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .secondary:hover,
+  .secondary:focus-visible {
+    border-color: var(--ed-accent-text);
+  }
+
+  @media (max-width: 40rem) {
+    .actions {
+      flex-direction: column;
+    }
+  }
+</style>

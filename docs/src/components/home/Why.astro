@@ -1,0 +1,64 @@
+<section class="why ed-section">
+  <div class="ed-container">
+    <div class="ed-accent-rule" aria-hidden="true"></div>
+    <h2 class="ed-section-label">Why workmux?</h2>
+    <div class="grid">
+      <article>
+        <h3>Parallel workflows</h3>
+        <p>
+          Work on features side by side. No stashing, branch switching, or
+          conflicts.
+        </p>
+      </article>
+      <article>
+        <h3>One window per task</h3>
+        <p>
+          Each task has its own terminal state, editor session, and dev server.
+          Context switching is switching tabs.
+        </p>
+      </article>
+      <article>
+        <h3>Terminal workflow</h3>
+        <p>
+          Build on your familiar terminal setup. Keep your tools and your muscle
+          memory.
+        </p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<style>
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 3rem;
+  }
+
+  article {
+    padding-top: 1rem;
+    border-top: 1px solid var(--sl-color-hairline);
+  }
+
+  h3 {
+    margin: 0 0 0.75rem;
+    color: var(--sl-color-white);
+    font-family: var(--ed-font-display);
+    font-size: 1.375rem;
+    letter-spacing: -0.02em;
+  }
+
+  p {
+    margin: 0;
+    color: var(--sl-color-gray-2);
+    font-size: 0.875rem;
+    line-height: 1.7;
+  }
+
+  @media (max-width: 60rem) {
+    .grid {
+      grid-template-columns: 1fr;
+      gap: 2rem;
+    }
+  }
+</style>

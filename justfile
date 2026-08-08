@@ -115,11 +115,15 @@ test *ARGS:
 
 # Run docs dev server
 docs:
-    cd docs && npm install && npm run dev -- --open
+    cd docs && bun install && bun run dev -- --open
+
+# Build documentation
+docs-build:
+    cd docs && bun install --frozen-lockfile && bun run build
 
 # Format documentation files
 format-docs:
-    cd docs && npm run format
+    cd docs && bun run format
 
 # Release a new patch version
 release *ARGS:

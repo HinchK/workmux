@@ -1,5 +1,7 @@
 ---
+title: "Changelog"
 description: Release notes and version history for workmux
+editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 ---
 
 <!-- skipped: v0.1.167 -->
@@ -19,8 +21,6 @@ description: Release notes and version history for workmux
 <!-- skipped: v0.1.27 -->
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
-
-# Changelog
 
 ## v0.1.237 (2026-08-09)
 
@@ -1497,7 +1497,7 @@ description: Release notes and version history for workmux
 
 ## v0.1.3 (2025-11-06)
 
-- Added global configuration support with XDG compliance—you can now set shared
+- Added global configuration support with XDG compliance, so you can set shared
   defaults in `~/.config/workmux/config.yaml` that apply across all projects
 - Project configs can inherit from global settings using `<global>` placeholder
   in lists

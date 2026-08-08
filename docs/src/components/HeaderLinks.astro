@@ -1,0 +1,34 @@
+---
+import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
+---
+
+<a class="header-link" href="/changelog/">Changelog</a>
+<a class="header-link" href="/llms.txt">LLMs</a>
+<SocialIcons />
+
+<style>
+  .header-link {
+    display: none;
+    color: var(--sl-color-text-accent);
+    font-size: var(--sl-text-sm);
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .header-link:hover,
+  .header-link:focus-visible {
+    color: var(--sl-color-white);
+  }
+
+  .header-link:focus-visible {
+    border-radius: 0.2rem;
+    outline: 2px solid currentColor;
+    outline-offset: 0.25rem;
+  }
+
+  @media (min-width: 50rem) {
+    .header-link {
+      display: inline-flex;
+    }
+  }
+</style>
