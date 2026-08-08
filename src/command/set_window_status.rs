@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::ValueEnum;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -10,6 +10,7 @@ use crate::multiplexer::{
     STATUS_TARGET_INSTANCE_ENV, STATUS_TARGET_PANE_ENV, create_backend,
     create_backend_for_instance, detect_backend,
 };
+use crate::state::StateStore;
 
 #[derive(ValueEnum, Debug, Clone)]
 pub enum SetWindowStatusCommand {
@@ -262,13 +263,31 @@ fn resolve_status_pane_id(mux: &dyn Multiplexer) -> Option<String> {
 fn resolve_status_pane_id_from_cwd(mux: &dyn Multiplexer) -> Result<Option<String>> {
     let cwd = std::env::current_dir()?;
     let live_panes = mux.get_all_live_pane_info()?;
-    Ok(select_pane_for_cwd(&live_panes, &cwd))
+    let backend = mux.name();
+    let instance = mux.instance_id();
+    let registered_panes = StateStore::new()
+        .and_then(|store| store.list_all_agents())
+        .map(|agents| {
+            agents
+                .into_iter()
+                .filter(|agent| {
+                    agent.pane_key.backend == backend && agent.pane_key.instance == instance
+                })
+                .map(|agent| agent.pane_key.pane_id)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(select_pane_for_cwd(&live_panes, &cwd, &registered_panes))
 }
 
-fn select_pane_for_cwd(live_panes: &HashMap<String, LivePaneInfo>, cwd: &Path) -> Option<String> {
+fn select_pane_for_cwd(
+    live_panes: &HashMap<String, LivePaneInfo>,
+    cwd: &Path,
+    registered_panes: &HashSet<String>,
+) -> Option<String> {
     let cwd = normalized_path(cwd);
-    let mut best: Option<(&str, usize)> = None;
-    let mut tied = false;
+    let mut best_score = 0;
+    let mut candidates = Vec::new();
 
     for (pane_id, pane) in live_panes {
         let pane_cwd = normalized_path(&pane.working_dir);
@@ -276,30 +295,27 @@ fn select_pane_for_cwd(live_panes: &HashMap<String, LivePaneInfo>, cwd: &Path) -
             continue;
         }
 
-        // Prefer the closest ancestor. Exact matches naturally win because
-        // they have the most path components.
         let score = pane_cwd.components().count();
-        match best {
-            None => {
-                best = Some((pane_id.as_str(), score));
-                tied = false;
+        match score.cmp(&best_score) {
+            std::cmp::Ordering::Greater => {
+                best_score = score;
+                candidates.clear();
+                candidates.push(pane_id);
             }
-            Some((_, best_score)) if score > best_score => {
-                best = Some((pane_id.as_str(), score));
-                tied = false;
-            }
-            Some((_, best_score)) if score == best_score => {
-                tied = true;
-            }
-            Some(_) => {}
+            std::cmp::Ordering::Equal => candidates.push(pane_id),
+            std::cmp::Ordering::Less => {}
         }
     }
 
-    if tied {
-        None
-    } else {
-        best.map(|(pane_id, _)| pane_id.to_string())
+    if candidates.len() == 1 {
+        return candidates.first().map(|pane_id| (*pane_id).clone());
     }
+
+    let mut registered = candidates
+        .into_iter()
+        .filter(|pane_id| registered_panes.contains(*pane_id));
+    let pane_id = registered.next()?;
+    registered.next().is_none().then(|| pane_id.clone())
 }
 
 fn normalized_path(path: &Path) -> PathBuf {
@@ -390,7 +406,7 @@ mod tests {
         panes.insert("%2".to_string(), live_pane("/repo/subdir"));
 
         assert_eq!(
-            select_pane_for_cwd(&panes, Path::new("/repo/subdir")),
+            select_pane_for_cwd(&panes, Path::new("/repo/subdir"), &HashSet::new()),
             Some("%2".to_string())
         );
     }
@@ -402,7 +418,7 @@ mod tests {
         panes.insert("%2".to_string(), live_pane("/other"));
 
         assert_eq!(
-            select_pane_for_cwd(&panes, Path::new("/repo/nested/package")),
+            select_pane_for_cwd(&panes, Path::new("/repo/nested/package"), &HashSet::new()),
             Some("%1".to_string())
         );
     }
@@ -413,7 +429,37 @@ mod tests {
         panes.insert("%1".to_string(), live_pane("/repo"));
         panes.insert("%2".to_string(), live_pane("/repo"));
 
-        assert_eq!(select_pane_for_cwd(&panes, Path::new("/repo")), None);
+        assert_eq!(
+            select_pane_for_cwd(&panes, Path::new("/repo"), &HashSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn select_pane_for_cwd_prefers_registered_agent_when_shell_panes_match() {
+        let mut panes = HashMap::new();
+        panes.insert("%1".to_string(), live_pane("/repo"));
+        panes.insert("%2".to_string(), live_pane("/repo"));
+        panes.insert("%3".to_string(), live_pane("/repo"));
+        let registered = HashSet::from(["%1".to_string()]);
+
+        assert_eq!(
+            select_pane_for_cwd(&panes, Path::new("/repo"), &registered),
+            Some("%1".to_string())
+        );
+    }
+
+    #[test]
+    fn select_pane_for_cwd_rejects_multiple_registered_agents() {
+        let mut panes = HashMap::new();
+        panes.insert("%1".to_string(), live_pane("/repo"));
+        panes.insert("%2".to_string(), live_pane("/repo"));
+        let registered = HashSet::from(["%1".to_string(), "%2".to_string()]);
+
+        assert_eq!(
+            select_pane_for_cwd(&panes, Path::new("/repo"), &registered),
+            None
+        );
     }
 
     #[test]
