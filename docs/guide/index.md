@@ -55,7 +55,7 @@ supports [Kitty](/guide/kitty), [WezTerm](/guide/wezterm), and
     <div class="window-title">Terminal</div>
   </div>
   <div class="screenshot-container">
-    <img src="/tmux-screenshot.webp" alt="tmux with multiple worktrees">
+    <img src="/hero-screenshot.webp" alt="workmux sidebar alongside an AI agent and editor in tmux">
     <span class="callout callout-worktrees">Worktrees</span>
   </div>
 </div>
@@ -116,7 +116,7 @@ supports [Kitty](/guide/kitty), [WezTerm](/guide/wezterm), and
 }
 .callout-worktrees {
   bottom: 8%;
-  left: calc(50% - 3px);
+  left: 18%;
   transform: translateX(-50%);
 }
 .callout-worktrees::before {
