@@ -231,6 +231,39 @@ class TestWorktreeCreation:
 
     @pytest.mark.tmux_only
     @pytest.mark.parametrize("window_placement", ["after_current", "rightmost"])
+    def test_add_without_tmux_pane_uses_unique_cwd_session(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path,
+        mux_repo_path,
+        window_placement,
+    ):
+        env = cast(TmuxEnvironment, mux_server)
+        branch_name = "feature-cwd-session"
+        unrelated_dir = mux_repo_path.parent / "unrelated-session"
+        unrelated_dir.mkdir(exist_ok=True)
+
+        write_workmux_config(mux_repo_path, window_placement=window_placement)
+        env.tmux(["new-session", "-d", "-s", "other", "-c", str(unrelated_dir)])
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --background",
+            pre_run_env={"TMUX_PANE": ""},
+        )
+
+        test_windows = env.tmux(
+            ["list-windows", "-t", "test", "-F", "#{window_name}"]
+        ).stdout.splitlines()
+        assert get_window_name(branch_name) in test_windows
+        other_windows = env.tmux(
+            ["list-windows", "-t", "other", "-F", "#{window_name}"]
+        ).stdout.splitlines()
+        assert get_window_name(branch_name) not in other_windows
+
+    @pytest.mark.tmux_only
+    @pytest.mark.parametrize("window_placement", ["after_current", "rightmost"])
     def test_add_without_tmux_pane_rejects_ambiguous_sessions(
         self,
         mux_server: MuxEnvironment,
@@ -243,7 +276,7 @@ class TestWorktreeCreation:
         worktree_path = get_worktree_path(mux_repo_path, branch_name)
 
         write_workmux_config(mux_repo_path, window_placement=window_placement)
-        env.tmux(["new-session", "-d", "-s", "other"])
+        env.tmux(["new-session", "-d", "-s", "other", "-c", str(mux_repo_path)])
         result = run_workmux_command(
             env,
             workmux_exe_path,

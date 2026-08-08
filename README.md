@@ -658,9 +658,10 @@ These options allow you to skip expensive setup steps when they're not needed
 
 In tmux window mode without `--parent-session`, `$TMUX_PANE` identifies the
 calling pane and its parent session. When `$TMUX_PANE` is absent or stale,
-workmux uses the sole session on the tmux server and requires
-`--parent-session <name>` when multiple sessions exist. The working directory
-selects the Git repository independently.
+workmux uses live pane working directories when their closest matches identify
+one session. A tmux server with one session is the final fallback. Remaining
+ambiguity requires `--parent-session <name>`. The working directory selects the
+Git repository and only provides conservative evidence for tmux placement.
 
 #### Examples
 

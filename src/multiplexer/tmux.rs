@@ -4,7 +4,7 @@
 //! and exposes them through the Multiplexer trait interface.
 
 use anyhow::{Context, Result, anyhow};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -100,6 +100,47 @@ where
     }
 }
 
+fn select_session_for_cwd(
+    live_panes: &HashMap<String, LivePaneInfo>,
+    cwd: &Path,
+) -> Option<String> {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut best_score = 0;
+    let mut sessions = HashSet::new();
+
+    for pane in live_panes.values() {
+        let Some(session_id) = pane.session_id.as_deref() else {
+            continue;
+        };
+        let pane_cwd = pane
+            .working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| pane.working_dir.clone());
+        if !cwd.starts_with(&pane_cwd) {
+            continue;
+        }
+
+        let score = pane_cwd.components().count();
+        match score.cmp(&best_score) {
+            std::cmp::Ordering::Greater => {
+                best_score = score;
+                sessions.clear();
+                sessions.insert(session_id);
+            }
+            std::cmp::Ordering::Equal => {
+                sessions.insert(session_id);
+            }
+            std::cmp::Ordering::Less => {}
+        }
+    }
+
+    if sessions.len() == 1 {
+        sessions.into_iter().next().map(str::to_string)
+    } else {
+        None
+    }
+}
+
 impl TmuxBackend {
     /// Create a new TmuxBackend instance.
     pub fn new() -> Self {
@@ -133,10 +174,29 @@ impl TmuxBackend {
                 "tmux has no sessions available for window placement"
             )),
             _ => Err(anyhow!(
-                "Cannot determine the tmux session for window placement because TMUX_PANE is unset or does not identify a live pane and {} sessions exist. Pass --parent-session <name> to select one explicitly.",
+                "Cannot determine the tmux session for window placement because TMUX_PANE is unset or does not identify a live pane, the working directory does not identify a unique session, and {} sessions exist. Pass --parent-session <name> to select one explicitly.",
                 session_ids.len()
             )),
         }
+    }
+
+    fn active_window_id(&self, session_id: &str) -> Result<String> {
+        let window_id = self
+            .tmux_query(&[
+                "display-message",
+                "-p",
+                "-t",
+                &format!("{session_id}:"),
+                "#{window_id}",
+            ])
+            .with_context(|| format!("Failed to resolve the active window in {session_id}"))?;
+        let window_id = window_id.trim();
+        if window_id.is_empty() {
+            return Err(anyhow!(
+                "tmux returned an empty window identifier for session {session_id}"
+            ));
+        }
+        Ok(window_id.to_string())
     }
 
     fn invoking_window_id(&self) -> Result<String> {
@@ -148,23 +208,15 @@ impl TmuxBackend {
             return Ok(window_id.trim().to_string());
         }
 
-        let session_id = self.sole_session_id()?;
-        let window_id = self
-            .tmux_query(&[
-                "display-message",
-                "-p",
-                "-t",
-                &format!("{session_id}:"),
-                "#{window_id}",
-            ])
-            .context("Failed to resolve the active window in the sole tmux session")?;
-        let window_id = window_id.trim();
-        if window_id.is_empty() {
-            return Err(anyhow!(
-                "tmux returned an empty window identifier for its sole session"
-            ));
+        if let Ok(cwd) = std::env::current_dir()
+            && let Ok(live_panes) = self.get_all_live_pane_info()
+            && let Some(session_id) = select_session_for_cwd(&live_panes, &cwd)
+        {
+            return self.active_window_id(&session_id);
         }
-        Ok(window_id.to_string())
+
+        let session_id = self.sole_session_id()?;
+        self.active_window_id(&session_id)
     }
 
     /// Get the default shell configured in tmux.
@@ -1085,6 +1137,47 @@ mod tests {
     use super::*;
 
     const LIVE_PANE_LINE: &str = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2";
+
+    fn live_pane(path: &str, session_id: &str) -> LivePaneInfo {
+        let line = format!("%7\t12345\tnode\t{path}\tWorking\tmain\twork\t{session_id}\t@2");
+        parse_live_pane_line(&line).unwrap().1
+    }
+
+    #[test]
+    fn cwd_session_selection_accepts_multiple_panes_in_one_session() {
+        let panes = HashMap::from([
+            ("%1".to_string(), live_pane("/repo", "$1")),
+            ("%2".to_string(), live_pane("/repo", "$1")),
+        ]);
+
+        assert_eq!(
+            select_session_for_cwd(&panes, Path::new("/repo")),
+            Some("$1".to_string())
+        );
+    }
+
+    #[test]
+    fn cwd_session_selection_prefers_closest_ancestor() {
+        let panes = HashMap::from([
+            ("%1".to_string(), live_pane("/repo", "$1")),
+            ("%2".to_string(), live_pane("/repo/subdir", "$2")),
+        ]);
+
+        assert_eq!(
+            select_session_for_cwd(&panes, Path::new("/repo/subdir/package")),
+            Some("$2".to_string())
+        );
+    }
+
+    #[test]
+    fn cwd_session_selection_rejects_multiple_best_sessions() {
+        let panes = HashMap::from([
+            ("%1".to_string(), live_pane("/repo", "$1")),
+            ("%2".to_string(), live_pane("/repo", "$2")),
+        ]);
+
+        assert_eq!(select_session_for_cwd(&panes, Path::new("/repo")), None);
+    }
 
     #[test]
     fn window_target_prefers_stable_id() {
