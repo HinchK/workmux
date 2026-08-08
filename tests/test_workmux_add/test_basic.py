@@ -206,6 +206,81 @@ class TestWorktreeCreation:
             f"{inserted} should be rightmost. Windows: {windows}"
         )
 
+    @pytest.mark.tmux_only
+    @pytest.mark.parametrize("window_placement", ["after_current", "rightmost"])
+    def test_add_without_tmux_pane_uses_sole_session(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path,
+        mux_repo_path,
+        window_placement,
+    ):
+        env = cast(TmuxEnvironment, mux_server)
+        branch_name = "feature-sole-session"
+
+        write_workmux_config(mux_repo_path, window_placement=window_placement)
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --background",
+            pre_run_env={"TMUX_PANE": ""},
+        )
+
+        assert_window_exists(env, get_window_name(branch_name))
+
+    @pytest.mark.tmux_only
+    @pytest.mark.parametrize("window_placement", ["after_current", "rightmost"])
+    def test_add_without_tmux_pane_rejects_ambiguous_sessions(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path,
+        mux_repo_path,
+        window_placement,
+    ):
+        env = cast(TmuxEnvironment, mux_server)
+        branch_name = "feature-ambiguous-session"
+        worktree_path = get_worktree_path(mux_repo_path, branch_name)
+
+        write_workmux_config(mux_repo_path, window_placement=window_placement)
+        env.tmux(["new-session", "-d", "-s", "other"])
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --background",
+            pre_run_env={"TMUX_PANE": ""},
+            expect_fail=True,
+        )
+
+        assert "TMUX_PANE is unset or does not identify a live pane" in result.stderr
+        assert "2 sessions exist" in result.stderr
+        assert "--parent-session <name>" in result.stderr
+        assert not worktree_path.exists()
+
+    @pytest.mark.tmux_only
+    def test_parent_session_overrides_missing_tmux_pane(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = cast(TmuxEnvironment, mux_server)
+        branch_name = "feature-explicit-session"
+        parent_session = "other"
+
+        write_workmux_config(mux_repo_path)
+        env.tmux(["new-session", "-d", "-s", parent_session])
+        run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            f"add {branch_name} --background --parent-session {parent_session}",
+            pre_run_env={"TMUX_PANE": ""},
+        )
+
+        windows = env.tmux(
+            ["list-windows", "-t", parent_session, "-F", "#{window_name}"]
+        ).stdout.splitlines()
+        assert get_window_name(branch_name) in windows
+
     def test_add_from_inside_worktree_creates_sibling_worktree(
         self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
     ):

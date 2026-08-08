@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::cmd::Cmd;
-use crate::config::SplitDirection as ConfigSplitDirection;
+use crate::config::{SplitDirection as ConfigSplitDirection, WindowPlacement};
 
 use super::handshake::TmuxHandshake;
 use super::types::*;
@@ -121,6 +121,50 @@ impl TmuxBackend {
             .args(args)
             .run_and_capture_stdout()
             .with_context(|| format!("tmux query failed: {:?}", args))
+    }
+
+    fn sole_session_id(&self) -> Result<String> {
+        let output = self.tmux_query(&["list-sessions", "-F", "#{session_id}"])?;
+        let session_ids: Vec<_> = output.lines().filter(|id| !id.is_empty()).collect();
+
+        match session_ids.as_slice() {
+            [session_id] => Ok((*session_id).to_string()),
+            [] => Err(anyhow!(
+                "tmux has no sessions available for window placement"
+            )),
+            _ => Err(anyhow!(
+                "Cannot determine the tmux session for window placement because TMUX_PANE is unset or does not identify a live pane and {} sessions exist. Pass --parent-session <name> to select one explicitly.",
+                session_ids.len()
+            )),
+        }
+    }
+
+    fn invoking_window_id(&self) -> Result<String> {
+        if let Some(pane_id) = self.current_pane_id().filter(|id| !id.is_empty())
+            && let Ok(window_id) =
+                self.tmux_query(&["display-message", "-p", "-t", &pane_id, "#{window_id}"])
+            && !window_id.trim().is_empty()
+        {
+            return Ok(window_id.trim().to_string());
+        }
+
+        let session_id = self.sole_session_id()?;
+        let window_id = self
+            .tmux_query(&[
+                "display-message",
+                "-p",
+                "-t",
+                &format!("{session_id}:"),
+                "#{window_id}",
+            ])
+            .context("Failed to resolve the active window in the sole tmux session")?;
+        let window_id = window_id.trim();
+        if window_id.is_empty() {
+            return Err(anyhow!(
+                "tmux returned an empty window identifier for its sole session"
+            ));
+        }
+        Ok(window_id.to_string())
     }
 
     /// Get the default shell configured in tmux.
@@ -600,6 +644,37 @@ impl Multiplexer for TmuxBackend {
                 .last()),
             Err(_) => Ok(None),
         }
+    }
+
+    fn resolve_window_placement_target(
+        &self,
+        placement: WindowPlacement,
+    ) -> Result<Option<String>> {
+        let window_id = self.invoking_window_id()?;
+        if placement == WindowPlacement::AfterCurrent {
+            return Ok(Some(window_id));
+        }
+
+        let session_id = self
+            .tmux_query(&["display-message", "-p", "-t", &window_id, "#{session_id}"])?
+            .trim()
+            .to_string();
+        if session_id.is_empty() {
+            return Err(anyhow!(
+                "tmux returned an empty session identifier for window {window_id}"
+            ));
+        }
+
+        let ids = self.tmux_query(&["list-windows", "-t", &session_id, "-F", "#{window_id}"])?;
+        let rightmost = ids
+            .lines()
+            .filter_map(|id| {
+                let id = id.trim();
+                (!id.is_empty()).then(|| id.to_string())
+            })
+            .next_back()
+            .ok_or_else(|| anyhow!("tmux session {session_id} has no windows"))?;
+        Ok(Some(rightmost))
     }
 
     fn current_session_id(&self) -> Result<Option<String>> {

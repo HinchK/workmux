@@ -26,7 +26,7 @@ pub use handshake::PaneHandshake;
 pub use tmux::TmuxBackend;
 pub use types::*;
 
-use crate::config::{Config, PaneConfig, SplitDirection};
+use crate::config::{Config, PaneConfig, SplitDirection, WindowPlacement};
 
 pub const STATUS_TARGET_BACKEND_ENV: &str = "WORKMUX_STATUS_BACKEND";
 pub const STATUS_TARGET_INSTANCE_ENV: &str = "WORKMUX_STATUS_INSTANCE";
@@ -68,6 +68,16 @@ pub trait Multiplexer: Send + Sync {
 
     fn rightmost_window_id(&self) -> Result<Option<String>> {
         Ok(None)
+    }
+
+    fn resolve_window_placement_target(
+        &self,
+        placement: WindowPlacement,
+    ) -> Result<Option<String>> {
+        match placement {
+            WindowPlacement::AfterCurrent => self.current_window_id(),
+            WindowPlacement::Rightmost => self.rightmost_window_id(),
+        }
     }
 
     fn current_session_id(&self) -> Result<Option<String>> {

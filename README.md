@@ -656,6 +656,12 @@ These options allow you to skip expensive setup steps when they're not needed
 6. Sets up your configured tmux pane layout
 7. Automatically switches your tmux client to the new window
 
+In tmux window mode without `--parent-session`, `$TMUX_PANE` identifies the
+calling pane and its parent session. When `$TMUX_PANE` is absent or stale,
+workmux uses the sole session on the tmux server and requires
+`--parent-session <name>` when multiple sessions exist. The working directory
+selects the Git repository independently.
+
 #### Examples
 
 ##### Basic usage
@@ -1426,7 +1432,7 @@ worktrees at once.
 - `-n, --new`: Force opening in a new window even if one already exists. Creates
   a duplicate window with a suffix (e.g., `-2`, `-3`). Useful for having
   multiple terminal views into the same worktree. In tmux, the duplicate appears
-  immediately to the right of the window where the command runs.
+  immediately to the right of the window identified by `$TMUX_PANE`.
 - `-s, --session`: Open in session mode, overriding the stored mode. Persists
   the mode change for subsequent opens. Cannot be combined with `--new`. Only
   supported with tmux.

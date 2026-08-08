@@ -125,9 +125,12 @@ Write ALL temp files first, THEN run all workmux commands.
 
 **IMPORTANT:** For same-repository tasks, run `workmux add` from the CURRENT
 directory. Do NOT `cd` to the main repo or any other directory. The new worktree
-branches from whatever branch is checked out in the current directory. For
-cross-project tasks, set the command working directory to the target project and
-pass its session with `--parent-session` as described above.
+branches from whatever branch is checked out in the current directory. The
+working directory and tmux session are independent. Background and agent tool
+invocations can omit `$TMUX_PANE`, so pass `--parent-session` whenever dispatch
+must land in a specific session. For cross-project tasks, set the command working
+directory to the target project and pass its session with `--parent-session` as
+described above.
 
 Step 1 - Write all prompt files (in parallel):
 

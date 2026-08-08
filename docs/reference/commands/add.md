@@ -62,6 +62,12 @@ These options allow you to skip expensive setup steps when they're not needed (e
 6. Sets up your configured tmux pane layout
 7. Automatically switches your tmux client to the new window
 
+In tmux window mode without `--parent-session`, `$TMUX_PANE` identifies the
+calling pane and its parent session. When `$TMUX_PANE` is absent or stale,
+workmux uses the sole session on the tmux server. Multiple sessions require
+`--parent-session <name>`. The working directory selects the Git repository and
+is independent of tmux window placement.
+
 ## Examples
 
 ::: code-group

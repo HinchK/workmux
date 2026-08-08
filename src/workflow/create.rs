@@ -80,6 +80,13 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     // Pre-flight checks
     context.ensure_mux_running()?;
 
+    let placement_window_id =
+        if options.mode == MuxMode::Window && options.window_session_name.is_none() {
+            setup::resolve_window_placement_target(context.mux.as_ref(), &context.config)?
+        } else {
+            None
+        };
+
     // Validate backend supports session mode before creating any git state
     if options.mode == MuxMode::Session && context.mux.name() != "tmux" {
         return Err(anyhow!(
@@ -558,7 +565,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
         &context.config,
         &options_with_prompt,
         agent,
-        None,
+        placement_window_id,
     )?;
     result.base_branch = base_branch_for_creation.clone();
     info!(

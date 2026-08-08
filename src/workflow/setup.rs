@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{MuxMode, WindowConfig, WindowPlacement};
+use crate::config::{MuxMode, WindowConfig};
 use crate::multiplexer::{
     CreateSessionParams, CreateWindowInSessionParams, CreateWindowParams, Multiplexer,
     PaneSetupOptions,
@@ -12,6 +12,13 @@ use tracing::{debug, info};
 
 use super::file_ops::{handle_file_operations, symlink_claude_local_md};
 use super::types::CreateResult;
+
+pub fn resolve_window_placement_target(
+    mux: &dyn Multiplexer,
+    config: &config::Config,
+) -> Result<Option<String>> {
+    mux.resolve_window_placement_target(config.window_placement())
+}
 
 /// Sets up the terminal window, files, and hooks for a worktree.
 /// This is the shared logic between `create` and `open`.
@@ -198,9 +205,10 @@ pub fn setup_environment(
                     .context("Failed to create session")?
                 }
             } else {
-                let placement_window_id = match config.window_placement() {
-                    WindowPlacement::AfterCurrent => mux.current_window_id()?,
-                    WindowPlacement::Rightmost => mux.rightmost_window_id()?,
+                let placement_window_id = if after_window.is_some() {
+                    None
+                } else {
+                    resolve_window_placement_target(mux, config)?
                 };
                 let insertion_target = after_window.as_deref().or(placement_window_id.as_deref());
                 mux.create_window(CreateWindowParams {

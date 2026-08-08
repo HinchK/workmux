@@ -219,9 +219,12 @@ For full lifecycle orchestration (spawn, monitor, merge), use
 
 `workmux add` creates a worktree in the current working repository. Set the
 command's working directory to the target project and pass `--parent-session`
-to place the managed window directly in a specific tmux session. Workmux creates
-the parent session when it does not exist, so do not bootstrap it with
-`tmux new-window` or `tmux new-session`.
+to place the managed window directly in a specific tmux session. The working
+directory and tmux session are independent. Background and agent tool
+invocations can omit `$TMUX_PANE`, so coordinated dispatch should always pass
+`--parent-session` when placement matters. Workmux creates the parent session
+when it does not exist, so do not bootstrap it with `tmux new-window` or
+`tmux new-session`.
 
 ```bash
 # Run with the command working directory set to <project-path>

@@ -36,10 +36,16 @@ workmux open [name...] [flags]
 
 1. Verifies that a worktree with `<name>` exists.
 2. If the target exists and `--new` is not set, switches to it.
-3. Otherwise, creates a new tmux window or session. In tmux, duplicate windows appear immediately to the right of the window where the command runs. `--target-name` can override the managed target, and `--parent-session` can choose the parent session for a window-mode target.
+3. Otherwise, creates a new tmux window or session. In tmux, duplicate windows appear immediately to the right of the window identified by `$TMUX_PANE`. `--target-name` can override the managed target, and `--parent-session` can choose the parent session for a window-mode target.
 4. (If specified) Runs file operations and `post_create` hooks.
 5. Sets up your configured tmux pane layout.
 6. Automatically switches your tmux client to the new window.
+
+In tmux window mode without `--parent-session`, `$TMUX_PANE` identifies the
+calling pane and its parent session. When `$TMUX_PANE` is absent or stale,
+workmux uses the sole session on the tmux server. Multiple sessions require
+`--parent-session <name>`. The working directory selects the Git repository and
+is independent of tmux window placement.
 
 ## Examples
 
