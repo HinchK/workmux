@@ -23,7 +23,6 @@ Worktree arguments support `project:handle` syntax for cross-project queries.
 
 ```json
 {
-  "schema_version": 1,
   "context": {
     "backend": "tmux",
     "instance": "/private/tmp/tmux-501/default"
@@ -43,8 +42,7 @@ Worktree arguments support `project:handle` syntax for cross-project queries.
 }
 ```
 
-The counts describe successive stages of the observation. `schema_version` is
-`1` for this object contract.
+The counts describe successive stages of the observation.
 
 - `state_files_total`: JSON state files found in the workmux agents directory,
   including files that cannot be decoded. Atomic-write temporary files are

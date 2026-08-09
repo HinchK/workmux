@@ -53,7 +53,6 @@ struct StatusTargetError {
 
 #[derive(Serialize)]
 struct StatusOutput {
-    schema_version: u32,
     context: StatusContext,
     scope: StatusScope,
     state_files_total: usize,
@@ -335,7 +334,6 @@ pub fn run(worktrees: &[String], json: bool, show_git: bool) -> Result<()> {
     let target_failure_count = target_errors.len();
     if json {
         let output = StatusOutput {
-            schema_version: 1,
             context: StatusContext {
                 backend: report.backend,
                 instance: report.instance,

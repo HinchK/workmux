@@ -46,7 +46,6 @@ def test_status_json_no_agents(
         mux_server, workmux_exe_path, mux_repo_path, "status --json"
     )
     parsed = json.loads(result.stdout)
-    assert parsed["schema_version"] == 1
     assert parsed["agents"] == []
     assert parsed["state_files_total"] == 0
     assert parsed["state_files_invalid"] == 0
