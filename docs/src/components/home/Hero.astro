@@ -100,27 +100,31 @@ const stars = await getGitHubStars();
     color: var(--ed-accent-text);
     font-family: var(--ed-font-mono);
     font-size: 0.875rem;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.05em;
   }
 
   h1 {
-    max-width: 47rem;
+    max-width: none;
     margin: 0 0 2rem;
-    color: var(--sl-color-white);
+    color: var(--ed-text-1);
     font-family: var(--ed-font-display);
-    font-size: clamp(3.25rem, 8vw, 7rem);
-    font-weight: 800;
-    letter-spacing: -0.045em;
-    line-height: 0.95;
+    font-size: 2rem;
+    font-weight: 600;
+    letter-spacing: -0.04em;
+    line-height: 1.25;
   }
 
   .tagline {
-    max-width: 30rem;
+    max-width: 27.5rem;
     margin: 0 0 2.5rem;
-    color: var(--sl-color-gray-2);
+    color: var(--ed-text-2);
+    font-family:
+      system-ui,
+      -apple-system,
+      sans-serif;
     font-size: 1rem;
-    line-height: 1.7;
+    line-height: 1.75;
   }
 
   .term {
@@ -138,15 +142,15 @@ const stars = await getGitHubStars();
     display: inline-flex;
     gap: 0.5rem;
     align-items: center;
-    color: var(--sl-color-gray-2);
+    color: var(--ed-text-2);
     font-size: 0.875rem;
-    font-weight: 600;
+    font-weight: 500;
     text-decoration: none;
   }
 
   .github-button:hover,
   .github-button:focus-visible {
-    color: var(--sl-color-white);
+    color: var(--ed-text-1);
   }
 
   .star-count {
@@ -195,6 +199,11 @@ const stars = await getGitHubStars();
   @media (max-width: 40rem) {
     .hero {
       padding: 3.5rem 0;
+    }
+
+    h1 {
+      font-size: 1.75rem;
+      line-height: 2.5rem;
     }
 
     .hero-logo {

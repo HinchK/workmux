@@ -2,49 +2,49 @@
 const testimonials = [
   {
     quote:
-      "I've been using (and loving) workmux which brings together tmux, git worktrees, and CLI agents into an opinionated workflow.",
+      '"I\'ve been using (and loving) workmux which brings together tmux, git worktrees, and CLI agents into an opinionated workflow."',
     author: '@Coolin96',
     source: 'Hacker News',
     href: 'https://news.ycombinator.com/item?id=46029809',
   },
   {
     quote:
-      "Thank you so much for your work with workmux! It's a tool I've been wanting to exist for a long time.",
+      '"Thank you so much for your work with workmux! It\'s a tool I\'ve been wanting to exist for a long time."',
     author: '@rstacruz',
     source: 'GitHub',
     href: 'https://github.com/raine/workmux/issues/2',
   },
   {
     quote:
-      "It's become my daily driver, the perfect level of abstraction over tmux + git, without getting in the way or obscuring the underlying tooling.",
+      '"It\'s become my daily driver - the perfect level of abstraction over tmux + git, without getting in the way or obscuring the underlying tooling."',
     author: '@cisaacstern',
     source: 'GitHub',
     href: 'https://github.com/raine/workmux/issues/33',
   },
   {
     quote:
-      "I have to mention workmux at every opportunity because it's the perfect glue between worktrees, agents and tmux windows.",
+      '"I have to mention workmux at every opportunity because it\'s the perfect glue between worktrees, agents and tmux windows."',
     author: '@dedbrizz',
     source: 'Threads',
     href: 'https://www.threads.com/@dedbrizz/post/DVt1DtLkr_l',
   },
   {
     quote:
-      "Since I discovered workmux I'm cooking. Amazing parallel-agent driver if you like tmux and want to keep your config.",
+      '"Since I discovered workmux I\'m cooking. Amazing parallel-agent driver if you like tmux and want to keep your config."',
     author: '@MatijaSosic',
     source: 'X',
     href: 'https://x.com/MatijaSosic/status/2080022087281127659',
   },
   {
     quote:
-      'Using workmux with a well-configured tmux has been a breath of fresh air.',
+      '"Using workmux with a well-configured tmux has been a breath of fresh air"',
     author: '@sbeirakh_il',
     source: 'X',
     href: 'https://x.com/sbeirakh_il/status/2080279929778733305',
   },
   {
     quote:
-      "I've been using it for about a month, and it's been nothing but great.",
+      '"I\'ve been using it for about a month now, and it\'s been nothing but great."',
     author: '@gabrielrockson_',
     source: 'X',
     href: 'https://x.com/gabrielrockson_/status/2080386326566736189',
@@ -62,7 +62,7 @@ const testimonials = [
           <figure>
             <blockquote>{quote}</blockquote>
             <figcaption>
-              {author} <a href={href}>via {source}</a>
+              - {author} <a href={href}>via {source}</a>
             </figcaption>
           </figure>
         ))
@@ -74,7 +74,7 @@ const testimonials = [
 <style>
   .list {
     display: grid;
-    gap: 3rem;
+    gap: 4rem;
   }
 
   figure {
@@ -86,16 +86,18 @@ const testimonials = [
     padding: 0;
     margin: 0 0 0.75rem;
     border: 0;
-    color: var(--sl-color-white);
+    color: var(--ed-text-1);
     font-size: 1.375rem;
     font-style: italic;
     line-height: 1.5;
   }
 
   figcaption {
-    color: var(--sl-color-gray-2);
+    margin: 0;
+    color: var(--ed-text-2);
     font-family: var(--ed-font-mono);
     font-size: 0.8125rem;
+    line-height: 1.5rem;
   }
 
   a {

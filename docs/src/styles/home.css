@@ -1,3 +1,35 @@
+@import url("https://fonts.cdnfonts.com/css/cabinet-grotesk");
+
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-roman-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: Inter;
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-italic-latin.woff2") format("woff2");
+}
+
+body:has(.mono-editorial) {
+  --sl-color-bg: #fff;
+  --sl-color-bg-nav: #fff;
+  --sl-color-hairline: #e2e2e3;
+  --sl-color-hairline-light: #c8c8cb;
+}
+
+:root[data-theme="dark"] body:has(.mono-editorial) {
+  --sl-color-bg: #1b1b1f;
+  --sl-color-bg-nav: #161618;
+  --sl-color-hairline: #2e2e32;
+  --sl-color-hairline-light: #3a3a3c;
+}
+
 body:has(.mono-editorial) main,
 body:has(.mono-editorial) .content-panel {
   padding-inline: 0;
@@ -24,20 +56,22 @@ body:has(.mono-editorial) footer {
   --ed-accent: var(--wm-accent-surface);
   --ed-accent-text: var(--sl-color-text-accent);
   --ed-button-bg: var(--wm-button-bg);
+  --ed-text-1: #3c3c43;
+  --ed-text-2: #67676c;
+  --ed-text-3: #67676c;
   --ed-font-display:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", sans-serif;
+    "Cabinet Grotesk", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --ed-font-body: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
   --ed-font-mono: var(--__sl-font-mono);
   width: 100%;
-  color: var(--sl-color-text);
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  color: var(--ed-text-1);
+  font-family: var(--ed-font-body);
+}
+
+:root[data-theme="dark"] .mono-editorial {
+  --ed-text-1: #dfdfd6;
+  --ed-text-2: #98989f;
+  --ed-text-3: #98989f;
 }
 
 .mono-editorial *,
@@ -46,10 +80,31 @@ body:has(.mono-editorial) footer {
   box-sizing: border-box;
 }
 
+.mono-editorial > section {
+  margin-block: 0;
+}
+
+.mono-editorial article {
+  margin-block: 0;
+}
+
+.mono-editorial :is(.grid, .list, .modes) {
+  margin-top: 0;
+}
+
+.mono-editorial .terminal-window :is(img, picture, video) {
+  margin-block: 0;
+}
+
+.mono-editorial .terminal-window > :not(:first-child) {
+  margin-top: 0;
+}
+
 .mono-editorial .ed-container {
   width: 100%;
   max-width: var(--ed-container);
   padding-inline: 2rem;
+  margin-block: 0;
   margin-inline: auto;
 }
 
@@ -72,20 +127,20 @@ body:has(.mono-editorial) footer {
   padding: 0;
   margin: 0 0 2.5rem;
   border: 0;
-  color: var(--sl-color-gray-2);
+  color: var(--ed-text-2);
   font-family: var(--ed-font-mono);
   font-size: 0.75rem;
-  font-weight: 600;
+  font-weight: 400;
   letter-spacing: 0.1em;
-  line-height: 1.4;
+  line-height: 2;
   text-transform: uppercase;
 }
 
 .mono-editorial .ed-section-desc {
   margin: -1.5rem 0 2.5rem;
-  color: var(--sl-color-gray-2);
+  color: var(--ed-text-2);
   font-size: 0.9375rem;
-  line-height: 1.6;
+  line-height: 1.8667;
 }
 
 .mono-editorial .ed-align-right {
@@ -116,6 +171,12 @@ body:has(.mono-editorial) footer {
   transform: translateY(-1px);
 }
 
+:root[data-theme="dark"] .mono-editorial .ed-btn-primary,
+:root[data-theme="dark"] .mono-editorial .ed-btn-primary:hover,
+:root[data-theme="dark"] .mono-editorial .ed-btn-primary:focus-visible {
+  color: #071310;
+}
+
 .mono-editorial a:focus-visible,
 .mono-editorial button:focus-visible,
 .mono-editorial video:focus-visible {
@@ -125,11 +186,13 @@ body:has(.mono-editorial) footer {
 }
 
 .mono-editorial .ed-text-link {
+  display: inline-block;
   color: var(--ed-accent-text);
   font-family: var(--ed-font-mono);
   font-size: 0.75rem;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.05em;
+  line-height: 2;
   text-decoration: none;
   text-transform: uppercase;
 }
@@ -208,6 +271,10 @@ body:has(.mono-editorial) footer {
 }
 
 @media (max-width: 60rem) {
+  .mono-editorial .ed-container {
+    width: calc(100% - 3rem);
+  }
+
   .mono-editorial .ed-section {
     padding-bottom: 6rem;
   }

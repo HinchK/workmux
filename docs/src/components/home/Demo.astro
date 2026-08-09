@@ -3,7 +3,7 @@
     <div class="ed-accent-rule ed-accent-rule-right" aria-hidden="true"></div>
     <h2 class="ed-section-label">See it in action</h2>
     <p class="ed-section-desc">
-      Spin up worktrees, develop in parallel, merge, and clean up.
+      Spin up worktrees, develop in parallel, merge and clean up.
     </p>
   </div>
   <div class="ed-container ed-showcase" data-no-zoom>
@@ -34,7 +34,7 @@
         </button>
         <span class="sr-only video-player-state" aria-live="polite"></span>
       </div>
-      <figcaption id="demo-description">
+      <figcaption id="demo-description" class="sr-only">
         Silent demonstration of workmux creating, switching between, and merging
         parallel worktrees.
       </figcaption>
@@ -67,11 +67,12 @@
     padding: 0;
     transform: translate(-50%, -50%);
     place-items: center;
-    border: 1px solid rgb(255 255 255 / 28%);
+    border: 0;
     border-radius: 50%;
     color: white;
-    background: color-mix(in srgb, var(--ed-button-bg) 88%, transparent);
-    box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 42%);
+    background: rgb(255 255 255 / 12%);
+    box-shadow: none;
+    backdrop-filter: blur(4px);
     cursor: pointer;
     transition:
       opacity 250ms ease,
@@ -123,7 +124,7 @@
     );
   }
 
-  figcaption {
+  figcaption:not(.sr-only) {
     padding: 0.75rem 1rem;
     color: rgb(255 255 255 / 65%);
     background: #252525;
