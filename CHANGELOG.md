@@ -22,7 +22,7 @@ description: Release notes and version history for workmux
 
 # Changelog
 
-## Unreleased
+## v0.1.237 (2026-08-09)
 
 - Make `workmux status --json` return a versioned observation object instead of
   an array, with scope and state-file diagnostics. Unresolved explicit targets
