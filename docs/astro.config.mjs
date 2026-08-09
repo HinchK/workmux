@@ -38,8 +38,7 @@ export default defineConfig({
         }),
       ],
       editLink: {
-        baseUrl:
-          "https://github.com/raine/workmux/edit/main/docs/src/content/docs/",
+        baseUrl: "https://github.com/raine/workmux/edit/main/docs/",
       },
       social: [
         {
