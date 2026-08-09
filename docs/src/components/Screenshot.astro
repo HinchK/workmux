@@ -103,13 +103,26 @@ const {
   }
 
   .window-title {
+    margin: 0;
     color: rgb(255 255 255 / 72%);
     font-family: var(--__sl-font-mono);
     font-size: 0.75rem;
+    line-height: 1;
   }
 
   .screenshot-image {
     position: relative;
+  }
+
+  .screenshot-image > :global(.image-zoom-trigger) {
+    margin: 0;
+    border-radius: 0;
+  }
+
+  .screenshot-image
+    > :global(.image-zoom-trigger:is(:hover, :focus-visible) img) {
+    transform: none;
+    box-shadow: none;
   }
 
   .screenshot-image :global(img) {

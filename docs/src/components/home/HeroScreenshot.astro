@@ -14,17 +14,15 @@ import screenshot from '../../assets/screenshots/hero-screenshot.webp';
         </div>
         <div class="window-title">Terminal</div>
       </div>
-      <div class="screenshot-crop">
-        <Image
-          src={screenshot}
-          alt="workmux in action with multiple AI agents working across tmux windows"
-          loading="eager"
-          fetchpriority="high"
-          layout="constrained"
-          widths={[375, 640, 900, 1280, 1800]}
-          sizes="(max-width: 60rem) calc(100vw - 2.5rem), 56rem"
-        />
-      </div>
+      <Image
+        src={screenshot}
+        alt="workmux in action with multiple AI agents working across tmux windows"
+        loading="eager"
+        fetchpriority="high"
+        layout="constrained"
+        widths={[375, 640, 900, 1280, 1800]}
+        sizes="(max-width: 60rem) calc(100vw - 2.5rem), 56rem"
+      />
     </div>
   </div>
 </section>
@@ -33,10 +31,6 @@ import screenshot from '../../assets/screenshots/hero-screenshot.webp';
   .hero-screenshot {
     padding-bottom: 6rem;
     margin-top: -5rem !important;
-  }
-
-  .screenshot-crop {
-    overflow: hidden;
   }
 
   img {
