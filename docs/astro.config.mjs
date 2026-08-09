@@ -118,7 +118,6 @@ export default defineConfig({
         },
         {
           label: "Sidebar",
-          badge: { text: "New", variant: "success" },
           items: [
             { label: "Overview", slug: "guide/sidebar" },
             { label: "Customization", slug: "guide/sidebar/customization" },
