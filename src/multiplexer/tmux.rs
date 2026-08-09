@@ -25,11 +25,15 @@ pub struct TmuxBackend;
 
 const LIVE_PANE_RECORD_SEPARATOR: char = '\x1e';
 const LIVE_PANE_FIELD_SEPARATOR: char = '\x1f';
+const LIVE_PANE_ESCAPED_RECORD_SEPARATOR: &str = "\\036";
+const LIVE_PANE_ESCAPED_FIELD_SEPARATOR: &str = "\\037";
 const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}";
 
 fn live_pane_fields(line: &str) -> Vec<&str> {
     if line.contains(LIVE_PANE_FIELD_SEPARATOR) {
         line.split(LIVE_PANE_FIELD_SEPARATOR).collect()
+    } else if line.contains(LIVE_PANE_ESCAPED_FIELD_SEPARATOR) {
+        line.split(LIVE_PANE_ESCAPED_FIELD_SEPARATOR).collect()
     } else {
         line.split('\t').collect()
     }
@@ -38,6 +42,7 @@ fn live_pane_fields(line: &str) -> Vec<&str> {
 fn parse_live_pane_line(line: &str) -> Option<(String, LivePaneInfo)> {
     let line = line
         .strip_prefix(LIVE_PANE_RECORD_SEPARATOR)
+        .or_else(|| line.strip_prefix(LIVE_PANE_ESCAPED_RECORD_SEPARATOR))
         .unwrap_or(line);
     let parts = live_pane_fields(line);
     if parts.len() < 7 {
@@ -73,6 +78,12 @@ fn live_pane_records(output: &str) -> Vec<&str> {
     if output.contains(LIVE_PANE_RECORD_SEPARATOR) {
         output
             .split(LIVE_PANE_RECORD_SEPARATOR)
+            .filter(|record| !record.is_empty())
+            .map(|record| record.strip_suffix('\n').unwrap_or(record))
+            .collect()
+    } else if output.contains(LIVE_PANE_ESCAPED_RECORD_SEPARATOR) {
+        output
+            .split(LIVE_PANE_ESCAPED_RECORD_SEPARATOR)
             .filter(|record| !record.is_empty())
             .map(|record| record.strip_suffix('\n').unwrap_or(record))
             .collect()
@@ -1219,6 +1230,16 @@ mod tests {
         let error = parse_live_pane_snapshot(&format!("{LIVE_PANE_LINE}\nmalformed")).unwrap_err();
 
         assert!(error.to_string().contains("malformed pane information"));
+    }
+
+    #[test]
+    fn live_pane_snapshot_accepts_octal_escaped_separators() {
+        let output = "\\036%7\\03712345\\037node\\037/repo/a\\037Working\\037main\\037work\\037$1\\037@2\n\\036%8\\03712346\\037bash\\037/repo/b\\037Shell\\037main\\037shell\\037$1\\037@3\n";
+
+        let panes = parse_live_pane_snapshot(output).unwrap();
+
+        assert_eq!(panes["%7"].working_dir, PathBuf::from("/repo/a"));
+        assert_eq!(panes["%8"].window_id.as_deref(), Some("@3"));
     }
 
     #[test]
