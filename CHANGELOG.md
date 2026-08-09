@@ -27,6 +27,9 @@ description: Release notes and version history for workmux
 - Make `workmux status --json` return a versioned observation object instead of
   an array, with scope and state-file diagnostics. Unresolved explicit targets
   return partial results with a nonzero exit status.
+- Treat `<global>` as empty when the corresponding global hook or file-operation
+  list is unset, allowing shared project configs to work without matching global
+  values. ([#224](https://github.com/raine/workmux/issues/224))
 
 ## v0.1.236 (2026-08-08)
 

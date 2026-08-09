@@ -100,6 +100,27 @@ class TestGlobalPlaceholderPostCreate:
         assert (worktree_dir / global_hook).exists()
         assert (worktree_dir / after_hook).exists()
 
+    def test_global_placeholder_is_dropped_without_global_hook(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+        mux_repo_path: Path,
+    ):
+        """Project hooks should run when no global post_create hook exists."""
+        env = mux_server
+        branch_name = "feature-missing-global-hook"
+        project_hook = "created_from_project.txt"
+
+        write_workmux_config(
+            mux_repo_path,
+            post_create=["<global>", f"touch {project_hook}"],
+        )
+
+        worktree_dir = add_branch_and_get_worktree(
+            env, workmux_exe_path, mux_repo_path, branch_name
+        )
+        assert (worktree_dir / project_hook).exists()
+
 
 class TestGlobalPlaceholderFiles:
     """Tests for <global> placeholder in file operations."""

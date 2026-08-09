@@ -2352,10 +2352,11 @@ impl Config {
             global: Option<Vec<String>>,
             project: Option<Vec<String>>,
         ) -> Option<Vec<String>> {
-            match (global, project) {
-                (Some(global_items), Some(project_items)) => {
+            match project {
+                Some(project_items) => {
                     let has_placeholder = project_items.iter().any(|s| s == "<global>");
                     if has_placeholder {
+                        let global_items = global.unwrap_or_default();
                         let mut result = Vec::new();
                         for item in project_items {
                             if item == "<global>" {
@@ -2369,7 +2370,7 @@ impl Config {
                         Some(project_items)
                     }
                 }
-                (global, project) => project.or(global),
+                None => global,
             }
         }
 
@@ -2954,12 +2955,14 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Commands to run before worktree removal (during merge or remove).
 # Useful for backing up gitignored files before cleanup.
 # Default: Auto-detects Node.js projects and fast-deletes node_modules.
+# Use "<global>" to inherit from global config.
 # Set to empty list to disable: `pre_remove: []`
 # Environment variables available:
 #   - WM_HANDLE: The worktree handle (directory name)
 #   - WM_WORKTREE_PATH: Absolute path of the worktree being deleted
 #   - WM_PROJECT_ROOT: Absolute path of the main project directory
 # pre_remove:
+#   - "<global>"
 #   - mkdir -p "$WM_PROJECT_ROOT/artifacts/$WM_HANDLE"
 #   - cp -r test-results/ "$WM_PROJECT_ROOT/artifacts/$WM_HANDLE/"
 
@@ -3157,7 +3160,7 @@ mod tests {
 
     use super::{
         AgentEnvValue, AgentIconConfig, AgentIconDetails, AllowedDomainDetails, AllowedDomainEntry,
-        Config, ContainerConfig, ContainerDevice, ExtraMount, LayoutConfig, LimaConfig,
+        Config, ContainerConfig, ContainerDevice, ExtraMount, FileConfig, LayoutConfig, LimaConfig,
         NetworkConfig, NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime, SandboxTarget,
         SidebarHeight, SidebarPosition, SidebarWidth, SplitDirection, ToolchainMode,
         WindowPlacement, is_agent_command, validate_domain, validate_group_add_entry,
@@ -3268,6 +3271,55 @@ mod tests {
 
         let rightmost: Config = serde_yaml::from_str("window_placement: rightmost").unwrap();
         assert_eq!(rightmost.window_placement(), WindowPlacement::Rightmost);
+    }
+
+    #[test]
+    fn missing_global_lists_expand_placeholder_to_empty() {
+        let project = Config {
+            post_create: Some(vec![
+                "post-before".to_string(),
+                "<global>".to_string(),
+                "post-after".to_string(),
+            ]),
+            pre_merge: Some(vec!["<global>".to_string()]),
+            pre_remove: Some(vec![
+                "remove-before".to_string(),
+                "<global>".to_string(),
+                "remove-after".to_string(),
+            ]),
+            files: FileConfig {
+                copy: Some(vec!["<global>".to_string()]),
+                symlink: Some(vec![
+                    "symlink-before".to_string(),
+                    "<global>".to_string(),
+                    "symlink-after".to_string(),
+                ]),
+            },
+            ..Default::default()
+        };
+
+        let merged = Config::default().merge(project);
+
+        assert_eq!(
+            merged.post_create,
+            Some(vec!["post-before".to_string(), "post-after".to_string()])
+        );
+        assert_eq!(merged.pre_merge, Some(vec![]));
+        assert_eq!(
+            merged.pre_remove,
+            Some(vec![
+                "remove-before".to_string(),
+                "remove-after".to_string()
+            ])
+        );
+        assert_eq!(merged.files.copy, Some(vec![]));
+        assert_eq!(
+            merged.files.symlink,
+            Some(vec![
+                "symlink-before".to_string(),
+                "symlink-after".to_string()
+            ])
+        );
     }
 
     #[test]
