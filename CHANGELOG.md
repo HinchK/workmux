@@ -489,7 +489,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 - Add `sidebar`: an always-visible agent status panel in a tmux side pane,
   showing live status, git diff stats, and elapsed timers for all agents across
   windows. Toggle with `workmux sidebar`. See the
-  [sidebar guide](https://workmux.raine.dev/guide/dashboard/sidebar)
+  [sidebar guide](https://workmux.raine.dev/guide/sidebar/)
   - Two layout modes: tiles (default) and compact, switchable with `v` or via
     `sidebar.layout` in config
   - Click, scroll, or use keyboard navigation (`j`/`k`/`Enter`) to jump between

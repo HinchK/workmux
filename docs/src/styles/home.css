@@ -227,6 +227,19 @@ body:has(.mono-editorial) footer {
   box-shadow: 0 1.5rem 3.75rem -0.9rem rgb(0 0 0 / 30%);
 }
 
+.mono-editorial .terminal-window > .image-zoom-trigger {
+  margin: 0;
+  border-radius: 0;
+}
+
+.mono-editorial
+  .terminal-window
+  > .image-zoom-trigger:is(:hover, :focus-visible)
+  img {
+  transform: none;
+  box-shadow: none;
+}
+
 .mono-editorial .terminal-header {
   position: relative;
   display: flex;
