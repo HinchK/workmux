@@ -149,12 +149,32 @@
 }
 
 @media (max-width: 49.99rem) {
+  :root:not([data-has-sidebar]) header > .header {
+    gap: 0.5rem;
+  }
+
   :root:not([data-has-sidebar]) header .right-group {
     display: flex !important;
+    gap: 0.5rem;
   }
 
   :root:not([data-has-sidebar]) header .social-icons {
+    display: flex !important;
+  }
+
+  :root:not([data-has-sidebar]) header .social-icons::after {
     display: none;
+  }
+
+  :root:not([data-has-sidebar]) header starlight-theme-select select {
+    width: 3rem;
+    padding-inline: 1.25rem 1rem;
+    margin-inline: 0;
+    text-indent: -9999px;
+  }
+
+  :root:not([data-has-sidebar]) header starlight-theme-select option {
+    text-indent: 0;
   }
 }
 

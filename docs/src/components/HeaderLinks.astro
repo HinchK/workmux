@@ -2,9 +2,10 @@
 import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
 ---
 
+<a class="header-link docs-link" href="/guide/">Docs</a>
 <a class="header-link" href="/changelog/">Changelog</a>
 <a class="header-link" href="/llms.txt">LLMs</a>
-<SocialIcons />
+<span class="github-link"><SocialIcons /></span>
 
 <style>
   .header-link {
@@ -13,6 +14,14 @@ import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
     font-size: var(--sl-text-sm);
     font-weight: 600;
     text-decoration: none;
+  }
+
+  .docs-link {
+    display: inline-flex;
+  }
+
+  .github-link {
+    display: contents;
   }
 
   .header-link:hover,
@@ -24,6 +33,12 @@ import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
     border-radius: 0.2rem;
     outline: 2px solid currentColor;
     outline-offset: 0.25rem;
+  }
+
+  @media (max-width: 49.99rem) {
+    :global(header) .github-link {
+      display: none;
+    }
   }
 
   @media (min-width: 50rem) {
