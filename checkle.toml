@@ -21,6 +21,11 @@ mode = "cargo"
 command = ["cargo", "test", "--bin", "workmux", "--message-format=json"]
 
 [[check]]
+name = "opencode-plugin-tests"
+mode = "auto"
+command = ["bun", "test", "tests/opencode_status_plugin.test.ts"]
+
+[[check]]
 name = "ruff-check"
 mode = "auto"
 command = ["ruff", "check", "tests", "--quiet"]
@@ -37,4 +42,4 @@ command = ["node", "docs/scripts/check-content.mjs"]
 
 [[group]]
 name = "all"
-checks = ["format-rust-check", "format-python-check", "clippy", "unit-tests", "ruff-check", "pyright", "docs-check"]
+checks = ["format-rust-check", "format-python-check", "clippy", "unit-tests", "opencode-plugin-tests", "ruff-check", "pyright", "docs-check"]
