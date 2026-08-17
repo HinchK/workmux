@@ -3,7 +3,6 @@ title: "Changelog"
 description: Release notes and version history for workmux
 editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 ---
-
 <!-- skipped: v0.1.167 -->
 <!-- skipped: v0.1.161 -->
 <!-- skipped: v0.1.160 -->
@@ -21,6 +20,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.27 -->
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
+
+## v0.1.239 (2026-08-18)
+
+- Set `sidebar.dim_stale: false` to keep stale sidebar rows in their normal status colors instead of dimming them. ([#234](https://github.com/raine/workmux/pull/234))
+- Keep OpenCode panes marked as working while any parent or subagent session is active, and avoid false completion indicators from untracked or deleted sessions. ([#235](https://github.com/raine/workmux/pull/235))
+- Detect outdated Pi and Oh My Pi status extensions during `workmux setup` and offer to replace them, preventing excessive status update processes from older extensions.
 
 ## v0.1.237 (2026-08-09)
 
