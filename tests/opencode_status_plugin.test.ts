@@ -71,6 +71,25 @@ describe('WorkmuxStatusPlugin', () => {
     expect(harness.statuses).toEqual(['working', 'done']);
   });
 
+  test('ignores deletion of an untracked session', async () => {
+    const harness = await createHarness();
+
+    await harness.emit({
+      type: 'session.deleted',
+      properties: { info: { id: 'historical' } },
+    });
+
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test('ignores idle status from an untracked session', async () => {
+    const harness = await createHarness();
+
+    await harness.emit(sessionStatus('parent', 'idle'));
+
+    expect(harness.statuses).toEqual([]);
+  });
+
   test('ignores stale busy events until a new user message', async () => {
     const harness = await createHarness();
 

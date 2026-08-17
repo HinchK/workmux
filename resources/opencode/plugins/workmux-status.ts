@@ -37,6 +37,9 @@ export const WorkmuxStatusPlugin: Plugin = async ({ $ }) => {
     }
 
     const previous = statusBySession.get(sessionID);
+    if (status === 'done' && previous === undefined) {
+      return;
+    }
     // Ignore the final stale `busy` OpenCode sometimes emits after a session is
     // already done. The next user message re-arms `working` for the new turn.
     if (status === 'working' && acceptBusyBySession.get(sessionID) === false) {
@@ -82,12 +85,15 @@ export const WorkmuxStatusPlugin: Plugin = async ({ $ }) => {
         case 'session.idle':
           await setStatus(event.properties.sessionID, 'done');
           break;
-        case 'session.deleted':
-          deletedSessions.add(event.properties.info.id);
-          statusBySession.delete(event.properties.info.id);
-          acceptBusyBySession.delete(event.properties.info.id);
-          await reportAggregateStatus();
+        case 'session.deleted': {
+          const sessionID = event.properties.info.id;
+          deletedSessions.add(sessionID);
+          acceptBusyBySession.delete(sessionID);
+          if (statusBySession.delete(sessionID)) {
+            await reportAggregateStatus();
+          }
           break;
+        }
       }
     },
   };
