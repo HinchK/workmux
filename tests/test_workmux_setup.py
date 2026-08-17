@@ -101,7 +101,10 @@ class TestSetupNoPrompt:
         """OMP with extension file shows all-configured message."""
         extension_dir = mux_server.home_path / ".omp" / "agent" / "extensions"
         extension_dir.mkdir(parents=True)
-        (extension_dir / "workmux-status.ts").write_text("// extension")
+        bundled_extension = (
+            Path(__file__).parent.parent / ".omp" / "extensions" / "workmux-status.ts"
+        )
+        (extension_dir / "workmux-status.ts").write_text(bundled_extension.read_text())
 
         result = run_workmux_command(
             mux_server, workmux_exe_path, repo_path, "setup --hooks"
