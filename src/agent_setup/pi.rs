@@ -39,7 +39,7 @@ pub fn detect() -> Option<&'static str> {
 
 /// Check if workmux extension is installed for pi.
 pub fn check() -> Result<StatusCheck> {
-    extension_file::check_installed(extension_path().as_deref())
+    extension_file::check_installed(extension_path().as_deref(), EXTENSION_SOURCE)
 }
 
 /// Install workmux extension for pi.

@@ -6,13 +6,18 @@ use std::path::Path;
 
 use super::StatusCheck;
 
-/// Map an optional extension path to an install status check.
-pub fn check_installed(path: Option<&Path>) -> Result<StatusCheck> {
+/// Check whether an extension file contains the bundled source.
+pub fn check_installed(path: Option<&Path>, source: &str) -> Result<StatusCheck> {
     let Some(path) = path else {
         return Ok(StatusCheck::NotInstalled);
     };
 
-    if path.exists() {
+    if !path.exists() {
+        return Ok(StatusCheck::NotInstalled);
+    }
+
+    let installed = fs::read_to_string(path)?;
+    if installed == source {
         Ok(StatusCheck::Installed)
     } else {
         Ok(StatusCheck::NotInstalled)
@@ -48,4 +53,36 @@ pub fn remove_extension_file(path: &Path) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_installed_requires_bundled_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("workmux-status.ts");
+        fs::write(&path, "old extension").unwrap();
+
+        assert!(matches!(
+            check_installed(Some(&path), "current extension").unwrap(),
+            StatusCheck::NotInstalled
+        ));
+
+        fs::write(&path, "current extension").unwrap();
+
+        assert!(matches!(
+            check_installed(Some(&path), "current extension").unwrap(),
+            StatusCheck::Installed
+        ));
+    }
+
+    #[test]
+    fn check_installed_handles_missing_path() {
+        assert!(matches!(
+            check_installed(None, "current extension").unwrap(),
+            StatusCheck::NotInstalled
+        ));
+    }
 }
