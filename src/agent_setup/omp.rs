@@ -13,7 +13,7 @@ use super::StatusCheck;
 use crate::agent_setup::extension_file;
 
 /// The OMP extension source, embedded at compile time.
-const EXTENSION_SOURCE: &str = include_str!("../../.omp/extensions/workmux-status.ts");
+const EXTENSION_SOURCE: &str = include_str!("../../resources/omp/extensions/workmux-status.ts");
 
 fn omp_agent_dir() -> Option<PathBuf> {
     let home = home::home_dir()?;

@@ -78,7 +78,7 @@ If you prefer manual setup, copy the workmux status extension to your global pi 
 ```bash
 mkdir -p ~/.pi/agent/extensions
 curl -o ~/.pi/agent/extensions/workmux-status.ts \
-  https://raw.githubusercontent.com/raine/workmux/main/.pi/extensions/workmux-status.ts
+  https://raw.githubusercontent.com/raine/workmux/main/resources/pi/extensions/workmux-status.ts
 ```
 
 Restart pi for the extension to take effect.
@@ -90,7 +90,7 @@ If you prefer manual setup, copy the workmux status extension to your global OMP
 ```bash
 mkdir -p ~/.omp/agent/extensions
 curl -o ~/.omp/agent/extensions/workmux-status.ts \
-  https://raw.githubusercontent.com/raine/workmux/main/.omp/extensions/workmux-status.ts
+  https://raw.githubusercontent.com/raine/workmux/main/resources/omp/extensions/workmux-status.ts
 ```
 
 Restart omp for the extension to take effect.
@@ -123,7 +123,7 @@ Then download the hooks configuration:
 
 ```bash
 curl -o ~/.codex/hooks.json \
-  https://raw.githubusercontent.com/raine/workmux/main/.codex/hooks/workmux-status.json
+  https://raw.githubusercontent.com/raine/workmux/main/resources/codex/hooks/workmux-status.json
 ```
 
 If you already have a `~/.codex/hooks.json`, merge the hook entries from the downloaded file into your existing configuration.
@@ -193,7 +193,7 @@ If you prefer manual setup, copy the hooks configuration to your repository:
 ```bash
 mkdir -p .github/hooks/workmux-status
 curl -o .github/hooks/workmux-status/hooks.json \
-  https://raw.githubusercontent.com/raine/workmux/main/.github/hooks/workmux-status/hooks.json
+  https://raw.githubusercontent.com/raine/workmux/main/resources/copilot/hooks/workmux-status/hooks.json
 ```
 
 Note: Copilot CLI hooks are per-repository, unlike Claude Code and OpenCode which install globally. The Copilot CLI hooks API does not support detecting permission prompts, so only working/done states are tracked (no waiting state).

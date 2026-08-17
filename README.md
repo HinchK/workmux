@@ -2052,7 +2052,7 @@ configuration.
 ```bash
 mkdir -p .github/hooks/workmux-status
 curl -o .github/hooks/workmux-status/hooks.json \
-  https://raw.githubusercontent.com/raine/workmux/main/.github/hooks/workmux-status/hooks.json
+  https://raw.githubusercontent.com/raine/workmux/main/resources/copilot/hooks/workmux-status/hooks.json
 ```
 
 Note: Copilot hooks are per-repository. The waiting state is not supported due
@@ -2079,7 +2079,7 @@ Restart OpenCode for the plugin to take effect.
 ```bash
 mkdir -p ~/.omp/agent/extensions
 curl -o ~/.omp/agent/extensions/workmux-status.ts \
-  https://raw.githubusercontent.com/raine/workmux/main/.omp/extensions/workmux-status.ts
+  https://raw.githubusercontent.com/raine/workmux/main/resources/omp/extensions/workmux-status.ts
 ```
 
 Restart omp for the extension to take effect.

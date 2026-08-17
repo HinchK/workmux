@@ -20,7 +20,7 @@ use crate::agent_setup::json_config::{
 };
 
 /// Hooks configuration embedded at compile time.
-const HOOKS_JSON: &str = include_str!("../../.codex/hooks/workmux-status.json");
+const HOOKS_JSON: &str = include_str!("../../resources/codex/hooks/workmux-status.json");
 
 fn codex_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("CODEX_CONFIG_DIR") {

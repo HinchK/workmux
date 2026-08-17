@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use super::StatusCheck;
 
 /// Hooks configuration embedded at compile time.
-const HOOKS_JSON: &str = include_str!("../../.github/hooks/workmux-status/hooks.json");
+const HOOKS_JSON: &str = include_str!("../../resources/copilot/hooks/workmux-status/hooks.json");
 
 fn copilot_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("COPILOT_CONFIG_DIR") {

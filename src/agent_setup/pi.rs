@@ -12,7 +12,7 @@ use super::StatusCheck;
 use crate::agent_setup::extension_file;
 
 /// The pi extension source, embedded at compile time.
-const EXTENSION_SOURCE: &str = include_str!("../../.pi/extensions/workmux-status.ts");
+const EXTENSION_SOURCE: &str = include_str!("../../resources/pi/extensions/workmux-status.ts");
 
 fn pi_agent_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
