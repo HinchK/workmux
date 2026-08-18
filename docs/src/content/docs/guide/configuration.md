@@ -183,6 +183,8 @@ Each pane supports:
 | `size`       | Absolute size in lines/cells                                         | 50%     |
 | `percentage` | Size as percentage (1-100)                                           | 50%     |
 
+`size` is supported by tmux. Kitty and WezTerm do not provide a fixed-cell split operation. `percentage` is supported by tmux and WezTerm, and by Kitty when using the `splits` layout.
+
 `split: stacked` is supported only with the Zellij backend. It creates the pane in a Zellij stack with the previous pane, or with the pane selected by `target`.
 
 #### Agent placeholders

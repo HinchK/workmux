@@ -222,16 +222,13 @@ impl KittyBackend {
         Ok(())
     }
 
-    /// Internal split pane implementation.
-    fn split_pane_internal(
-        &self,
+    fn split_pane_args(
         target_pane_id: &str,
         direction: SplitDirection,
         cwd: &Path,
-        _size: Option<u16>,
-        _percentage: Option<u8>,
+        percentage: Option<u8>,
         command: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<Vec<String>> {
         // kitty's naming refers to the split line orientation, opposite of tmux:
         //   hsplit = horizontal divider = top/bottom panes
         //   vsplit = vertical divider   = left/right panes
@@ -245,25 +242,44 @@ impl KittyBackend {
             }
         };
 
-        let cwd_str = cwd.to_string_lossy();
-        let match_arg = format!("id:{}", target_pane_id);
-
+        let target = format!("id:{}", target_pane_id);
         let mut args = vec![
-            "launch",
-            "--location",
-            location_arg,
-            "--match",
-            &match_arg,
-            "--cwd",
-            &*cwd_str,
+            "launch".to_string(),
+            "--location".to_string(),
+            location_arg.to_string(),
+            "--match".to_string(),
+            target.clone(),
+            "--next-to".to_string(),
+            target,
+            "--cwd".to_string(),
+            cwd.to_string_lossy().into_owned(),
         ];
 
-        // Pass command as separate argv tokens for kitten @ launch
-        if let Some(cmd) = command {
-            args.push("sh");
-            args.push("-c");
-            args.push(cmd);
+        if let Some(percentage) = percentage {
+            args.push("--bias".to_string());
+            args.push(percentage.to_string());
         }
+
+        // Pass command as separate argv tokens for kitten @ launch
+        if let Some(command) = command {
+            args.extend(["sh".to_string(), "-c".to_string(), command.to_string()]);
+        }
+
+        Ok(args)
+    }
+
+    /// Internal split pane implementation.
+    fn split_pane_internal(
+        &self,
+        target_pane_id: &str,
+        direction: SplitDirection,
+        cwd: &Path,
+        _size: Option<u16>,
+        percentage: Option<u8>,
+        command: Option<&str>,
+    ) -> Result<String> {
+        let args = Self::split_pane_args(target_pane_id, direction, cwd, percentage, command)?;
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let output = self
             .kitten_cmd()
@@ -739,5 +755,64 @@ mod tests {
     fn test_kitty_backend_name() {
         let backend = KittyBackend::new();
         assert_eq!(backend.name(), "kitty");
+    }
+
+    #[test]
+    fn split_pane_args_target_pane_and_apply_percentage_bias() {
+        let args = KittyBackend::split_pane_args(
+            "42",
+            SplitDirection::Horizontal,
+            Path::new("/tmp/worktree"),
+            Some(67),
+            Some("printf 'hello world'"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "launch",
+                "--location",
+                "vsplit",
+                "--match",
+                "id:42",
+                "--next-to",
+                "id:42",
+                "--cwd",
+                "/tmp/worktree",
+                "--bias",
+                "67",
+                "sh",
+                "-c",
+                "printf 'hello world'",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_pane_args_omit_bias_and_command_when_unspecified() {
+        let args = KittyBackend::split_pane_args(
+            "7",
+            SplitDirection::Vertical,
+            Path::new("/workspace"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "launch",
+                "--location",
+                "hsplit",
+                "--match",
+                "id:7",
+                "--next-to",
+                "id:7",
+                "--cwd",
+                "/workspace",
+            ]
+        );
     }
 }

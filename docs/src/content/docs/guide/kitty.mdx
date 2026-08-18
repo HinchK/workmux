@@ -20,14 +20,16 @@ The kitty backend is new and experimental. Expect rough edges and potential issu
 
 ## Differences from tmux
 
-| Feature              | tmux                 | kitty                  |
-| -------------------- | -------------------- | ---------------------- |
-| Agent status in tabs | Yes (window names)   | Yes (custom tab title) |
-| Tab ordering         | Insert after current | Appends to end         |
-| Scope                | tmux session         | OS window              |
+| Feature              | tmux                 | kitty                    |
+| -------------------- | -------------------- | ------------------------ |
+| Agent status in tabs | Yes (window names)   | Yes (custom tab title)   |
+| Pane sizing          | Percentage or cells  | Percentage with `splits` |
+| Tab ordering         | Insert after current | Appends to end           |
+| Scope                | tmux session         | OS window                |
 
 - **Tab ordering**: New tabs appear at the end of the tab bar (no "insert after" support like tmux)
 - **OS window isolation**: workmux operates within the current OS window. Tabs in other OS windows are not affected.
+- **Pane sizing**: `percentage` uses Kitty's split bias with the `splits` layout. Absolute `size` values are unsupported because Kitty does not provide fixed-cell splits.
 - **Terminology note**: What workmux calls a "pane" is called a "window" in kitty, and what workmux calls a "window" (tab) is called a "tab" in kitty
 
 ## Requirements
