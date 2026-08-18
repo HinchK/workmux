@@ -21,6 +21,15 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.240 (2026-08-19)
+
+- Apply configured pane `percentage` values in the Kitty backend, so layouts
+  split the same way they do in tmux. Percentage sizing requires Kitty's
+  `splits` layout; absolute `size` values remain unsupported there.
+  ([#239](https://github.com/raine/workmux/issues/239))
+- Treat custom tmux `status_icons` as plain text when clearing a status on pane
+  focus, so icons containing tmux syntax work as written.
+
 ## v0.1.239 (2026-08-18)
 
 - Set `sidebar.dim_stale: false` to keep stale sidebar rows in their normal status colors instead of dimming them. ([#234](https://github.com/raine/workmux/pull/234))
