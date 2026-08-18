@@ -5,8 +5,11 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
+import pytest
+
 from .conftest import (
     MuxEnvironment,
+    TmuxEnvironment,
     create_commit,
     get_window_name,
     get_worktree_path,
@@ -129,6 +132,52 @@ def write_agent_state_file(env: MuxEnvironment, worktree_path: Path, status: str
     state_file = state_dir / filename
     state_file.write_text(json.dumps(state))
     return state_file
+
+
+@pytest.mark.tmux_only
+def test_list_adopts_window_recreated_by_tmux_restore(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "restored-list"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    expected_token = env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--get",
+            f"workmux.worktree.{branch_name}.window-token",
+        ],
+        cwd=mux_repo_path,
+    ).stdout.strip()
+    env.kill_window(window_name)
+    restored_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-c",
+            str(worktree_path),
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    output = run_workmux_list(env, workmux_exe_path, mux_repo_path)
+
+    restored_token = env.tmux(
+        ["display-message", "-p", "-t", restored_id, "#{@workmux_token}"]
+    ).stdout.strip()
+    assert restored_token == expected_token
+    row = next(row for row in parse_list_output(output) if row["BRANCH"] == branch_name)
+    assert row["MUX"] == "✓"
 
 
 def test_list_output_format(

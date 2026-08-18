@@ -179,9 +179,26 @@ pub fn plan(store: &StateStore, mux: &dyn Multiplexer) -> Result<ResurrectPlan> 
         let action = if canon_wt == canon_main {
             ResurrectAction::SkipMain
         } else {
-            let prefixed = crate::multiplexer::util::prefixed(prefix, &handle);
+            let target_name = if mode == MuxMode::Session {
+                git::get_worktree_target_session(&handle).unwrap_or_else(|| handle.clone())
+            } else {
+                git::get_worktree_target_window(&handle).unwrap_or_else(|| handle.clone())
+            };
+            let prefixed = crate::multiplexer::util::prefixed(prefix, &target_name);
             let is_open = if mode == MuxMode::Session {
                 mux_sessions.contains(&prefixed)
+            } else if mux.supports_window_ownership() {
+                match git::get_worktree_window_token(&handle) {
+                    Some(token) => !mux
+                        .resolve_owned_window_targets(
+                            &token,
+                            &prefixed,
+                            git::get_worktree_window_session(&handle).as_deref(),
+                            &canon_wt,
+                        )?
+                        .is_empty(),
+                    None => mux_windows.contains(&prefixed),
+                }
             } else {
                 mux_windows.contains(&prefixed)
             };

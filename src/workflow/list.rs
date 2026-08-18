@@ -179,9 +179,17 @@ pub fn list_in(
             let has_mux_window = if mode == MuxMode::Session {
                 mux_sessions.contains(&prefixed_name)
             } else if mux.supports_window_ownership() && window_tokens.contains_key(&handle) {
-                window_tokens
-                    .get(&handle)
-                    .is_some_and(|token| active_window_tokens.contains(token))
+                window_tokens.get(&handle).is_some_and(|token| {
+                    active_window_tokens.contains(token)
+                        || mux
+                            .resolve_owned_window_targets(
+                                token,
+                                &prefixed_name,
+                                window_sessions.get(&handle).map(String::as_str),
+                                &path,
+                            )
+                            .is_ok_and(|targets| !targets.is_empty())
+                })
             } else if let Some(parent_session) = window_sessions.get(&handle) {
                 mux_windows_with_sessions.contains(&(prefixed_name.clone(), parent_session.clone()))
             } else {

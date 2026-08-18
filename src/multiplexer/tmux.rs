@@ -28,6 +28,7 @@ const LIVE_PANE_FIELD_SEPARATOR: char = '\x1f';
 const LIVE_PANE_ESCAPED_RECORD_SEPARATOR: &str = "\\036";
 const LIVE_PANE_ESCAPED_FIELD_SEPARATOR: &str = "\\037";
 const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}";
+const WINDOW_OWNERSHIP_FORMAT: &str = "\x1e#{window_id}\x1f#{window_name}\x1f#{session_name}\x1f#{@workmux_token}\x1f#{pane_current_path}";
 
 fn live_pane_fields(line: &str) -> Vec<&str> {
     if line.contains(LIVE_PANE_FIELD_SEPARATOR) {
@@ -96,6 +97,35 @@ fn parse_live_pane_snapshot_lossy(output: &str) -> HashMap<String, LivePaneInfo>
     live_pane_records(output)
         .into_iter()
         .filter_map(parse_live_pane_line)
+        .collect()
+}
+
+fn parse_window_ownership_record(line: &str) -> Option<WindowOwnershipRecord> {
+    let line = line
+        .strip_prefix(LIVE_PANE_RECORD_SEPARATOR)
+        .or_else(|| line.strip_prefix(LIVE_PANE_ESCAPED_RECORD_SEPARATOR))
+        .unwrap_or(line);
+    let parts = live_pane_fields(line);
+    if parts.len() != 5 || parts[0].is_empty() {
+        return None;
+    }
+
+    Some(WindowOwnershipRecord {
+        window_id: parts[0].to_string(),
+        window_name: parts[1].to_string(),
+        session_name: parts[2].to_string(),
+        token: (!parts[3].is_empty()).then(|| parts[3].to_string()),
+        pane_path: PathBuf::from(parts[4]),
+    })
+}
+
+fn parse_window_ownership_records(output: &str) -> Result<Vec<WindowOwnershipRecord>> {
+    live_pane_records(output)
+        .into_iter()
+        .map(|line| {
+            parse_window_ownership_record(line)
+                .ok_or_else(|| anyhow!("tmux returned malformed window ownership data: {line:?}"))
+        })
         .collect()
 }
 
@@ -651,6 +681,11 @@ impl Multiplexer for TmuxBackend {
             .filter(|token| !token.is_empty())
             .map(str::to_string)
             .collect())
+    }
+
+    fn window_ownership_records(&self) -> Result<Vec<WindowOwnershipRecord>> {
+        let output = self.tmux_query(&["list-panes", "-a", "-F", WINDOW_OWNERSHIP_FORMAT])?;
+        parse_window_ownership_records(&output)
     }
 
     fn switch_to_session(&self, prefix: &str, name: &str) -> Result<()> {
@@ -1241,6 +1276,30 @@ mod tests {
     fn live_pane(path: &str, session_id: &str) -> LivePaneInfo {
         let line = format!("%7\t12345\tnode\t{path}\tWorking\tmain\twork\t{session_id}\t@2");
         parse_live_pane_line(&line).unwrap().1
+    }
+
+    #[test]
+    fn window_ownership_snapshot_parses_records() {
+        let output = "\x1e@2\x1fwm-work\x1fmain\x1ftoken-1\x1f/repo/work\n\x1e@3\x1fwm-other\x1fmain\x1f\x1f/repo/other\n";
+
+        let records = parse_window_ownership_records(output).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].window_id, "@2");
+        assert_eq!(records[0].token.as_deref(), Some("token-1"));
+        assert_eq!(records[0].pane_path, PathBuf::from("/repo/work"));
+        assert_eq!(records[1].token, None);
+    }
+
+    #[test]
+    fn window_ownership_snapshot_rejects_malformed_rows() {
+        let error = parse_window_ownership_records("@2\twm-work").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("malformed window ownership data")
+        );
     }
 
     #[test]

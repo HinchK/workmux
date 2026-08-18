@@ -16,7 +16,7 @@ pub fn run(name: Option<&str>) -> Result<()> {
     // Resolve the handle first. When the user passes a branch name that differs
     // from the worktree directory name, find_worktree resolves through both handle
     // and branch lookups, then we extract the true handle from the path basename.
-    let resolved_handle = match name {
+    let (resolved_handle, worktree_path) = match name {
         Some(n) => {
             let (path, _branch) = git::find_worktree(n).map_err(|_| {
                 anyhow!(
@@ -24,12 +24,18 @@ pub fn run(name: Option<&str>) -> Result<()> {
                     n
                 )
             })?;
-            path.file_name()
+            let handle = path
+                .file_name()
                 .ok_or_else(|| anyhow!("Invalid worktree path: no directory name"))?
                 .to_string_lossy()
-                .to_string()
+                .to_string();
+            (handle, path)
         }
-        None => super::resolve_name(None)?,
+        None => {
+            let handle = super::resolve_name(None)?;
+            let (path, _branch) = git::find_worktree(&handle)?;
+            (handle, path)
+        }
     };
 
     // Determine if this worktree was created as a session or window
@@ -89,9 +95,23 @@ pub fn run(name: Option<&str>) -> Result<()> {
     } else {
         None
     };
+    let expected_full_window_name = MuxHandle::new(
+        mux.as_ref(),
+        crate::config::MuxMode::Window,
+        prefix,
+        &target_name,
+    )
+    .full_name();
     let owned_targets = window_token
         .as_deref()
-        .map(|token| mux.owned_window_targets(token))
+        .map(|token| {
+            mux.resolve_owned_window_targets(
+                token,
+                &expected_full_window_name,
+                window_session.as_deref(),
+                &worktree_path,
+            )
+        })
         .transpose()?
         .unwrap_or_default();
     let current_window_id = if mode == crate::config::MuxMode::Window {

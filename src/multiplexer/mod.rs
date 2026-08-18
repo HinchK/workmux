@@ -15,7 +15,7 @@ pub mod wezterm;
 pub mod zellij;
 
 use anyhow::{Context, Result, anyhow};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -48,6 +48,72 @@ fn command_with_status_target(
         agent::shell_quote(pane_id),
         command
     )
+}
+
+fn adoption_targets(
+    records: Vec<WindowOwnershipRecord>,
+    expected_full_name: &str,
+    parent_session: Option<&str>,
+    worktree_path: &Path,
+) -> Vec<OwnedWindowTarget> {
+    let canonical_worktree = crate::util::canon_or_self(worktree_path);
+    let duplicate_prefix = format!("{expected_full_name}-");
+    let mut candidates: HashMap<String, OwnedWindowTarget> = HashMap::new();
+
+    for record in records {
+        if record.token.is_some()
+            || parent_session.is_some_and(|parent| record.session_name != parent)
+        {
+            continue;
+        }
+
+        let name_matches = record.window_name == expected_full_name
+            || record
+                .window_name
+                .strip_prefix(&duplicate_prefix)
+                .is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                });
+        if !name_matches {
+            continue;
+        }
+
+        let pane_path = crate::util::canon_or_self(&record.pane_path);
+        if pane_path != canonical_worktree && !pane_path.starts_with(&canonical_worktree) {
+            continue;
+        }
+
+        let is_primary = record.window_name == expected_full_name;
+        candidates
+            .entry(record.window_id.clone())
+            .or_insert_with(|| OwnedWindowTarget {
+                target: WindowTarget::with_id(
+                    record.window_name,
+                    Some(record.session_name),
+                    record.window_id,
+                ),
+                is_primary,
+            });
+    }
+
+    let mut names = HashMap::<String, String>::new();
+    for (window_id, candidate) in &candidates {
+        if names
+            .insert(candidate.target.full_name.clone(), window_id.clone())
+            .is_some_and(|existing_id| existing_id != *window_id)
+        {
+            return Vec::new();
+        }
+    }
+
+    let mut candidates: Vec<_> = candidates.into_values().collect();
+    candidates.sort_by(|a, b| {
+        a.target
+            .full_name
+            .cmp(&b.target.full_name)
+            .then_with(|| a.target.window_id.cmp(&b.target.window_id))
+    });
+    candidates
 }
 
 /// Main trait for terminal multiplexer backends.
@@ -149,6 +215,39 @@ pub trait Multiplexer: Send + Sync {
 
     fn owned_window_tokens(&self) -> Result<HashSet<String>> {
         Ok(HashSet::new())
+    }
+
+    fn window_ownership_records(&self) -> Result<Vec<WindowOwnershipRecord>> {
+        Ok(Vec::new())
+    }
+
+    fn resolve_owned_window_targets(
+        &self,
+        token: &str,
+        expected_full_name: &str,
+        parent_session: Option<&str>,
+        worktree_path: &Path,
+    ) -> Result<Vec<OwnedWindowTarget>> {
+        let owned = self.owned_window_targets(token)?;
+        if !owned.is_empty() {
+            return Ok(owned);
+        }
+
+        let adopted = adoption_targets(
+            self.window_ownership_records()?,
+            expected_full_name,
+            parent_session,
+            worktree_path,
+        );
+        for window in &adopted {
+            let window_id = window
+                .target
+                .window_id
+                .as_deref()
+                .expect("adopted windows have stable IDs");
+            self.set_window_ownership(window_id, token, window.is_primary)?;
+        }
+        Ok(adopted)
     }
 
     /// Switch to a session by prefix and name.
@@ -931,6 +1030,60 @@ pub fn create_backend_for_instance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ownership_record(
+        window_id: &str,
+        window_name: &str,
+        session_name: &str,
+        token: Option<&str>,
+        pane_path: &Path,
+    ) -> WindowOwnershipRecord {
+        WindowOwnershipRecord {
+            window_id: window_id.to_string(),
+            window_name: window_name.to_string(),
+            session_name: session_name.to_string(),
+            token: token.map(str::to_string),
+            pane_path: pane_path.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn adoption_requires_an_untagged_name_and_worktree_path_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let subdir = worktree.join("src");
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let records = vec![
+            ownership_record("@1", "wm-work", "main", None, &subdir),
+            ownership_record("@2", "wm-work-2", "main", None, &worktree),
+            ownership_record("@3", "wm-work", "other", None, &worktree),
+            ownership_record("@4", "wm-work", "main", None, &other),
+            ownership_record("@5", "wm-work-3", "main", Some("another"), &worktree),
+        ];
+
+        let targets = adoption_targets(records, "wm-work", Some("main"), &worktree);
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].target.window_id.as_deref(), Some("@1"));
+        assert!(targets[0].is_primary);
+        assert_eq!(targets[1].target.window_id.as_deref(), Some("@2"));
+        assert!(!targets[1].is_primary);
+    }
+
+    #[test]
+    fn adoption_rejects_indistinguishable_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let records = vec![
+            ownership_record("@1", "wm-work", "one", None, &worktree),
+            ownership_record("@2", "wm-work", "two", None, &worktree),
+        ];
+
+        assert!(adoption_targets(records, "wm-work", None, &worktree).is_empty());
+    }
 
     #[test]
     fn status_target_command_quotes_identity_values() {

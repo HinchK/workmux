@@ -57,6 +57,44 @@ def test_open_recreates_tmux_window_for_existing_worktree(
     assert window_name in list_windows
 
 
+@pytest.mark.tmux_only
+def test_open_adopts_window_recreated_by_tmux_restore(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    env = mux_server
+    branch_name = "restored-open"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(repo_path)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+    worktree_path = get_worktree_path(repo_path, branch_name)
+    env.kill_window(window_name)
+    restored_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-c",
+            str(worktree_path),
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    result = run_workmux_open(env, workmux_exe_path, repo_path, branch_name)
+
+    assert "Switched to existing" in result.stdout
+    windows = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}\t#{window_name}"]
+    ).stdout.splitlines()
+    matching_ids = [
+        line.split("\t", 1)[0] for line in windows if line.endswith(f"\t{window_name}")
+    ]
+    assert matching_ids == [restored_id]
+
+
 # WezTerm: get_current_window() returns None because WezTerm doesn't expose
 # session-level window focus via CLI - GUI focus is controlled by window manager.
 @pytest.mark.tmux_only

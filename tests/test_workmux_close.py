@@ -105,6 +105,85 @@ def test_close_kills_window_keeps_worktree(
 
 
 @pytest.mark.tmux_only
+def test_close_adopts_window_recreated_by_tmux_restore(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-restored-close"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    env.kill_window(window_name)
+    restored_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-c",
+            str(worktree_path),
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+    restored_token = env.tmux(
+        ["display-message", "-p", "-t", restored_id, "#{@workmux_token}"]
+    ).stdout.strip()
+    assert restored_token == ""
+
+    run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
+
+    window_ids = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}"], check=False
+    ).stdout.splitlines()
+    assert restored_id not in window_ids
+    assert worktree_path.exists()
+
+
+@pytest.mark.tmux_only
+def test_close_does_not_adopt_same_name_window_from_another_directory(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-restore-impostor"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    env.kill_window(window_name)
+    impostor_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-c",
+            str(mux_repo_path),
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    result = run_workmux_close(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        branch_name,
+        expect_fail=True,
+    )
+
+    assert "No active window found" in result.stderr
+    window_ids = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}"]
+    ).stdout.splitlines()
+    assert impostor_id in window_ids
+
+
+@pytest.mark.tmux_only
 def test_close_window_in_parent_session(
     mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):

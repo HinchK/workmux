@@ -156,10 +156,17 @@ fn find_matching_window_targets(
     target_name: &str,
     parent_session: Option<&str>,
     window_token: Option<&str>,
+    worktree_path: &Path,
 ) -> Result<Vec<WindowTarget>> {
     if let Some(token) = window_token {
+        let expected_full_name = prefixed(prefix, target_name);
         return Ok(mux
-            .owned_window_targets(token)?
+            .resolve_owned_window_targets(
+                token,
+                &expected_full_name,
+                parent_session,
+                worktree_path,
+            )?
             .into_iter()
             .map(|owned| owned.target)
             .collect());
@@ -189,6 +196,7 @@ fn is_inside_matching_target(
     mode: MuxMode,
     parent_session: Option<&str>,
     window_token: Option<&str>,
+    worktree_path: &Path,
 ) -> Result<Option<(String, Option<String>)>> {
     let (current_name, current_id) = if mode == MuxMode::Session {
         (
@@ -211,7 +219,12 @@ fn is_inside_matching_target(
     if mode == MuxMode::Window
         && let (Some(token), Some(current_id)) = (window_token, current_id.as_deref())
         && let Some(owned) = mux
-            .owned_window_targets(token)?
+            .resolve_owned_window_targets(
+                token,
+                &prefixed(prefix, target_name),
+                parent_session,
+                worktree_path,
+            )?
             .into_iter()
             .find(|owned| owned.target.window_id.as_deref() == Some(current_id))
     {
@@ -300,6 +313,7 @@ pub fn cleanup(
             mode,
             parent_session.as_deref(),
             window_token.as_deref(),
+            worktree_path,
         )?
     } else {
         None
@@ -511,6 +525,7 @@ pub fn cleanup(
                 &target_name,
                 parent_session.as_deref(),
                 window_token.as_deref(),
+                worktree_path,
             )?;
             let mut killed_count = 0;
             for target in &matching_windows {
@@ -632,6 +647,7 @@ pub fn cleanup(
                     &target_name,
                     parent_session.as_deref(),
                     window_token.as_deref(),
+                    worktree_path,
                 )?;
                 let mut killed_count = 0;
                 for target in &matching_windows {
@@ -660,6 +676,7 @@ pub fn cleanup(
                             &target_name,
                             parent_session.as_deref(),
                             window_token.as_deref(),
+                            worktree_path,
                         )?;
                         if remaining.is_empty() {
                             break;

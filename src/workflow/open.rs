@@ -136,20 +136,27 @@ pub fn open(
                         )
                     })
                     .flatten();
+                let prior_window_name =
+                    git::get_worktree_target_window_in(&base_handle, Some(&context.execution_dir))
+                        .unwrap_or_else(|| base_handle.clone());
+                let full_base = prefixed(&context.prefix, &prior_window_name);
+                let prior_parent_session =
+                    git::get_worktree_window_session_in(&base_handle, Some(&context.execution_dir));
                 let owned_targets = window_token
                     .as_deref()
-                    .map(|token| context.mux.owned_window_targets(token))
+                    .map(|token| {
+                        context.mux.resolve_owned_window_targets(
+                            token,
+                            &full_base,
+                            prior_parent_session.as_deref(),
+                            &worktree_path,
+                        )
+                    })
                     .transpose()?
                     .unwrap_or_default();
 
                 if window_token.is_none() {
                     let all_names = context.mux.get_all_window_names()?;
-                    let prior_window_name = git::get_worktree_target_window_in(
-                        &base_handle,
-                        Some(&context.execution_dir),
-                    )
-                    .unwrap_or_else(|| base_handle.clone());
-                    let full_base = prefixed(&context.prefix, &prior_window_name);
                     let full_base_dash = format!("{}-", full_base);
                     for name in &all_names {
                         let is_exact = *name == full_base;
@@ -240,7 +247,14 @@ pub fn open(
     };
     let owned_primary = window_token
         .as_deref()
-        .map(|token| context.mux.owned_window_targets(token))
+        .map(|token| {
+            context.mux.resolve_owned_window_targets(
+                token,
+                &target.full_name(),
+                window_session_name.as_deref(),
+                &worktree_path,
+            )
+        })
         .transpose()?
         .and_then(|targets| {
             targets

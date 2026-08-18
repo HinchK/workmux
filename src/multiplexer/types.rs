@@ -40,6 +40,15 @@ pub struct OwnedWindowTarget {
     pub is_primary: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowOwnershipRecord {
+    pub window_id: String,
+    pub window_name: String,
+    pub session_name: String,
+    pub token: Option<String>,
+    pub pane_path: PathBuf,
+}
+
 /// How (if at all) to resume an existing agent conversation when launching.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ResumeMode {

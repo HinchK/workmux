@@ -467,6 +467,10 @@ impl App {
 
         let prefix = self.config.window_prefix();
         if worktree.mode == crate::config::MuxMode::Window {
+            let target_name = crate::git::get_worktree_target_window(&worktree.handle)
+                .unwrap_or_else(|| worktree.handle.clone());
+            let full_name = crate::multiplexer::util::prefixed(prefix, &target_name);
+            let parent_session = crate::git::get_worktree_window_session(&worktree.handle);
             let window_token = self
                 .mux
                 .supports_window_ownership()
@@ -474,7 +478,12 @@ impl App {
                 .flatten();
             let target = if let Some(token) = window_token {
                 self.mux
-                    .owned_window_targets(&token)
+                    .resolve_owned_window_targets(
+                        &token,
+                        &full_name,
+                        parent_session.as_deref(),
+                        &worktree.path,
+                    )
                     .ok()
                     .and_then(|targets| {
                         targets
@@ -483,11 +492,9 @@ impl App {
                             .map(|owned| owned.target.clone())
                     })
             } else {
-                let target_name = crate::git::get_worktree_target_window(&worktree.handle)
-                    .unwrap_or_else(|| worktree.handle.clone());
                 Some(crate::multiplexer::WindowTarget::new(
-                    crate::multiplexer::util::prefixed(prefix, &target_name),
-                    crate::git::get_worktree_window_session(&worktree.handle),
+                    full_name,
+                    parent_session,
                 ))
             };
             if let Some(target) = target {

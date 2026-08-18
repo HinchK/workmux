@@ -49,6 +49,41 @@ def test_remove_clean_branch_succeeds_without_prompt(
 
 
 @pytest.mark.tmux_only
+def test_remove_adopts_window_recreated_by_tmux_restore(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "restored-remove"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path)
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    worktree_path = get_worktree_path(mux_repo_path, branch_name)
+    env.kill_window(window_name)
+    restored_id = env.tmux(
+        [
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-c",
+            str(worktree_path),
+            "-P",
+            "-F",
+            "#{window_id}",
+        ]
+    ).stdout.strip()
+
+    run_workmux_remove(env, workmux_exe_path, mux_repo_path, branch_name, force=True)
+
+    window_ids = env.tmux(
+        ["list-windows", "-a", "-F", "#{window_id}"], check=False
+    ).stdout.splitlines()
+    assert restored_id not in window_ids
+    assert not worktree_path.exists()
+
+
+@pytest.mark.tmux_only
 def test_remove_window_in_parent_session(
     mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):
