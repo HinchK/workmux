@@ -1091,11 +1091,26 @@ impl Multiplexer for TmuxBackend {
         // Set up hook to auto-clear status when a pane receives focus.
         // Used for "waiting" and "done" statuses so they clear once the user sees them.
         if auto_clear_on_focus {
-            // The pane-focus-in hook fires in the context of the focused pane, so
-            // `set-option -up` targets that specific pane's option. This makes
-            // auto-clear work per-agent even with multiple agents in one window.
-            let hook_cmd = auto_clear_status_hook(icon);
+            // The hook body is constant, so it never carries the icon as tmux command
+            // syntax. It compares the window status against a separate pane option
+            // holding the icon that is awaiting acknowledgement. The pane-focus-in hook
+            // fires in the context of the focused pane, so `set-option -up` targets that
+            // specific pane's option, which makes auto-clear work per-agent even with
+            // multiple agents in one window.
+            let _ = self.tmux_cmd(&[
+                "set-option",
+                "-p",
+                "-t",
+                pane_id,
+                "@workmux_ack_status",
+                icon,
+            ]);
+            let hook_cmd = auto_clear_status_hook();
             let _ = self.tmux_cmd(&["set-hook", "-w", "-t", pane_id, "pane-focus-in", &hook_cmd]);
+        } else {
+            // Statuses that are not acknowledged on focus must clear the option, so a
+            // hook left installed by an earlier acknowledgeable status does not match.
+            let _ = self.tmux_cmd(&["set-option", "-up", "-t", pane_id, "@workmux_ack_status"]);
         }
 
         Ok(())
@@ -1104,6 +1119,7 @@ impl Multiplexer for TmuxBackend {
     fn clear_status(&self, pane_id: &str) -> Result<()> {
         self.clear_window_status_internal(pane_id);
         let _ = self.tmux_cmd(&["set-option", "-up", "-t", pane_id, "@workmux_pane_status"]);
+        let _ = self.tmux_cmd(&["set-option", "-up", "-t", pane_id, "@workmux_ack_status"]);
         Ok(())
     }
 
@@ -1191,11 +1207,13 @@ impl Multiplexer for TmuxBackend {
     }
 }
 /// Build the pane-focus hook that acknowledges a status and refreshes sidebar clients.
-fn auto_clear_status_hook(icon: &str) -> String {
-    format!(
-        "set-option -up @workmux_pane_status ; if-shell -F \"#{{==:#{{@workmux_status}},{}}}\" \"set-option -uw @workmux_status\" ; run-shell -b 'kill -USR1 $(tmux show-option -gqv @workmux_sidebar_daemon_pid) 2>/dev/null || true'",
-        icon
-    )
+///
+/// The body is a constant. The icon reaches tmux only as an option value, which tmux
+/// does not re-expand as a command, so a hostile icon cannot become tmux command syntax.
+fn auto_clear_status_hook() -> String {
+    // The acknowledgement option is tested for emptiness rather than truth, because
+    // tmux treats the literal "0" as false and that is a usable icon.
+    "if-shell -F \"#{&&:#{!=:#{@workmux_ack_status},},#{==:#{@workmux_status},#{@workmux_ack_status}}}\" \"set-option -uw @workmux_status\" ; set-option -up @workmux_pane_status ; set-option -up @workmux_ack_status ; run-shell -b 'kill -USR1 $(tmux show-option -gqv @workmux_sidebar_daemon_pid) 2>/dev/null || true'".to_string()
 }
 
 /// Format string to inject into tmux window-status-format.
@@ -1423,14 +1441,18 @@ mod tests {
 
     #[test]
     fn auto_clear_status_hook_signals_daemon_after_clearing_status() {
-        let hook = auto_clear_status_hook("✅");
-        let clear_pane = hook.find("set-option -up @workmux_pane_status").unwrap();
+        let hook = auto_clear_status_hook();
         let clear_window = hook.find("set-option -uw @workmux_status").unwrap();
+        let clear_pane = hook.find("set-option -up @workmux_pane_status").unwrap();
+        let clear_ack = hook.find("set-option -up @workmux_ack_status").unwrap();
         let signal_daemon = hook.find("kill -USR1").unwrap();
 
-        assert!(hook.contains("#{==:#{@workmux_status},✅}"));
-        assert!(clear_pane < clear_window);
-        assert!(clear_window < signal_daemon);
+        assert!(hook.contains(
+            "#{&&:#{!=:#{@workmux_ack_status},},#{==:#{@workmux_status},#{@workmux_ack_status}}}"
+        ));
+        assert!(clear_window < clear_pane);
+        assert!(clear_pane < clear_ack);
+        assert!(clear_ack < signal_daemon);
     }
 
     #[test]

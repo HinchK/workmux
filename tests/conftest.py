@@ -1336,6 +1336,7 @@ def write_workmux_config(
     prompt_file_only: Optional[bool] = None,
     window_placement: Optional[str] = None,
     layouts: Optional[Dict[str, Any]] = None,
+    status_icons: Optional[Dict[str, str]] = None,
 ):
     """Creates a .workmux.yaml file from structured data and optionally commits it."""
     # Disable nerdfonts by default to ensure consistent "wm-" prefix in tests,
@@ -1373,6 +1374,8 @@ def write_workmux_config(
         config["prompt_file_only"] = prompt_file_only
     if window_placement is not None:
         config["window_placement"] = window_placement
+    if status_icons:
+        config["status_icons"] = status_icons
     (repo_path / ".workmux.yaml").write_text(yaml.dump(config))
 
     # If env is provided, commit the config file to avoid uncommitted changes in merge tests
