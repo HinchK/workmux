@@ -111,18 +111,21 @@ fn start_rpc(
     Ok((rpc_server, rpc_port, rpc_token, ctx))
 }
 
-/// Extract git `user.name` and `user.email` from the host's git config and
-/// return `GIT_CONFIG_*` environment variable pairs to inject into the sandbox.
+/// Build command-scope Git configuration for a sandbox guest.
 ///
-/// Runs `git config user.name` and `git config user.email` from `worktree_dir`
-/// to respect all config scopes (system, global, conditional includes).
-/// Returns an empty vec if neither value is configured (graceful no-op).
-fn git_user_config_envs(worktree_dir: &Path) -> Vec<(String, String)> {
-    let mut entries = Vec::new();
+/// The worktree is marked safe for runtimes whose mount ownership differs from
+/// the guest UID. Host user identity is copied so guest commits retain the
+/// configured author name and email.
+pub(super) fn git_user_config_envs(worktree_dir: &Path) -> Vec<(String, String)> {
+    let mut entries = vec![(
+        "safe.directory".to_string(),
+        worktree_dir.to_string_lossy().into_owned(),
+    )];
 
     for key in &["user.name", "user.email"] {
-        let mut command = Command::new("git");
-        clear_ambient_git_env(&mut command);
+        let Ok(mut command) = crate::git::unattended_git(Some(worktree_dir)) else {
+            continue;
+        };
         if let Ok(output) = command
             .args(["config", key])
             .current_dir(worktree_dir)
@@ -136,10 +139,6 @@ fn git_user_config_envs(worktree_dir: &Path) -> Vec<(String, String)> {
         }
     }
 
-    if entries.is_empty() {
-        return Vec::new();
-    }
-
     let mut envs = Vec::with_capacity(1 + entries.len() * 2);
     envs.push(("GIT_CONFIG_COUNT".into(), entries.len().to_string()));
     for (i, (key, val)) in entries.iter().enumerate() {
@@ -149,28 +148,9 @@ fn git_user_config_envs(worktree_dir: &Path) -> Vec<(String, String)> {
     envs
 }
 
+#[cfg(test)]
 fn clear_ambient_git_env(command: &mut Command) {
-    for key in [
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_GRAFT_FILE",
-        "GIT_INDEX_FILE",
-        "GIT_NAMESPACE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_PREFIX",
-        "GIT_QUARANTINE_PATH",
-        "GIT_SHALLOW_FILE",
-        "GIT_WORK_TREE",
-    ] {
-        command.env_remove(key);
-    }
-    command.env_remove("GIT_CONFIG_COUNT");
-    command.env_remove("GIT_CONFIG_PARAMETERS");
-    for i in 0..32 {
-        command.env_remove(format!("GIT_CONFIG_KEY_{i}"));
-        command.env_remove(format!("GIT_CONFIG_VALUE_{i}"));
-    }
+    crate::git::clear_ambient_git_env(command);
 }
 
 fn run_lima(config: &Config, worktree: &Path, command: &[String]) -> Result<i32> {
@@ -371,6 +351,7 @@ fn run_container(
     // Compute RPC host BEFORE matching on runtime (SandboxRuntime is not Copy)
     let rpc_host = config.sandbox.resolved_rpc_host();
     let runtime = config.sandbox.runtime();
+    crate::sandbox::validate_git_metadata_boundary(runtime)?;
     let runtime_bin = runtime.binary_name();
 
     // Generate container name from worktree directory name so cleanup can find it.
@@ -571,14 +552,25 @@ mod tests {
         let tmp = git_repo_with_user("Test User", "test@example.com");
         let envs = git_user_config_envs(tmp.path());
 
-        assert_eq!(envs.len(), 5); // COUNT + 2*(KEY + VALUE)
-        assert_eq!(envs[0], ("GIT_CONFIG_COUNT".into(), "2".into()));
-        assert_eq!(envs[1], ("GIT_CONFIG_KEY_0".into(), "user.name".into()));
-        assert_eq!(envs[2], ("GIT_CONFIG_VALUE_0".into(), "Test User".into()));
-        assert_eq!(envs[3], ("GIT_CONFIG_KEY_1".into(), "user.email".into()));
+        assert_eq!(envs.len(), 7);
+        assert_eq!(envs[0], ("GIT_CONFIG_COUNT".into(), "3".into()));
         assert_eq!(
-            envs[4],
-            ("GIT_CONFIG_VALUE_1".into(), "test@example.com".into())
+            envs[1],
+            ("GIT_CONFIG_KEY_0".into(), "safe.directory".into())
+        );
+        assert_eq!(
+            envs[2],
+            (
+                "GIT_CONFIG_VALUE_0".into(),
+                tmp.path().to_string_lossy().into_owned()
+            )
+        );
+        assert_eq!(envs[3], ("GIT_CONFIG_KEY_1".into(), "user.name".into()));
+        assert_eq!(envs[4], ("GIT_CONFIG_VALUE_1".into(), "Test User".into()));
+        assert_eq!(envs[5], ("GIT_CONFIG_KEY_2".into(), "user.email".into()));
+        assert_eq!(
+            envs[6],
+            ("GIT_CONFIG_VALUE_2".into(), "test@example.com".into())
         );
     }
 
@@ -618,7 +610,7 @@ mod tests {
 
         let name_val = envs
             .iter()
-            .find(|(k, _)| k == "GIT_CONFIG_VALUE_0")
+            .find(|(k, _)| k == "GIT_CONFIG_VALUE_1")
             .map(|(_, v)| v.as_str());
         assert_eq!(name_val, Some("John O'Brien"));
     }

@@ -228,6 +228,32 @@ pub fn ensure_image_ready(config: &SandboxConfig, image: &str) -> Result<()> {
     Ok(())
 }
 
+fn apple_container_supports_read_only_path(help: &str) -> bool {
+    help.contains("--read-only-path")
+}
+
+/// Validate that the selected runtime can enforce the Git metadata mount boundary.
+pub fn validate_git_metadata_boundary(runtime: SandboxRuntime) -> Result<()> {
+    if runtime != SandboxRuntime::AppleContainer {
+        return Ok(());
+    }
+    let output = Command::new(runtime.binary_name())
+        .args(["run", "--help"])
+        .output()
+        .context("Failed to inspect Apple Container capabilities")?;
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() || !apple_container_supports_read_only_path(&help) {
+        anyhow::bail!(
+            "This Apple Container build lacks --read-only-path, which Workmux requires to protect host Git control files. Upgrade Apple Container or use Docker or Podman."
+        );
+    }
+    Ok(())
+}
+
 /// Build the argument list for a `docker run` command.
 ///
 /// Returns the full arg vector (excluding the runtime binary name itself).
@@ -285,6 +311,368 @@ fn build_docker_run_args_with_state_dir(
         network_deny,
         Some(state_root),
     )
+}
+
+fn push_bind_path(args: &mut Vec<String>, path: &Path, read_only: bool) {
+    args.push("--mount".to_string());
+    let mut mount = format!(
+        "type=bind,source={},target={}",
+        path.display(),
+        path.display()
+    );
+    if read_only {
+        mount.push_str(",readonly");
+    }
+    args.push(mount);
+}
+
+fn push_read_only_path(args: &mut Vec<String>, runtime: SandboxRuntime, path: &Path) {
+    if runtime == SandboxRuntime::AppleContainer {
+        args.push("--read-only-path".to_string());
+        args.push(path.to_string_lossy().into_owned());
+    } else {
+        push_bind_path(args, path, true);
+    }
+}
+
+fn git_private_state_dir(worktree: &Path, state_root: Option<&Path>) -> Result<PathBuf> {
+    let canonical = worktree.canonicalize()?;
+    let key = crate::sandbox::pi::path_hash(&canonical);
+    let root = match state_root {
+        Some(root) => root.to_path_buf(),
+        None => crate::xdg::state_dir()?.join("container"),
+    };
+    let path = root.join(format!("git-{key}"));
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+fn collect_worktree_git_pointers(worktree: &Path) -> Result<Vec<PathBuf>> {
+    fn visit(dir: &Path, pointers: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if path.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                if metadata.is_file() {
+                    pointers.push(path);
+                }
+                continue;
+            }
+            if metadata.is_dir() {
+                visit(&path, pointers)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut pointers = Vec::new();
+    visit(worktree, &mut pointers)?;
+    Ok(pointers)
+}
+
+fn config_include_paths(config: &Path) -> Result<Vec<PathBuf>> {
+    fn visit(
+        config: &Path,
+        visited: &mut std::collections::HashSet<PathBuf>,
+        paths: &mut Vec<PathBuf>,
+    ) -> Result<()> {
+        let config = config.canonicalize()?;
+        if !visited.insert(config.clone()) {
+            return Ok(());
+        }
+        let output = crate::git::unattended_git(None)?
+            .args([
+                "config",
+                "--file",
+                config.to_string_lossy().as_ref(),
+                "--get-regexp",
+                "^include.*\\.path$",
+            ])
+            .output()?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            anyhow::bail!(
+                "Failed to inspect Git config includes in {}",
+                config.display()
+            );
+        }
+        for line in String::from_utf8(output.stdout)?.lines() {
+            let Some((_, value)) = line.split_once(char::is_whitespace) else {
+                continue;
+            };
+            if value.contains(['*', '?', '[', '%']) {
+                anyhow::bail!("Git config include path cannot be protected safely: {value}");
+            }
+            let include = if let Some(rest) = value.strip_prefix("~/") {
+                home::home_dir()
+                    .context("Could not resolve home directory for Git config include")?
+                    .join(rest)
+            } else {
+                let path = Path::new(value);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    config.parent().unwrap_or(Path::new("/")).join(path)
+                }
+            };
+            if !include.is_file() {
+                anyhow::bail!(
+                    "Git config include target must exist before sandbox startup: {}",
+                    include.display()
+                );
+            }
+            paths.push(include.clone());
+            visit(&include, visited, paths)?;
+        }
+
+        let executable_output = crate::git::unattended_git(None)?
+            .args([
+                "config",
+                "--file",
+                config.to_string_lossy().as_ref(),
+                "--get-regexp",
+                "^(core\\.(hooksPath|fsmonitor)|diff\\..*\\.(command|textconv)|filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver)$",
+            ])
+            .output()?;
+        if !executable_output.status.success() && executable_output.status.code() != Some(1) {
+            anyhow::bail!(
+                "Failed to inspect executable Git config in {}",
+                config.display()
+            );
+        }
+        for line in String::from_utf8(executable_output.stdout)?.lines() {
+            let Some((key, value)) = line.split_once(char::is_whitespace) else {
+                continue;
+            };
+            if key.eq_ignore_ascii_case("core.fsmonitor") && matches!(value, "true" | "false") {
+                continue;
+            }
+            let token = value
+                .trim_start_matches('!')
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(['\'', '"']);
+            if token.is_empty() || token.contains(['$', '`', '%']) {
+                continue;
+            }
+            let candidate = Path::new(token);
+            let candidate = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                config.parent().unwrap_or(Path::new("/")).join(candidate)
+            };
+            if candidate.exists() {
+                paths.push(candidate);
+            }
+        }
+        Ok(())
+    }
+
+    let mut paths = Vec::new();
+    visit(config, &mut std::collections::HashSet::new(), &mut paths)?;
+    Ok(paths)
+}
+
+fn ensure_policy_file(path: &Path) -> Result<()> {
+    if path.exists() {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            anyhow::bail!("Git policy path must be a regular file: {}", path.display());
+        }
+        #[cfg(unix)]
+        if metadata.nlink() > 1 {
+            anyhow::bail!(
+                "Git policy files must not have hard links: {}",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, b"")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+fn protect_writable_git_root(
+    args: &mut Vec<String>,
+    runtime: SandboxRuntime,
+    root: &Path,
+    full_git_dir: bool,
+    private: &Path,
+    config_index: &mut usize,
+) -> Result<()> {
+    if full_git_dir {
+        for directory in ["hooks", "info", "objects/info", "modules", "worktrees"] {
+            let path = root.join(directory);
+            std::fs::create_dir_all(&path)?;
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!("Git policy path must be a directory: {}", path.display());
+            }
+            push_read_only_path(args, runtime, &path);
+        }
+    }
+
+    let names: &[&str] = if full_git_dir {
+        &["config", "config.worktree", "gitdir", "commondir"]
+    } else {
+        &["config.worktree", "gitdir", "commondir"]
+    };
+    for name in names {
+        let path = root.join(name);
+        if *name == "config" || *name == "config.worktree" {
+            ensure_policy_file(&path)?;
+            if runtime != SandboxRuntime::AppleContainer {
+                let snapshot = private.join(format!("config-{}", *config_index));
+                *config_index += 1;
+                crate::git::snapshot_local_config(&path, &snapshot)?;
+                push_bind_path(args, &snapshot, true);
+                let last = args.last_mut().expect("mount argument");
+                *last = last.replace(
+                    &format!("target={}", snapshot.display()),
+                    &format!("target={}", path.display()),
+                );
+            } else {
+                push_read_only_path(args, runtime, &path);
+            }
+        } else if path.exists() {
+            ensure_policy_file(&path)?;
+            push_read_only_path(args, runtime, &path);
+        }
+    }
+    Ok(())
+}
+
+fn module_git_roots(common_dir: &Path) -> Result<Vec<PathBuf>> {
+    fn visit(path: &Path, roots: &mut Vec<PathBuf>) -> Result<()> {
+        if !path.is_dir() {
+            return Ok(());
+        }
+        let is_root = path.join("config").is_file()
+            || (path.join("HEAD").is_file() && path.join("objects").is_dir());
+        if is_root {
+            roots.push(path.to_path_buf());
+        }
+        let children = if is_root {
+            path.join("modules")
+        } else {
+            path.to_path_buf()
+        };
+        if children.is_dir() {
+            for entry in std::fs::read_dir(children)? {
+                let child = entry?.path();
+                if child.is_dir() {
+                    visit(&child, roots)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut roots = Vec::new();
+    let modules = common_dir.join("modules");
+    if modules.is_dir() {
+        for entry in std::fs::read_dir(modules)? {
+            let child = entry?.path();
+            if child.is_dir() {
+                visit(&child, &mut roots)?;
+            }
+        }
+    }
+    Ok(roots)
+}
+
+fn add_git_metadata_boundary(
+    args: &mut Vec<String>,
+    runtime: SandboxRuntime,
+    worktree: &Path,
+    state_root: Option<&Path>,
+) -> Result<()> {
+    let identity = match crate::git::RepositoryIdentity::discover(worktree) {
+        Ok(identity) => identity,
+        Err(error) => {
+            #[cfg(test)]
+            {
+                let _ = error;
+                return Ok(());
+            }
+            #[cfg(not(test))]
+            return Err(error.context("Refusing to sandbox a worktree with invalid Git metadata"));
+        }
+    };
+    if identity.is_bare || identity.admin_dir == identity.common_dir {
+        anyhow::bail!("Container sandboxes require a linked Git worktree");
+    }
+    let private = git_private_state_dir(worktree, state_root)?;
+
+    for pointer in collect_worktree_git_pointers(&identity.worktree)? {
+        push_read_only_path(args, runtime, &pointer);
+    }
+
+    if runtime == SandboxRuntime::AppleContainer {
+        push_read_only_path(args, runtime, &identity.common_dir);
+    }
+    for path in [
+        identity.common_dir.join("objects"),
+        identity.common_dir.join("refs"),
+        identity.common_dir.join("logs"),
+        identity.common_dir.join("rr-cache"),
+        identity.admin_dir.clone(),
+    ] {
+        if path.exists() {
+            push_bind_path(args, &path, false);
+        }
+    }
+
+    let common_object_info = identity.common_dir.join("objects/info");
+    if common_object_info.exists() {
+        push_read_only_path(args, runtime, &common_object_info);
+    }
+
+    let module_roots = module_git_roots(&identity.common_dir)?;
+    for root in &module_roots {
+        push_bind_path(args, root, false);
+    }
+
+    let mut config_index = 0;
+    protect_writable_git_root(
+        args,
+        runtime,
+        &identity.admin_dir,
+        false,
+        &private,
+        &mut config_index,
+    )?;
+    for root in &module_roots {
+        protect_writable_git_root(args, runtime, root, true, &private, &mut config_index)?;
+    }
+
+    let common_config = identity.common_dir.join("config");
+    ensure_policy_file(&common_config)?;
+    for include in config_include_paths(&common_config)? {
+        if include.starts_with(&identity.worktree) || include.starts_with(&identity.common_dir) {
+            push_read_only_path(args, runtime, &include);
+        }
+    }
+    if runtime != SandboxRuntime::AppleContainer {
+        let snapshot = private.join(format!("config-{config_index}"));
+        crate::git::snapshot_local_config(&common_config, &snapshot)?;
+        args.push("--mount".to_string());
+        args.push(format!(
+            "type=bind,source={},target={},readonly",
+            snapshot.display(),
+            common_config.display()
+        ));
+    }
+
+    Ok(())
 }
 
 fn podman_uses_remote_connection() -> bool {
@@ -395,6 +783,16 @@ fn build_docker_run_args_inner(
     // used without a VM-based OCI runtime. Apple Container doesn't accept
     // Docker/Podman `--cap-add`/`--security-opt`, so they're omitted there.
     if runtime != SandboxRuntime::AppleContainer {
+        if config.container.cap_add().iter().any(|cap| {
+            matches!(
+                cap.to_ascii_uppercase().as_str(),
+                "ALL" | "SYS_ADMIN" | "CAP_SYS_ADMIN"
+            )
+        }) {
+            anyhow::bail!(
+                "sandbox.container.cap_add cannot grant SYS_ADMIN or ALL while host Git metadata is mounted"
+            );
+        }
         for cap in config.container.cap_add() {
             args.push("--cap-add".to_string());
             args.push(cap.clone());
@@ -469,27 +867,34 @@ fn build_docker_run_args_inner(
             }
         };
         if let Some(main_git) = gitdir_path.ancestors().nth(2) {
-            // Mount the .git directory for git operations
-            args.push("--mount".to_string());
-            args.push(format!(
-                "type=bind,source={},target={}",
-                main_git.display(),
-                main_git.display()
-            ));
-
-            // Mount the main worktree to resolve symlinks pointing there
-            // (e.g., CLAUDE.local.md -> ../../main-worktree/CLAUDE.local.md)
+            // The main worktree is present only as a symlink target. The nested
+            // common directory mount provides the Git data that guest commands update.
             if let Some(main_worktree) = main_git.parent() {
                 args.push("--mount".to_string());
                 args.push(format!(
-                    "type=bind,source={},target={}",
+                    "type=bind,source={},target={},readonly",
                     main_worktree.display(),
                     main_worktree.display()
                 ));
                 main_worktree_path = Some(main_worktree.to_path_buf());
             }
+
+            args.push("--mount".to_string());
+            let read_only = if runtime == SandboxRuntime::AppleContainer {
+                ""
+            } else {
+                ",readonly"
+            };
+            args.push(format!(
+                "type=bind,source={},target={}{}",
+                main_git.display(),
+                main_git.display(),
+                read_only
+            ));
         }
     }
+
+    add_git_metadata_boundary(&mut args, runtime, worktree_root, state_root)?;
 
     // Mask configured files out of the worktree mounts by bind-mounting
     // /dev/null over them. Must come AFTER the worktree AND main-worktree
@@ -574,8 +979,40 @@ fn build_docker_run_args_inner(
     }
 
     // Extra mounts from config
-    for mount in config.extra_mounts() {
+    let extra_mounts = config.extra_mounts();
+    let git_identity = crate::git::RepositoryIdentity::discover(worktree_root).ok();
+    for mount in extra_mounts {
         let (host, guest, read_only) = mount.resolve()?;
+        if !read_only {
+            if let Some(git_identity) = &git_identity {
+                let protected = [
+                    git_identity.dot_git.as_path(),
+                    git_identity.admin_dir.as_path(),
+                    git_identity.common_dir.as_path(),
+                ];
+                if protected
+                    .iter()
+                    .any(|path| guest.starts_with(path) || path.starts_with(&guest))
+                {
+                    anyhow::bail!(
+                        "Writable extra mount at {} overlaps protected Git metadata",
+                        guest.display()
+                    );
+                }
+            }
+            let socket_name = host
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if matches!(
+                socket_name,
+                "docker.sock" | "podman.sock" | "containerd.sock"
+            ) {
+                anyhow::bail!(
+                    "Writable container-engine sockets are incompatible with the Git metadata boundary"
+                );
+            }
+        }
         let mut mount_arg = format!(
             "type=bind,source={},target={}",
             host.display(),
@@ -867,6 +1304,39 @@ mod tests {
     use super::*;
     use crate::config::{ContainerConfig, ContainerDevice, SandboxConfig, SandboxRuntime};
 
+    fn linked_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir(&main).unwrap();
+        let run = |args: &[&str], cwd: &Path| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(cwd)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        run(&["init", "-q"], &main);
+        run(&["config", "user.name", "Test"], &main);
+        run(&["config", "user.email", "test@example.com"], &main);
+        std::fs::write(main.join("tracked"), "base").unwrap();
+        run(&["add", "."], &main);
+        run(&["commit", "-qm", "base"], &main);
+        assert!(
+            Command::new("git")
+                .args(["worktree", "add", "-qb", "topic"])
+                .arg(&worktree)
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+        (temp, main, worktree)
+    }
+
     fn make_config() -> SandboxConfig {
         SandboxConfig {
             enabled: Some(true),
@@ -1034,6 +1504,106 @@ mod tests {
     }
 
     #[test]
+    fn docker_mounts_git_policy_separately_from_writable_data() {
+        let (temp, main, worktree) = linked_worktree();
+        let identity = crate::git::RepositoryIdentity::discover(&worktree).unwrap();
+        let submodule_worktree = worktree.join("vendor/submodule");
+        std::fs::create_dir_all(&submodule_worktree).unwrap();
+        let submodule_worktree = submodule_worktree.canonicalize().unwrap();
+        let submodule_admin = identity.common_dir.join("modules/vendor/submodule");
+        std::fs::create_dir_all(submodule_admin.join("hooks")).unwrap();
+        std::fs::write(
+            submodule_worktree.join(".git"),
+            format!("gitdir: {}\n", submodule_admin.display()),
+        )
+        .unwrap();
+        std::fs::write(submodule_admin.join("config"), "[core]\n\tbare = false\n").unwrap();
+        let config = sandbox_config(SandboxRuntime::Docker, |_| {});
+        let args = build_docker_run_args_with_state_dir(
+            "true",
+            &config,
+            "claude",
+            &worktree,
+            &worktree,
+            &[],
+            None,
+            false,
+            temp.path(),
+        )
+        .unwrap();
+        let joined = args.join("\n");
+        assert!(joined.contains(&format!("target={},readonly", identity.dot_git.display())));
+        assert!(joined.contains(&format!(
+            "target={},readonly",
+            identity.admin_dir.join("gitdir").display()
+        )));
+        assert!(joined.contains(&format!(
+            "target={},readonly",
+            identity.admin_dir.join("commondir").display()
+        )));
+        assert!(joined.contains(&format!(
+            "target={},readonly",
+            main.canonicalize().unwrap().display()
+        )));
+        assert!(joined.contains(&format!(
+            "target={}",
+            identity.common_dir.join("config").display()
+        )));
+        assert!(!joined.contains(&format!(
+            "source={},target={}",
+            identity.common_dir.join("config").display(),
+            identity.common_dir.join("config").display()
+        )));
+        assert!(joined.contains(&format!(
+            "target={},readonly",
+            submodule_worktree.join(".git").display()
+        )));
+        assert!(joined.contains(&format!(
+            "target={}",
+            submodule_admin.join("config").display()
+        )));
+        assert!(joined.contains(&format!(
+            "target={},readonly",
+            submodule_admin.join("hooks").display()
+        )));
+    }
+
+    #[test]
+    fn apple_container_marks_git_policy_paths_read_only() {
+        let (temp, _main, worktree) = linked_worktree();
+        let config = sandbox_config(SandboxRuntime::AppleContainer, |_| {});
+        let args = build_docker_run_args_with_state_dir(
+            "true",
+            &config,
+            "claude",
+            &worktree,
+            &worktree,
+            &[],
+            None,
+            false,
+            temp.path(),
+        )
+        .unwrap();
+        let identity = crate::git::RepositoryIdentity::discover(&worktree).unwrap();
+        for protected in [
+            identity.dot_git.clone(),
+            identity.common_dir.clone(),
+            identity.admin_dir.join("gitdir"),
+            identity.admin_dir.join("commondir"),
+            identity.admin_dir.join("config.worktree"),
+            identity.common_dir.join("objects/info"),
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--read-only-path"
+                        && pair[1] == protected.to_string_lossy()),
+                "missing {} in {args:?}",
+                protected.display()
+            );
+        }
+    }
+
+    #[test]
     fn test_build_args_basic() {
         let config = make_config();
         let args = test_build_args(Path::new("/tmp/project"), &config);
@@ -1095,19 +1665,24 @@ mod tests {
     #[test]
     fn test_cap_add_and_security_opt_emitted() {
         let config = sandbox_config(SandboxRuntime::Docker, |c| {
-            c.cap_add = Some(vec!["ALL".to_string()]);
-            c.security_opt = Some(vec![
-                "seccomp=unconfined".to_string(),
-                "systempaths=unconfined".to_string(),
-            ]);
+            c.cap_add = Some(vec!["NET_BIND_SERVICE".to_string()]);
+            c.security_opt = Some(vec!["seccomp=unconfined".to_string()]);
         });
         let args = test_build_run_args(&config, false);
 
-        assert_eq!(find_flag_value(&args, "--cap-add"), vec!["ALL"]);
+        assert_eq!(
+            find_flag_value(&args, "--cap-add"),
+            vec!["NET_BIND_SERVICE"]
+        );
         assert_eq!(
             find_flag_value(&args, "--security-opt"),
-            vec!["seccomp=unconfined", "systempaths=unconfined"]
+            vec!["seccomp=unconfined"]
         );
+
+        let unsafe_config = sandbox_config(SandboxRuntime::Docker, |c| {
+            c.cap_add = Some(vec!["ALL".to_string()]);
+        });
+        assert!(test_build_run_args_result(&unsafe_config, false).is_err());
     }
 
     #[test]
@@ -1616,6 +2191,27 @@ mod tests {
     }
 
     #[test]
+    fn writable_extra_mount_cannot_overlap_git_metadata() {
+        use crate::config::ExtraMount;
+
+        let (_temp, _main, worktree) = linked_worktree();
+        let identity = crate::git::RepositoryIdentity::discover(&worktree).unwrap();
+        let mut config = sandbox_config(SandboxRuntime::Docker, |_| {});
+        config.extra_mounts = Some(vec![ExtraMount::Spec {
+            host_path: identity.common_dir.to_string_lossy().into_owned(),
+            guest_path: Some(identity.common_dir.to_string_lossy().into_owned()),
+            writable: Some(true),
+        }]);
+        let error = test_build_run_args_result_for_worktree(&worktree, &config, false)
+            .expect_err("writable mount must not shadow Git policy mounts");
+        assert!(
+            error
+                .to_string()
+                .contains("overlaps protected Git metadata")
+        );
+    }
+
+    #[test]
     fn test_build_args_gemini_agent_credential_mount() {
         let args = test_build_run_args_for_agent("gemini", &make_config());
         assert_agent_credential_mount(
@@ -1893,6 +2489,14 @@ mod tests {
 
         let devs = find_flag_value(&args, "--device");
         assert!(devs.contains(&"/dev/kvm"));
+    }
+
+    #[test]
+    fn apple_container_git_boundary_capability_is_explicit() {
+        assert!(apple_container_supports_read_only_path(
+            "--read-only-path <path>"
+        ));
+        assert!(!apple_container_supports_read_only_path("--read-only"));
     }
 
     #[test]

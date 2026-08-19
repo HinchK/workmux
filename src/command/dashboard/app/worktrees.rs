@@ -381,7 +381,7 @@ impl App {
             return;
         }
 
-        let is_dirty = git::has_uncommitted_changes(&worktree.path).unwrap_or(false);
+        let is_dirty = git::has_uncommitted_changes(&worktree.path).unwrap_or(true);
 
         self.pending_remove = Some(RemovePlan {
             handle: worktree.handle.clone(),
@@ -1327,10 +1327,12 @@ impl App {
             if let Some(path) = current_path {
                 let tx = self.event_tx.clone();
                 std::thread::spawn(move || {
-                    let output = std::process::Command::new("git")
-                        .args(["log", "--format=%h\t%ar\t%s", "-n", "20"])
-                        .current_dir(&path)
-                        .output();
+                    let output = crate::git::unattended_git(Some(&path)).and_then(|mut command| {
+                        command
+                            .args(["log", "--format=%h\t%ar\t%s", "-n", "20"])
+                            .output()
+                            .map_err(anyhow::Error::from)
+                    });
                     if let Ok(out) = output {
                         let log = String::from_utf8_lossy(&out.stdout).to_string();
                         let _ = tx.send(AppEvent::WorktreeLog(path, log));

@@ -1264,6 +1264,10 @@ pub struct LimaConfig {
     /// Custom `provision` script still runs if specified.
     #[serde(default)]
     pub skip_default_provision: Option<bool>,
+
+    /// Accept Lima's reduced Git metadata isolation without an interactive prompt.
+    #[serde(default)]
+    pub accept_reduced_git_metadata_isolation: Option<bool>,
 }
 
 impl LimaConfig {
@@ -1291,6 +1295,10 @@ impl LimaConfig {
         self.skip_default_provision.unwrap_or(false)
     }
 
+    pub fn accepts_reduced_git_metadata_isolation(&self) -> bool {
+        self.accept_reduced_git_metadata_isolation.unwrap_or(false)
+    }
+
     /// Merge: project overrides global, per-field.
     fn merge(global: Self, project: Self) -> Self {
         Self {
@@ -1303,6 +1311,9 @@ impl LimaConfig {
             skip_default_provision: project
                 .skip_default_provision
                 .or(global.skip_default_provision),
+            accept_reduced_git_metadata_isolation: project
+                .accept_reduced_git_metadata_isolation
+                .or(global.accept_reduced_git_metadata_isolation),
         }
     }
 }
@@ -4471,6 +4482,7 @@ container:
     fn sandbox_lima_config_merge() {
         let global = LimaConfig {
             isolation: Some(super::IsolationLevel::Shared),
+            accept_reduced_git_metadata_isolation: Some(true),
             cpus: Some(4),
             memory: Some("4GiB".to_string()),
             ..Default::default()
@@ -4488,6 +4500,17 @@ container:
         // Global fallback
         assert_eq!(merged.isolation(), super::IsolationLevel::Shared);
         assert_eq!(merged.memory(), "4GiB");
+        assert!(merged.accepts_reduced_git_metadata_isolation());
+    }
+
+    #[test]
+    fn lima_reduced_git_metadata_acceptance_defaults_to_false() {
+        let default = LimaConfig::default();
+        assert!(!default.accepts_reduced_git_metadata_isolation());
+
+        let accepted: LimaConfig =
+            serde_yaml::from_str("accept_reduced_git_metadata_isolation: true\n").unwrap();
+        assert!(accepted.accepts_reduced_git_metadata_isolation());
     }
 
     #[test]

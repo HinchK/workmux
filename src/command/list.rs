@@ -174,7 +174,7 @@ pub fn run(show_pr: bool, json: bool, filter: &[String]) -> Result<()> {
                     MuxMode::Window => "window".to_string(),
                     MuxMode::Session => "session".to_string(),
                 },
-                has_uncommitted_changes: git::has_uncommitted_changes(&wt.path).unwrap_or(false),
+                has_uncommitted_changes: git::has_uncommitted_changes(&wt.path).unwrap_or(true),
                 is_open: wt.has_mux_window,
                 created_at: wt.created_at,
             })

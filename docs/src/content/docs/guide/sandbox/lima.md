@@ -22,6 +22,20 @@ sandbox:
   backend: lima
 ```
 
+Lima uses broad writable host mounts. On first use, workmux explains that Lima
+cannot isolate Git control files from writable Git data and asks for explicit
+acceptance. For unattended startup, set the acceptance in trusted config:
+
+```yaml
+sandbox:
+  backend: lima
+  lima:
+    accept_reduced_git_metadata_isolation: true
+```
+
+Docker, Podman, and Apple Container enforce a stronger boundary around host Git
+control files.
+
 ## Configuration
 
 Lima-specific settings are nested under `sandbox.lima`:
@@ -50,6 +64,7 @@ sandbox:
 | `lima.projects_dir`           | -                  | Required for `shared` isolation: parent directory of all projects                                                           |
 | `image`                       | Debian 12          | Custom qcow2 image URL or `file://` path. **Global config only.**                                                           |
 | `lima.skip_default_provision` | `false`            | Skip built-in provisioning (system deps + tool install)                                                                     |
+| `lima.accept_reduced_git_metadata_isolation` | `false` | Accept Lima's reduced Git metadata guarantee without an interactive prompt |
 | `lima.cpus`                   | `4`                | Number of CPUs for Lima VMs                                                                                                 |
 | `lima.memory`                 | `4GiB`             | Memory for Lima VMs                                                                                                         |
 | `lima.disk`                   | `100GiB`           | Disk size for Lima VMs                                                                                                      |
@@ -61,6 +76,22 @@ sandbox:
 | `extra_mounts`                | `[]`               | Additional host paths to mount (see [shared features](/guide/sandbox/features/#extra-mounts)). **Global config only.**      |
 
 VM resource and provisioning settings (`isolation`, `projects_dir`, `cpus`, `memory`, `disk`, `provision`, `skip_default_provision`) are nested under `lima`. Settings shared by both backends (`toolchain`, `host_commands`, `env_passthrough`, `env`, `image`, `target`) remain at the `sandbox` level. Container-specific settings (`runtime`) are nested under `container`.
+
+## Git metadata boundary
+
+Lima mounts project directories writable into a VM whose guest user can gain
+root privileges. Lima's mount model cannot make selected Git policy files
+read-only while leaving refs, objects, indexes, and worktree files writable with
+a boundary that guest root cannot undo. The guest can therefore modify common
+Git config, hooks, linked-worktree pointers, config includes, and submodule Git
+metadata that host Git may later consume.
+
+Workmux requires explicit acceptance once per Lima VM. The acknowledgement lives
+in the host-only
+`~/.local/state/workmux/lima-acknowledgements/git-metadata-isolation-v1/`
+directory, outside paths mounted into the guest. Non-interactive startup fails unless
+`lima.accept_reduced_git_metadata_isolation` is true. Use Docker, Podman, or
+Apple Container when host Git metadata must be protected from the guest.
 
 ## How it works
 

@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::process::Command;
 
 use crate::cmd::Cmd;
 
@@ -75,12 +74,15 @@ pub fn has_untracked_files(worktree_path: &Path) -> Result<bool> {
 }
 
 fn git_diff_has_changes(worktree_path: &Path, args: &[&str]) -> Result<bool> {
-    let output = Command::new("git")
-        .arg("--no-optional-locks")
-        .args(args)
-        .current_dir(worktree_path)
-        .output()
-        .context("Failed to execute git diff")?;
+    let mut command = super::pinned_git(worktree_path)?;
+    command.arg("--no-optional-locks");
+    if args.first() == Some(&"diff") {
+        command.args(["diff", "--no-ext-diff", "--no-textconv"]);
+        command.args(&args[1..]);
+    } else {
+        command.args(args);
+    }
+    let output = command.output().context("Failed to execute git diff")?;
 
     match output.status.code() {
         Some(0) => Ok(false),
@@ -225,7 +227,13 @@ fn get_diff_stats(worktree_path: &Path, base_ref: &str) -> DiffStats {
     // 1. Committed changes (base...HEAD)
     if let Ok(output) = bg_git()
         .workdir(worktree_path)
-        .args(&["diff", "--numstat", &format!("{}...HEAD", base_ref)])
+        .args(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            &format!("{}...HEAD", base_ref),
+        ])
         .run_and_capture_stdout()
     {
         let (a, r) = parse_numstat(&output);
@@ -237,7 +245,13 @@ fn get_diff_stats(worktree_path: &Path, base_ref: &str) -> DiffStats {
     // This covers both staged and unstaged changes to tracked files
     if let Ok(output) = bg_git()
         .workdir(worktree_path)
-        .args(&["diff", "--numstat", "HEAD"])
+        .args(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            "HEAD",
+        ])
         .run_and_capture_stdout()
     {
         let (a, r) = parse_numstat(&output);
@@ -333,6 +347,7 @@ pub fn get_git_status(worktree_path: &Path, main_branch: Option<&str>) -> GitSta
             return GitStatus {
                 cached_at: now,
                 branch: None,
+                is_dirty: true,
                 is_rebasing,
                 ..Default::default()
             };
@@ -388,18 +403,19 @@ pub fn get_git_status(worktree_path: &Path, main_branch: Option<&str>) -> GitSta
     // git merge-tree --write-tree returns exit code 1 on conflict (Git 2.38+)
     // Exit code 129 means unknown option (older Git) - treat as no conflict
     let has_conflict = {
-        let status = Command::new("git")
-            .current_dir(worktree_path)
-            .args([
-                "--no-optional-locks",
-                "merge-tree",
-                "--write-tree",
-                &base_ref,
-                "HEAD",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let status = super::pinned_git(worktree_path).and_then(|mut command| {
+            command
+                .args([
+                    "--no-optional-locks",
+                    "merge-tree",
+                    "--write-tree",
+                    &base_ref,
+                    "HEAD",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            command.status().map_err(anyhow::Error::from)
+        });
         matches!(status, Ok(s) if s.code() == Some(1))
     };
 

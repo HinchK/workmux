@@ -1,18 +1,21 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 
 use crate::cmd::Cmd;
 
 /// Check if a path is ignored by git (via .gitignore, global gitignore, etc.)
 pub fn is_path_ignored(repo_path: &Path, file_path: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["check-ignore", "-q", file_path])
-        .current_dir(repo_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
+    super::unattended_git(Some(repo_path))
+        .and_then(|mut command| {
+            command
+                .args(["check-ignore", "-q", file_path])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            command.status().map_err(anyhow::Error::from)
+        })
+        .map(|status| status.success())
         .unwrap_or(false)
 }
 
@@ -40,9 +43,8 @@ pub fn get_repo_root_if_present_in(workdir: Option<&Path>) -> Result<Option<Path
         Some(path) => path.to_path_buf(),
         None => std::env::current_dir().context("Failed to resolve current directory")?,
     };
-    let output = Command::new("git")
+    let output = super::unattended_git(Some(&cwd))?
         .args(["rev-parse", "--git-dir"])
-        .current_dir(&cwd)
         .output()
         .context("Failed to execute git rev-parse")?;
 
@@ -108,8 +110,7 @@ pub fn get_repo_root_in(workdir: Option<&Path>) -> Result<PathBuf> {
 /// Get the root directory of the git repository containing the given path.
 /// Uses `git -C <dir>` to run git from the target directory.
 pub fn get_repo_root_for(dir: &Path) -> Result<PathBuf> {
-    let mut command = std::process::Command::new("git");
-    clear_ambient_git_env(&mut command);
+    let mut command = super::unattended_git(Some(dir))?;
     let output = command
         .args(["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])
         .output()
@@ -121,30 +122,6 @@ pub fn get_repo_root_for(dir: &Path) -> Result<PathBuf> {
 
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(PathBuf::from(path))
-}
-
-fn clear_ambient_git_env(command: &mut std::process::Command) {
-    for key in [
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_GRAFT_FILE",
-        "GIT_INDEX_FILE",
-        "GIT_NAMESPACE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_PREFIX",
-        "GIT_QUARANTINE_PATH",
-        "GIT_SHALLOW_FILE",
-        "GIT_WORK_TREE",
-    ] {
-        command.env_remove(key);
-    }
-    command.env_remove("GIT_CONFIG_COUNT");
-    command.env_remove("GIT_CONFIG_PARAMETERS");
-    for i in 0..32 {
-        command.env_remove(format!("GIT_CONFIG_KEY_{i}"));
-        command.env_remove(format!("GIT_CONFIG_VALUE_{i}"));
-    }
 }
 
 /// Get the common git directory (shared across all worktrees).

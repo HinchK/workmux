@@ -72,9 +72,7 @@ pub fn determine_project_root(worktree: &Path) -> Result<PathBuf> {
 /// Determine the git common directory using git.
 /// Uses `git rev-parse --git-common-dir` to handle `git clone --separate-git-dir` correctly.
 pub fn determine_git_common_dir(worktree: &Path) -> Result<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(worktree)
+    let output = crate::git::pinned_git(worktree)?
         .arg("rev-parse")
         .arg("--path-format=absolute")
         .arg("--git-common-dir")

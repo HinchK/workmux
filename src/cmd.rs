@@ -50,10 +50,15 @@ impl<'a> Cmd<'a> {
 
         trace!(command, args = ?args, workdir = ?workdir_display, "cmd:run start");
 
-        let mut cmd = Command::new(command);
-        if let Some(dir) = workdir {
-            cmd.current_dir(dir);
-        }
+        let mut cmd = if command == "git" {
+            crate::git::unattended_git(workdir)?
+        } else {
+            let mut command = Command::new(command);
+            if let Some(dir) = workdir {
+                command.current_dir(dir);
+            }
+            command
+        };
         let output = cmd.args(&args).output().with_context(|| {
             format!("Failed to execute command: {} {}", command, args.join(" "))
         })?;
@@ -95,10 +100,15 @@ impl<'a> Cmd<'a> {
         let workdir_display = workdir.map(|p| p.display().to_string());
         trace!(command, args = ?args, workdir = ?workdir_display, "cmd:check start");
 
-        let mut cmd = Command::new(command);
-        if let Some(dir) = workdir {
-            cmd.current_dir(dir);
-        }
+        let mut cmd = if command == "git" {
+            crate::git::unattended_git(workdir)?
+        } else {
+            let mut command = Command::new(command);
+            if let Some(dir) = workdir {
+                command.current_dir(dir);
+            }
+            command
+        };
         let output = cmd.args(&args).output().with_context(|| {
             format!("Failed to execute command: {} {}", command, args.join(" "))
         })?;

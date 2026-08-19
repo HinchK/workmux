@@ -1012,7 +1012,7 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
 
         // Build env vars (owned, then borrowed -- same pattern as sandbox_run)
         let rpc_host = config.sandbox.resolved_rpc_host();
-        let mut owned_envs: Vec<(String, String)> = Vec::new();
+        let mut owned_envs = super::sandbox_run::git_user_config_envs(&worktree_root);
 
         if let Some((proxy_port, ref proxy_token, _)) = proxy {
             owned_envs.extend(crate::sandbox::proxy_env_vars(
@@ -1026,6 +1026,8 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
+        let runtime = config.sandbox.runtime();
+        sandbox::validate_git_metadata_boundary(runtime)?;
 
         let mut docker_args = sandbox::build_docker_run_args(
             &shell_cmd,
@@ -1042,7 +1044,6 @@ fn run_shell_container(exec: bool, command: Vec<String>, config: &Config) -> Res
         docker_args.insert(1, "--name".to_string());
         docker_args.insert(2, format!("wm-shell-{}", std::process::id()));
 
-        let runtime = config.sandbox.runtime();
         let runtime_bin = runtime.binary_name();
         let runtime_display = runtime.display_name();
         let redacted_args: Vec<_> = docker_args
@@ -1088,11 +1089,17 @@ fn run_shell_lima(exec: bool, command: Vec<String>, config: &Config) -> Result<(
 
     debug!(vm = %vm_name, cmd = %shell_cmd, "starting Lima shell");
 
-    let status = Command::new("limactl")
+    let mut command = Command::new("limactl");
+    command
         .arg("shell")
         .args(["--workdir", &cwd.to_string_lossy()])
         .arg(&vm_name)
         .arg("--")
+        .arg("env");
+    for (key, value) in super::sandbox_run::git_user_config_envs(&cwd) {
+        command.arg(format!("{key}={value}"));
+    }
+    let status = command
         .args(["bash", "-c", &shell_cmd])
         .status()
         .context("Failed to execute limactl shell")?;

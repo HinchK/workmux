@@ -96,6 +96,11 @@ sandbox:
     # cpus: 8       # optional, Apple Container defaults to 4
 ```
 
+Workmux requires an Apple Container build whose `container run` supports
+`--read-only-path`. This capability protects Git policy files inside otherwise
+writable project mounts. Workmux fails before starting the guest when the
+installed build lacks it.
+
 **With host hardware (USB serial, GPU, etc.):**
 
 ```yaml
@@ -242,8 +247,8 @@ docker run --rm -it \
   --user 501:20 \
   --env HOME=/tmp \
   --mount type=bind,source=/path/to/worktree,target=/path/to/worktree \
-  --mount type=bind,source=/path/to/main/.git,target=/path/to/main/.git \
-  --mount type=bind,source=/path/to/main,target=/path/to/main \
+  --mount type=bind,source=/path/to/main/.git,target=/path/to/main/.git,readonly \
+  --mount type=bind,source=/path/to/main,target=/path/to/main,readonly \
   --mount type=bind,source=~/.claude-sandbox.json,target=/tmp/.claude.json \
   --mount type=bind,source=~/.claude,target=/tmp/.claude \
   --workdir /path/to/worktree \
@@ -258,13 +263,24 @@ The exact flags vary by runtime (e.g., Podman adds `--userns=keep-id`, Apple Con
 | Mount                    | Access      | Purpose                                                                     |
 | ------------------------ | ----------- | --------------------------------------------------------------------------- |
 | Worktree directory       | read-write  | Source code                                                                 |
-| Main worktree            | read-write  | Symlink resolution (e.g., CLAUDE.md)                                        |
-| Main `.git`              | read-write  | Git operations                                                              |
+| Main worktree            | read-only   | Symlink resolution (e.g., CLAUDE.md)                                        |
+| Git common directory     | read-only   | Git control policy and administrative namespace                             |
+| Git objects, refs, logs  | read-write  | Commits and branch updates                                                   |
+| Current worktree admin   | read-write* | Index, HEAD, merge, and rebase state                                         |
 | Agent credentials        | read-write  | Auth and settings (see [Credentials](/guide/sandbox/features/#credentials)) |
 | `extra_mounts` entries   | read-only\* | User-configured paths                                                       |
 | `excluded_files` entries | masked      | Shadowed with `/dev/null` so sensitive files are unreadable                 |
 
-\* Extra mounts are read-only by default. Set `writable: true` to allow writes.
+\* Git pointer files, per-worktree config, object information, hooks, and nested
+administrative namespaces remain read-only within writable Git data mounts.
+Extra mounts are read-only by default. Set `writable: true` to allow writes.
+Writable mounts that overlap protected Git paths are rejected.
+
+Docker and Podman use nested bind mounts. Apple Container uses nested mounts
+with `--read-only-path`. Workmux checks for that capability before startup, so
+Apple Container builds such as 0.10 that lack it fail closed. Container
+capabilities that permit mount changes and writable container-engine sockets
+are incompatible with this boundary and are rejected.
 
 For Claude specifically, a separate config file is mounted to `/tmp/.claude.json`. Docker/Podman mount `~/.claude-sandbox.json` directly; Apple Container mounts the `~/.claude-sandbox-config/` directory (since it only supports directory mounts).
 

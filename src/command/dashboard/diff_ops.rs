@@ -150,9 +150,8 @@ impl DiffOps for App {
         // Hunks are clean (no ANSI codes) since we use --no-color for diff
         let patch_content = format!("{}\n{}\n", hunk.file_header, hunk.hunk_body);
 
-        let mut child = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&diff.worktree_path)
+        let mut child = crate::git::pinned_git(&diff.worktree_path)
+            .map_err(|e| format!("Cannot validate Git metadata: {e}"))?
             .args(["apply", "--cached", "--recount", "--3way", "-"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -315,19 +314,21 @@ impl DiffOps for App {
         // Unstage it using git apply --cached --reverse
         let patch_content = format!("{}\n{}\n", hunk.file_header, hunk.hunk_body);
 
-        let result = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&diff.worktree_path)
-            .args(["apply", "--cached", "--reverse", "-"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
+        let result = crate::git::pinned_git(&diff.worktree_path)
+            .and_then(|mut command| {
+                command
+                    .args(["apply", "--cached", "--reverse", "-"])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(anyhow::Error::from)
+            })
             .and_then(|mut child| {
                 if let Some(mut stdin) = child.stdin.take() {
                     let _ = stdin.write_all(patch_content.as_bytes());
                 }
-                child.wait_with_output()
+                child.wait_with_output().map_err(anyhow::Error::from)
             });
 
         if let Ok(output) = result

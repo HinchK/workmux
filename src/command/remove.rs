@@ -101,7 +101,7 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
         // Check uncommitted (blocking)
         if path.exists()
             && !git::has_missing_admin_dir(&path)
-            && git::has_uncommitted_changes(&path).unwrap_or(false)
+            && git::has_uncommitted_changes(&path)?
         {
             uncommitted.push(handle);
             continue;
@@ -184,7 +184,9 @@ fn is_unmerged(branch: &str) -> Result<Option<String>> {
             // If we can't determine base, try falling back to main
             match git::get_merge_base(&main_branch) {
                 Ok(b) => b,
-                Err(_) => return Ok(None), // Can't determine, assume safe
+                Err(error) => {
+                    return Err(error.context("Cannot establish whether the branch is merged"));
+                }
             }
         }
     };
@@ -367,7 +369,7 @@ fn collect_bulk_removal_plan(
             continue;
         }
 
-        if !force && path.exists() && git::has_uncommitted_changes(&path).unwrap_or(false) {
+        if !force && path.exists() && git::has_uncommitted_changes(&path)? {
             plan.skipped.push(BulkSkippedWorktree {
                 branch,
                 reason: BulkSkipReason::Uncommitted,
@@ -379,10 +381,11 @@ fn collect_bulk_removal_plan(
             let base = git::get_branch_base(&branch)
                 .ok()
                 .unwrap_or_else(|| main_branch.clone());
-            if let Ok(merge_base) = git::get_merge_base(&base)
-                && let Ok(unmerged_branches) = git::get_unmerged_branches(&merge_base)
-                && unmerged_branches.contains(&branch)
-            {
+            let merge_base = git::get_merge_base(&base)
+                .context("Cannot establish the merge base for bulk removal")?;
+            let unmerged_branches = git::get_unmerged_branches(&merge_base)
+                .context("Cannot establish merged branches for bulk removal")?;
+            if unmerged_branches.contains(&branch) {
                 plan.skipped.push(BulkSkippedWorktree {
                     branch,
                     reason: BulkSkipReason::Unmerged,
