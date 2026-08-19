@@ -24,21 +24,31 @@ fn hooks_path() -> Option<PathBuf> {
     gemini_dir().map(|dir| dir.join("config").join("hooks.json"))
 }
 
+fn detection_reason(
+    explicit_test_detection: bool,
+    test_environment: bool,
+    executable_found: bool,
+    config_found: bool,
+) -> Option<&'static str> {
+    if explicit_test_detection {
+        Some("test override")
+    } else if !test_environment && executable_found {
+        Some("found agy executable")
+    } else if config_found {
+        Some("found ~/.gemini/antigravity-cli/")
+    } else {
+        None
+    }
+}
+
 /// Detect if Antigravity CLI is present via filesystem.
 pub fn detect() -> Option<&'static str> {
-    if std::env::var_os("WORKMUX_TEST_AGY_DETECT").is_some() {
-        return Some("test override");
-    }
-
-    if which::which("agy").is_ok() {
-        return Some("found agy executable");
-    }
-
-    if gemini_dir().is_some_and(|dir| dir.join("antigravity-cli").is_dir()) {
-        return Some("found ~/.gemini/antigravity-cli/");
-    }
-
-    None
+    detection_reason(
+        std::env::var_os("WORKMUX_TEST_AGY_DETECT").is_some(),
+        std::env::var_os("WORKMUX_TEST").is_some(),
+        which::which("agy").is_ok(),
+        gemini_dir().is_some_and(|dir| dir.join("antigravity-cli").is_dir()),
+    )
 }
 
 /// Check if workmux status tracking is installed for Antigravity.
@@ -211,6 +221,23 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_environment_ignores_host_executable_detection() {
+        assert_eq!(detection_reason(false, true, true, false), None);
+        assert_eq!(
+            detection_reason(true, true, true, false),
+            Some("test override")
+        );
+        assert_eq!(
+            detection_reason(false, true, true, true),
+            Some("found ~/.gemini/antigravity-cli/")
+        );
+        assert_eq!(
+            detection_reason(false, false, true, false),
+            Some("found agy executable")
+        );
+    }
 
     #[test]
     fn hook_schema_uses_plain_lifecycle_commands() {
