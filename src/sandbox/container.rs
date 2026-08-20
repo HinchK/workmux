@@ -2194,7 +2194,7 @@ mod tests {
     fn writable_extra_mount_cannot_overlap_git_metadata() {
         use crate::config::ExtraMount;
 
-        let (_temp, _main, worktree) = linked_worktree();
+        let (temp, _main, worktree) = linked_worktree();
         let identity = crate::git::RepositoryIdentity::discover(&worktree).unwrap();
         let mut config = sandbox_config(SandboxRuntime::Docker, |_| {});
         config.extra_mounts = Some(vec![ExtraMount::Spec {
@@ -2202,12 +2202,23 @@ mod tests {
             guest_path: Some(identity.common_dir.to_string_lossy().into_owned()),
             writable: Some(true),
         }]);
-        let error = test_build_run_args_result_for_worktree(&worktree, &config, false)
-            .expect_err("writable mount must not shadow Git policy mounts");
+        let error = build_docker_run_args_with_state_dir(
+            "claude",
+            &config,
+            "claude",
+            &worktree,
+            &worktree,
+            &[],
+            None,
+            false,
+            temp.path(),
+        )
+        .expect_err("writable mount must not shadow Git policy mounts");
         assert!(
             error
                 .to_string()
-                .contains("overlaps protected Git metadata")
+                .contains("overlaps protected Git metadata"),
+            "unexpected error: {error:#}"
         );
     }
 
