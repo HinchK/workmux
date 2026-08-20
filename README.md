@@ -2047,16 +2047,18 @@ Or manually add the hooks to `~/.claude/settings.json`. See
 [.claude-plugin/plugin.json](.claude-plugin/plugin.json) for the hook
 configuration.
 
-**Copilot CLI**: copy the hooks to your repository:
+**Copilot CLI**: with Copilot CLI 0.0.422 or later, install the personal hook:
 
 ```bash
-mkdir -p .github/hooks/workmux-status
-curl -o .github/hooks/workmux-status/hooks.json \
+mkdir -p ~/.copilot/hooks
+curl -o ~/.copilot/hooks/workmux-status.json \
   https://raw.githubusercontent.com/raine/workmux/main/resources/copilot/hooks/workmux-status/hooks.json
 ```
 
-Note: Copilot hooks are per-repository. The waiting state is not supported due
-to limitations in the Copilot CLI hooks implementation.
+Copilot loads personal hooks in every repository. If the repository contains a
+`.github/hooks/workmux-status` installation, remove that directory to avoid
+running both copies of the hook. The waiting state is not supported due to
+limitations in the Copilot CLI hooks implementation.
 
 **Antigravity CLI (`agy`)**: `workmux setup` installs lifecycle hooks in
 `~/.gemini/config/hooks.json`. `PreInvocation` marks the pane working, and the

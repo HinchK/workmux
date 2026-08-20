@@ -1,20 +1,17 @@
 //! Copilot CLI status tracking setup.
 //!
-//! Detects Copilot CLI via the `~/.copilot/` directory.
-//! Installs hooks by writing hooks.json to `.github/hooks/workmux-status/`
-//! in the current git repository.
-//!
-//! Unlike Claude/OpenCode which install globally, Copilot hooks are per-repo.
-//! See https://github.com/github/copilot-cli/issues/1157
+//! Detects Copilot CLI through its configuration directory and installs a
+//! personal hook under `~/.copilot/hooks/`.
 
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::StatusCheck;
 
 /// Hooks configuration embedded at compile time.
 const HOOKS_JSON: &str = include_str!("../../resources/copilot/hooks/workmux-status/hooks.json");
+const HOOKS_FILE_NAME: &str = "workmux-status.json";
 
 fn copilot_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("COPILOT_CONFIG_DIR") {
@@ -23,97 +20,87 @@ fn copilot_dir() -> Option<PathBuf> {
     home::home_dir().map(|h| h.join(".copilot"))
 }
 
-/// Detect if Copilot CLI is present via filesystem.
-/// Also requires being in a git repo since hooks are per-repo.
+fn hooks_file() -> Option<PathBuf> {
+    home::home_dir().map(|home| hooks_file_at(&home))
+}
+
+fn hooks_file_at(home: &Path) -> PathBuf {
+    home.join(".copilot/hooks").join(HOOKS_FILE_NAME)
+}
+
+/// Detect Copilot CLI through its configuration directory.
 pub fn detect() -> Option<&'static str> {
-    if crate::git::get_repo_root().is_err() {
-        return None;
-    }
     if copilot_dir().is_some_and(|d| d.is_dir()) {
-        return Some("found ~/.copilot/");
+        return Some("found Copilot config directory");
     }
     None
 }
 
-/// Check if workmux hooks are installed for Copilot in the current repo.
+/// Check whether the workmux personal hook is installed for Copilot CLI.
 pub fn check() -> Result<StatusCheck> {
-    let root = match crate::git::get_repo_root() {
-        Ok(r) => r,
-        Err(e) => return Ok(StatusCheck::Error(e.to_string())),
+    let Some(path) = hooks_file() else {
+        return Ok(StatusCheck::NotInstalled);
     };
+    check_at(&path)
+}
 
-    let hooks_dir = root.join(".github/hooks");
-    if !hooks_dir.is_dir() {
+fn check_at(path: &Path) -> Result<StatusCheck> {
+    if !path.is_file() {
         return Ok(StatusCheck::NotInstalled);
     }
 
-    // Scan all hooks.json files under .github/hooks/*/
-    if let Ok(entries) = fs::read_dir(&hooks_dir) {
-        for entry in entries.flatten() {
-            if !entry.path().is_dir() {
-                continue;
-            }
-            let hooks_file = entry.path().join("hooks.json");
-            if hooks_file.exists()
-                && let Ok(content) = fs::read_to_string(&hooks_file)
-                && content.contains("workmux set-window-status")
-            {
-                return Ok(StatusCheck::Installed);
-            }
-        }
-    }
-
-    Ok(StatusCheck::NotInstalled)
-}
-
-/// Install workmux hooks for Copilot CLI in the current repo.
-pub fn install() -> Result<String> {
-    let root = crate::git::get_repo_root()
-        .context("Must be in a git repository to install Copilot hooks")?;
-    let hooks_dir = root.join(".github/hooks/workmux-status");
-
-    fs::create_dir_all(&hooks_dir).context("Failed to create .github/hooks/workmux-status/")?;
-
-    let hooks_file = hooks_dir.join("hooks.json");
-    fs::write(&hooks_file, HOOKS_JSON).context("Failed to write hooks.json")?;
-
-    Ok(format!(
-        "Installed hooks to {}",
-        hooks_file
-            .strip_prefix(&root)
-            .unwrap_or(&hooks_file)
-            .display()
-    ))
-}
-
-/// Remove workmux hooks for Copilot CLI from the current repo.
-///
-/// Deletes the `.github/hooks/workmux-status/` directory tree (wholly
-/// created by workmux, no merge needed). Cleans up empty parent dirs.
-pub fn uninstall() -> Result<String> {
-    let root = match crate::git::get_repo_root() {
-        Ok(r) => r,
-        Err(_) => return Ok("Not in a git repository, nothing to uninstall".to_string()),
-    };
-    uninstall_at(root)
-}
-
-fn uninstall_at(root: PathBuf) -> Result<String> {
-    let hooks_dir = root.join(".github/hooks/workmux-status");
-    if hooks_dir.exists() {
-        fs::remove_dir_all(&hooks_dir)?;
-        // Remove .github/hooks/ if now empty
-        let hooks_parent = root.join(".github/hooks");
-        if hooks_parent
-            .read_dir()
-            .is_ok_and(|mut it| it.next().is_none())
-        {
-            let _ = fs::remove_dir(&hooks_parent);
-        }
-        Ok("Removed .github/hooks/workmux-status/ from current repo".to_string())
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read Copilot hooks from {}", path.display()))?;
+    if content.contains("workmux set-window-status") {
+        Ok(StatusCheck::Installed)
     } else {
-        Ok("No Copilot hooks found in current repo".to_string())
+        Ok(StatusCheck::NotInstalled)
     }
+}
+
+/// Install the workmux personal hook for Copilot CLI.
+pub fn install() -> Result<String> {
+    let path = hooks_file().context("Could not determine home directory")?;
+    install_at(&path)
+}
+
+fn install_at(path: &Path) -> Result<String> {
+    let hooks_dir = path
+        .parent()
+        .context("Copilot hooks path has no parent directory")?;
+    fs::create_dir_all(hooks_dir)
+        .with_context(|| format!("Failed to create {}", hooks_dir.display()))?;
+    fs::write(path, HOOKS_JSON)
+        .with_context(|| format!("Failed to write Copilot hooks to {}", path.display()))?;
+
+    Ok(format!("Installed hooks to {}", path.display()))
+}
+
+/// Remove the workmux personal hook for Copilot CLI.
+pub fn uninstall() -> Result<String> {
+    let Some(path) = hooks_file() else {
+        return Ok("Home directory not found, no Copilot hooks removed".to_string());
+    };
+    uninstall_at(&path)
+}
+
+fn uninstall_at(path: &Path) -> Result<String> {
+    if !path.exists() {
+        return Ok("No Copilot personal hooks found".to_string());
+    }
+
+    fs::remove_file(path)
+        .with_context(|| format!("Failed to remove Copilot hooks from {}", path.display()))?;
+
+    if let Some(hooks_dir) = path.parent()
+        && hooks_dir
+            .read_dir()
+            .is_ok_and(|mut entries| entries.next().is_none())
+    {
+        let _ = fs::remove_dir(hooks_dir);
+    }
+
+    Ok(format!("Removed Copilot hooks from {}", path.display()))
 }
 
 #[cfg(test)]
@@ -137,36 +124,77 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_no_hooks_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = uninstall_at(tmp.path().to_path_buf()).unwrap();
-        assert!(result.contains("No Copilot hooks found"));
+    fn personal_hooks_path_is_under_home() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            hooks_file_at(home),
+            home.join(".copilot/hooks/workmux-status.json")
+        );
     }
 
     #[test]
-    fn test_uninstall_removes_hooks_dir() {
+    fn check_requires_personal_hook() {
         let tmp = tempfile::tempdir().unwrap();
-        let hooks_dir = tmp.path().join(".github/hooks/workmux-status");
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        std::fs::write(hooks_dir.join("hooks.json"), "{}").unwrap();
+        let repository_hook = tmp
+            .path()
+            .join("repo/.github/hooks/workmux-status/hooks.json");
+        fs::create_dir_all(repository_hook.parent().unwrap()).unwrap();
+        fs::write(&repository_hook, HOOKS_JSON).unwrap();
 
-        let result = uninstall_at(tmp.path().to_path_buf()).unwrap();
-        assert!(result.contains("Removed .github/hooks/workmux-status"));
-
-        // Verify directory is gone
-        assert!(!hooks_dir.exists());
+        let personal_hook = hooks_file_at(tmp.path());
+        assert!(matches!(
+            check_at(&personal_hook).unwrap(),
+            StatusCheck::NotInstalled
+        ));
     }
 
     #[test]
-    fn test_uninstall_idempotent() {
+    fn install_and_check_are_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let hooks_dir = tmp.path().join(".github/hooks/workmux-status");
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        std::fs::write(hooks_dir.join("hooks.json"), "{}").unwrap();
+        let path = hooks_file_at(tmp.path());
 
-        let result1 = uninstall_at(tmp.path().to_path_buf()).unwrap();
-        assert!(result1.contains("Removed"));
-        let result2 = uninstall_at(tmp.path().to_path_buf()).unwrap();
-        assert!(result2.contains("No Copilot hooks found"));
+        install_at(&path).unwrap();
+        install_at(&path).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), HOOKS_JSON);
+        assert!(matches!(check_at(&path).unwrap(), StatusCheck::Installed));
+    }
+
+    #[test]
+    fn uninstall_without_personal_hook_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+
+        let result = uninstall_at(&path).unwrap();
+        assert!(result.contains("No Copilot personal hooks found"));
+    }
+
+    #[test]
+    fn uninstall_preserves_other_personal_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        install_at(&path).unwrap();
+        let other_hook = path.parent().unwrap().join("other.json");
+        fs::write(&other_hook, "{}").unwrap();
+
+        let result = uninstall_at(&path).unwrap();
+
+        assert!(result.contains("Removed Copilot hooks"));
+        assert!(!path.exists());
+        assert!(other_hook.exists());
+        assert!(path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn uninstall_removes_empty_hooks_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = hooks_file_at(tmp.path());
+        install_at(&path).unwrap();
+
+        uninstall_at(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+        assert!(tmp.path().join(".copilot").exists());
     }
 }

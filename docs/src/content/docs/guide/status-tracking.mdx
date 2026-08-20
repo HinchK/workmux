@@ -188,15 +188,15 @@ For manual setup, merge this named hook group into `~/.gemini/config/hooks.json`
 
 ## Copilot CLI setup
 
-If you prefer manual setup, copy the hooks configuration to your repository:
+Copilot CLI 0.0.422 or later supports personal hooks. If you prefer manual setup, install the workmux hook under `~/.copilot/hooks/`:
 
 ```bash
-mkdir -p .github/hooks/workmux-status
-curl -o .github/hooks/workmux-status/hooks.json \
+mkdir -p ~/.copilot/hooks
+curl -o ~/.copilot/hooks/workmux-status.json \
   https://raw.githubusercontent.com/raine/workmux/main/resources/copilot/hooks/workmux-status/hooks.json
 ```
 
-Note: Copilot CLI hooks are per-repository, unlike Claude Code and OpenCode which install globally. The Copilot CLI hooks API does not support detecting permission prompts, so only working/done states are tracked (no waiting state).
+Copilot loads personal hooks in every repository. If the repository contains a `.github/hooks/workmux-status` installation, remove that directory to avoid running both copies of the hook. The Copilot CLI hooks API does not support detecting permission prompts, so only working/done states are tracked (no waiting state).
 
 ## Customization
 
