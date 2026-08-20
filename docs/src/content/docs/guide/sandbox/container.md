@@ -260,16 +260,16 @@ The exact flags vary by runtime (e.g., Podman adds `--userns=keep-id`, Apple Con
 
 ### What's mounted
 
-| Mount                    | Access      | Purpose                                                                     |
-| ------------------------ | ----------- | --------------------------------------------------------------------------- |
-| Worktree directory       | read-write  | Source code                                                                 |
-| Main worktree            | read-only   | Symlink resolution (e.g., CLAUDE.md)                                        |
-| Git common directory     | read-only   | Git control policy and administrative namespace                             |
-| Git objects, refs, logs  | read-write  | Commits and branch updates                                                   |
-| Current worktree admin   | read-write* | Index, HEAD, merge, and rebase state                                         |
-| Agent credentials        | read-write  | Auth and settings (see [Credentials](/guide/sandbox/features/#credentials)) |
-| `extra_mounts` entries   | read-only\* | User-configured paths                                                       |
-| `excluded_files` entries | masked      | Shadowed with `/dev/null` so sensitive files are unreadable                 |
+| Mount                    | Access       | Purpose                                                                     |
+| ------------------------ | ------------ | --------------------------------------------------------------------------- |
+| Worktree directory       | read-write   | Source code                                                                 |
+| Main worktree            | read-only    | Symlink resolution (e.g., CLAUDE.md)                                        |
+| Git common directory     | read-only    | Git control policy and administrative namespace                             |
+| Git objects, refs, logs  | read-write   | Commits and branch updates                                                  |
+| Current worktree admin   | read-write\* | Index, HEAD, merge, and rebase state                                        |
+| Agent credentials        | read-write   | Auth and settings (see [Credentials](/guide/sandbox/features/#credentials)) |
+| `extra_mounts` entries   | read-only\*  | User-configured paths                                                       |
+| `excluded_files` entries | masked       | Shadowed with `/dev/null` so sensitive files are unreadable                 |
 
 \* Git pointer files, per-worktree config, object information, hooks, and nested
 administrative namespaces remain read-only within writable Git data mounts.
@@ -281,6 +281,16 @@ with `--read-only-path`. Workmux checks for that capability before startup, so
 Apple Container builds such as 0.10 that lack it fail closed. Container
 capabilities that permit mount changes and writable container-engine sockets
 are incompatible with this boundary and are rejected.
+
+### Git hooks
+
+The container can execute hooks installed before startup, but cannot modify
+shared `.git/hooks` files or settings such as `core.hooksPath`. With the default
+`sandbox.target: agent`, use a regular host pane for hook setup or dependency
+installation. A host-side
+[`post_create`](/guide/configuration/#lifecycle-hooks) command is another option.
+Hook installers run inside the container may fail with `Read-only file system`
+or `Resource busy`. Ordinary Git operations remain available.
 
 For Claude specifically, a separate config file is mounted to `/tmp/.claude.json`. Docker/Podman mount `~/.claude-sandbox.json` directly; Apple Container mounts the `~/.claude-sandbox-config/` directory (since it only supports directory mounts).
 

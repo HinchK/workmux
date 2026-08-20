@@ -21,10 +21,16 @@ Status indicators, the dashboard, [spawning agents](/guide/workflows/#from-an-on
 
 When sandbox is enabled, agents have access to:
 
-- The current worktree directory (read-write)
-- The main worktree directory (read-write, for symlink resolution like `CLAUDE.local.md`)
-- The shared `.git` directory (read-write, for git operations)
+- The current worktree directory with read-write access
+- Git operational data needed for commits, branches, merges, and rebases
 - Agent settings and credentials (see [credentials](/guide/sandbox/features/#credentials))
+
+Container backends keep repository config and shared hooks read-only. Existing
+hooks can run inside the container, while hook setup stays in a regular host
+pane. See [Git hooks](/guide/sandbox/container/#git-hooks) for details.
+
+The Lima backend uses broad writable project mounts and requires explicit
+acceptance of its [reduced Git metadata isolation](/guide/sandbox/lima/#git-metadata-boundary).
 
 Host secrets like SSH keys, AWS credentials, and GPG keys are not accessible. Additional directories can be mounted via [`extra_mounts`](/guide/sandbox/features/#extra-mounts).
 
