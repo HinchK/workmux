@@ -871,6 +871,7 @@ pub struct CustomThemeColors {
 pub struct ThemeConfig {
     pub scheme: ThemeScheme,
     /// None = auto-detect from terminal background
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<ThemeMode>,
     /// Custom color overrides applied on top of the base scheme
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1926,7 +1927,7 @@ impl SandboxConfig {
 }
 
 /// Result of config discovery, including the relative path from repo root
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigLocation {
     /// Absolute path to the config file
     pub config_path: PathBuf,
@@ -2205,6 +2206,32 @@ impl Config {
         cli_agent: Option<&str>,
         config_override: Option<&Path>,
     ) -> anyhow::Result<(Self, Option<ConfigLocation>)> {
+        let frozen_path = std::env::var_os(crate::frozen_config::FROZEN_CONFIG_ENV);
+        if frozen_path.is_some() && std::env::var_os("WM_SANDBOX_GUEST").is_some() {
+            anyhow::bail!("Frozen configuration is only valid for host commands");
+        }
+
+        Self::load_with_location_from_sources(
+            start_dir,
+            cli_agent,
+            config_override,
+            frozen_path.as_deref().map(Path::new),
+        )
+    }
+
+    fn load_with_location_from_sources(
+        start_dir: &std::path::Path,
+        cli_agent: Option<&str>,
+        config_override: Option<&Path>,
+        frozen_path: Option<&Path>,
+    ) -> anyhow::Result<(Self, Option<ConfigLocation>)> {
+        if let Some(path) = frozen_path {
+            if config_override.is_some() {
+                anyhow::bail!("Frozen configuration cannot be combined with --config");
+            }
+            return crate::frozen_config::load(path);
+        }
+
         debug!(start_dir = %start_dir.display(), "config:loading with location from");
         let global_config = Self::load_global()?.unwrap_or_default();
 
@@ -3210,6 +3237,59 @@ mod tests {
 
     fn container_cfg(edit: impl FnOnce(&mut ContainerConfig)) -> Config {
         sandbox_cfg(|sandbox| edit(&mut sandbox.container))
+    }
+
+    #[test]
+    fn frozen_source_bypasses_live_config_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".workmux.yaml"),
+            "status_icons:\n  working: hostile\n",
+        )
+        .unwrap();
+
+        let trusted = Config {
+            selected_agent: Some("trusted-agent".to_string()),
+            agent_type: Some("claude".to_string()),
+            status_icons: super::StatusIcons {
+                working: Some("trusted".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let snapshot = crate::frozen_config::FrozenConfigGuard::capture(&trusted, None).unwrap();
+
+        let (loaded, location) = Config::load_with_location_from_sources(
+            root.path(),
+            Some("guest-agent"),
+            None,
+            Some(snapshot.path()),
+        )
+        .unwrap();
+
+        assert_eq!(loaded.status_icons.working.as_deref(), Some("trusted"));
+        assert_eq!(loaded.selected_agent.as_deref(), Some("trusted-agent"));
+        assert_eq!(loaded.agent_type.as_deref(), Some("claude"));
+        assert!(location.is_none());
+    }
+
+    #[test]
+    fn frozen_source_rejects_config_override() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot =
+            crate::frozen_config::FrozenConfigGuard::capture(&Config::default(), None).unwrap();
+        let override_path = root.path().join("other.yaml");
+        std::fs::write(&override_path, "{}").unwrap();
+
+        let error = Config::load_with_location_from_sources(
+            root.path(),
+            None,
+            Some(&override_path),
+            Some(snapshot.path()),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot be combined"));
     }
 
     fn sandbox_extra_mounts(paths: &[&str]) -> Config {

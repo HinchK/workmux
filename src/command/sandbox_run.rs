@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 use std::collections::HashSet;
 
 use crate::config::{Config, SandboxBackend};
+use crate::frozen_config::FrozenConfigGuard;
 use crate::multiplexer;
 use crate::sandbox::build_docker_run_args;
 use crate::sandbox::ensure_sandbox_config_dirs;
@@ -68,16 +69,17 @@ pub fn run(worktree: PathBuf, worktree_root: Option<PathBuf>, command: Vec<Strin
         bail!("No command specified. Usage: workmux sandbox run <worktree> -- <command...>");
     }
 
-    let config = Config::load(None)?;
     let worktree = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
+    let (config, location) = Config::load_with_location_from(&worktree, None)?;
+    let frozen_config = FrozenConfigGuard::capture(&config, location.as_ref())?;
 
     match config.sandbox.backend() {
-        SandboxBackend::Lima => run_lima(&config, &worktree, &command),
+        SandboxBackend::Lima => run_lima(&config, frozen_config.path(), &worktree, &command),
         SandboxBackend::Container => {
             let wt_root = worktree_root
                 .map(|p| p.canonicalize().unwrap_or(p))
                 .unwrap_or_else(|| worktree.clone());
-            run_container(&config, &worktree, &wt_root, &command)
+            run_container(&config, frozen_config.path(), &worktree, &wt_root, &command)
         }
     }
 }
@@ -85,6 +87,8 @@ pub fn run(worktree: PathBuf, worktree_root: Option<PathBuf>, command: Vec<Strin
 /// Start RPC server and return (server, port, token, context).
 /// Shared setup between Lima and Container backends.
 fn start_rpc(
+    config: &Config,
+    frozen_config_path: &Path,
     worktree: &Path,
     allowed_commands: HashSet<String>,
     detected_toolchain: toolchain::DetectedToolchain,
@@ -102,6 +106,8 @@ fn start_rpc(
         pane_id,
         worktree_path: worktree.to_path_buf(),
         mux,
+        config: Arc::new(config.clone()),
+        frozen_config_path: frozen_config_path.to_path_buf(),
         token: rpc_token.clone(),
         allowed_commands,
         detected_toolchain,
@@ -153,7 +159,12 @@ fn clear_ambient_git_env(command: &mut Command) {
     crate::git::clear_ambient_git_env(command);
 }
 
-fn run_lima(config: &Config, worktree: &Path, command: &[String]) -> Result<i32> {
+fn run_lima(
+    config: &Config,
+    frozen_config_path: &Path,
+    worktree: &Path,
+    command: &[String],
+) -> Result<i32> {
     info!(worktree = %worktree.display(), "sandbox supervisor starting (lima)");
 
     // Ensure Lima VM is running
@@ -192,6 +203,8 @@ fn run_lima(config: &Config, worktree: &Path, command: &[String]) -> Result<i32>
     info!(commands = ?host_commands, "created host-exec shims");
 
     let (rpc_server, rpc_port, rpc_token, ctx) = start_rpc(
+        config,
+        frozen_config_path,
         worktree,
         allowed_commands,
         detected.clone(),
@@ -263,6 +276,7 @@ fn run_lima(config: &Config, worktree: &Path, command: &[String]) -> Result<i32>
 
 fn run_container(
     config: &Config,
+    frozen_config_path: &Path,
     pane_cwd: &Path,
     worktree_root: &Path,
     command: &[String],
@@ -327,6 +341,8 @@ fn run_container(
     };
 
     let (rpc_server, rpc_port, rpc_token, ctx) = start_rpc(
+        config,
+        frozen_config_path,
         pane_cwd,
         allowed_commands,
         detected.clone(),

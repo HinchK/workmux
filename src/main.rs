@@ -7,6 +7,7 @@ mod cmd;
 mod command;
 mod config;
 mod creation_time;
+mod frozen_config;
 mod git;
 mod github;
 mod llm;
