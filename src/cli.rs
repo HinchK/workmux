@@ -264,7 +264,7 @@ enum Commands {
         #[arg(required_unless_present_any = ["pr", "auto_name"], value_parser = GitBranchParser::new())]
         branch_name: Option<String>,
 
-        /// Pull request number or full GitHub pull request URL to checkout
+        /// Pull request number or full GitHub or GitHub Enterprise pull request URL to checkout
         #[arg(long, conflicts_with_all = ["base", "auto_name"], value_name = "NUMBER|URL")]
         pr: Option<PrReference>,
 
@@ -1229,6 +1229,10 @@ mod tests {
         for (value, expected_branch) in [
             ("190", None),
             ("https://github.com/raine/workmux/pull/190", Some("main")),
+            (
+                "https://github.example.com/owner/repo/pull/190",
+                Some("enterprise"),
+            ),
         ] {
             let mut args = vec!["wm", "add", "--pr", value];
             if let Some(branch) = expected_branch {

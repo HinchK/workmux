@@ -7,8 +7,8 @@ use crate::{git, github, spinner};
 use anyhow::{Context, Result, anyhow};
 use std::str::FromStr;
 
-const PR_URL_PREFIX: &str = "https://github.com/";
-const PR_REFERENCE_ERROR: &str = "expected a pull request number or a full GitHub pull request URL like https://github.com/owner/repo/pull/123";
+const PR_URL_PREFIX: &str = "https://";
+const PR_REFERENCE_ERROR: &str = "expected a pull request number or a full GitHub pull request URL, including GitHub Enterprise, like https://github.example.com/owner/repo/pull/123";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrReference {
@@ -28,12 +28,13 @@ impl FromStr for PrReference {
         let number = if let Ok(number) = value.parse() {
             number
         } else {
-            let path = value
+            let url = value
                 .strip_prefix(PR_URL_PREFIX)
                 .ok_or_else(|| PR_REFERENCE_ERROR.to_string())?;
-            let path = path.strip_suffix('/').unwrap_or(path);
-            let mut segments = path.split('/');
-            let (Some(owner), Some(repository), Some("pull"), Some(number), None) = (
+            let url = url.strip_suffix('/').unwrap_or(url);
+            let mut segments = url.split('/');
+            let (Some(host), Some(owner), Some(repository), Some("pull"), Some(number), None) = (
+                segments.next(),
                 segments.next(),
                 segments.next(),
                 segments.next(),
@@ -42,7 +43,7 @@ impl FromStr for PrReference {
             ) else {
                 return Err(PR_REFERENCE_ERROR.to_string());
             };
-            if owner.is_empty() || repository.is_empty() {
+            if host.is_empty() || owner.is_empty() || repository.is_empty() {
                 return Err(PR_REFERENCE_ERROR.to_string());
             }
             number.parse().map_err(|_| PR_REFERENCE_ERROR.to_string())?
@@ -374,18 +375,13 @@ mod tests {
 
     #[test]
     fn parses_github_pr_url() {
-        assert_eq!(
-            PrReference::from_str("https://github.com/raine/workmux/pull/190")
-                .unwrap()
-                .number(),
-            190
-        );
-        assert_eq!(
-            PrReference::from_str("https://github.com/raine/workmux/pull/190/")
-                .unwrap()
-                .number(),
-            190
-        );
+        for value in [
+            "https://github.com/raine/workmux/pull/190",
+            "https://github.com/raine/workmux/pull/190/",
+            "https://github.example.com/owner/repo/pull/190",
+        ] {
+            assert_eq!(PrReference::from_str(value).unwrap().number(), 190);
+        }
     }
 
     #[test]
@@ -393,7 +389,6 @@ mod tests {
         for value in [
             "not-a-pr",
             "http://github.com/raine/workmux/pull/190",
-            "https://example.com/raine/workmux/pull/190",
             "https://github.com/raine/workmux/issues/190",
             "https://github.com/raine/workmux/pull/not-a-number",
             "https://github.com/raine/workmux/pull/190/files",
