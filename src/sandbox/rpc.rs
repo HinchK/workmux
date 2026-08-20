@@ -588,7 +588,8 @@ fn spawn_agent_command(
         cmd.arg("--background");
     }
 
-    // RPC child commands cannot run repository-defined Workmux or Git hooks.
+    // Workmux hooks can execute host commands. Git hook suppression keeps RPC
+    // children independent of repository Git policy across sandbox backends.
     cmd.arg("--no-hooks");
     disable_git_hooks(&mut cmd);
 
@@ -658,7 +659,8 @@ fn merge_command(
         cmd.arg("--notification");
     }
 
-    // RPC child commands cannot run repository-defined Workmux or Git hooks.
+    // Workmux hooks can execute host commands. Git hook suppression keeps RPC
+    // children independent of repository Git policy across sandbox backends.
     cmd.args(["--no-verify", "--no-hooks"]);
     disable_git_hooks(&mut cmd);
     cmd.arg("--").arg(name);

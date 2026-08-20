@@ -1,6 +1,6 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use tempfile::NamedTempFile;
 
 use crate::config::{Config, ConfigLocation};
 
+/// Private config transport set only on host Workmux child commands created by RPC.
 pub const FROZEN_CONFIG_ENV: &str = "WORKMUX_FROZEN_CONFIG";
 const SNAPSHOT_VERSION: u32 = 1;
 
@@ -20,13 +21,26 @@ struct FrozenConfigFile {
     location: Option<ConfigLocation>,
 }
 
-/// Owns the host-side configuration snapshot for a sandbox supervisor.
+/// Owns a secrets-bearing snapshot in the host's temporary directory.
 pub struct FrozenConfigGuard {
     file: NamedTempFile,
 }
 
 impl FrozenConfigGuard {
-    pub fn capture(config: &Config, location: Option<&ConfigLocation>) -> Result<Self> {
+    pub fn capture(
+        config: &Config,
+        location: Option<&ConfigLocation>,
+        worktree: &Path,
+    ) -> Result<Self> {
+        let directory = snapshot_directory(worktree)?;
+        Self::capture_in(config, location, &directory)
+    }
+
+    pub(crate) fn capture_in(
+        config: &Config,
+        location: Option<&ConfigLocation>,
+        directory: &Path,
+    ) -> Result<Self> {
         let snapshot = FrozenConfigFile {
             version: SNAPSHOT_VERSION,
             config: config.clone(),
@@ -37,7 +51,7 @@ impl FrozenConfigGuard {
         let mut file = tempfile::Builder::new()
             .prefix("workmux-frozen-config-")
             .suffix(".json")
-            .tempfile()
+            .tempfile_in(directory)
             .context("Failed to create frozen configuration snapshot")?;
 
         serde_json::to_writer(file.as_file_mut(), &snapshot)
@@ -53,15 +67,34 @@ impl FrozenConfigGuard {
     }
 }
 
-pub fn load(path: &Path) -> Result<(Config, Option<ConfigLocation>)> {
-    validate_path(path)?;
-
-    let file = File::open(path).with_context(|| {
+fn snapshot_directory(worktree: &Path) -> Result<PathBuf> {
+    let temporary_directory = std::env::temp_dir();
+    let directory = temporary_directory.canonicalize().with_context(|| {
         format!(
-            "Failed to open frozen configuration snapshot: {}",
-            path.display()
+            "Failed to resolve host temporary directory: {}",
+            temporary_directory.display()
         )
     })?;
+    let worktree = worktree
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve worktree: {}", worktree.display()))?;
+    ensure_outside_worktree(&directory, &worktree)?;
+
+    Ok(directory)
+}
+
+fn ensure_outside_worktree(directory: &Path, worktree: &Path) -> Result<()> {
+    if directory.starts_with(worktree) {
+        bail!(
+            "Frozen configuration directory cannot be inside the worktree: {}",
+            directory.display()
+        );
+    }
+    Ok(())
+}
+
+pub fn load(path: &Path) -> Result<(Config, Option<ConfigLocation>)> {
+    let file = open_snapshot(path)?;
     let mut snapshot: FrozenConfigFile = serde_json::from_reader(BufReader::new(file))
         .with_context(|| {
             format!(
@@ -82,7 +115,7 @@ pub fn load(path: &Path) -> Result<(Config, Option<ConfigLocation>)> {
     Ok((snapshot.config, snapshot.location))
 }
 
-fn validate_path(path: &Path) -> Result<()> {
+fn open_snapshot(path: &Path) -> Result<File> {
     if !path.is_absolute() {
         bail!(
             "Frozen configuration snapshot path must be absolute: {}",
@@ -90,28 +123,50 @@ fn validate_path(path: &Path) -> Result<()> {
         );
     }
 
-    let metadata = std::fs::symlink_metadata(path).with_context(|| {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    let file = options.open(path).with_context(|| {
         format!(
-            "Frozen configuration snapshot is unavailable: {}",
+            "Failed to open frozen configuration snapshot: {}",
             path.display()
         )
     })?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+    if !file
+        .metadata()
+        .context("Failed to inspect frozen configuration snapshot")?
+        .is_file()
+    {
         bail!(
             "Frozen configuration snapshot must be a regular file: {}",
             path.display()
         );
     }
 
-    Ok(())
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path)
+        .context("Failed to inspect frozen configuration snapshot path")?
+        .file_type()
+        .is_symlink()
+    {
+        bail!(
+            "Frozen configuration snapshot cannot be a symlink: {}",
+            path.display()
+        );
+    }
+
+    Ok(file)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::config::StatusIcons;
+    use crate::config::{Config, ConfigLocation, StatusIcons};
 
     fn sample_config() -> Config {
         Config {
@@ -135,27 +190,75 @@ mod tests {
         }
     }
 
+    fn capture(
+        config: &Config,
+        location: Option<&ConfigLocation>,
+    ) -> (tempfile::TempDir, FrozenConfigGuard) {
+        let directory = tempfile::tempdir().unwrap();
+        let guard = FrozenConfigGuard::capture_in(config, location, directory.path()).unwrap();
+        (directory, guard)
+    }
+
     #[test]
     fn round_trip_preserves_resolved_config_and_location() {
         let root = tempfile::tempdir().unwrap();
         let config = sample_config();
         let location = sample_location(root.path());
-        let guard = FrozenConfigGuard::capture(&config, Some(&location)).unwrap();
+        let (_directory, guard) = capture(&config, Some(&location));
 
         let (loaded, loaded_location) = load(guard.path()).unwrap();
 
-        assert_eq!(loaded.agent, config.agent);
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&config).unwrap()
+        );
         assert_eq!(loaded.agent_type, config.agent_type);
         assert_eq!(loaded.selected_agent, config.selected_agent);
-        assert_eq!(loaded.status_icons.working, config.status_icons.working);
-        assert_eq!(loaded.status_icons.waiting, config.status_icons.waiting);
-        assert_eq!(loaded.status_icons.done, config.status_icons.done);
         assert_eq!(loaded_location, Some(location));
     }
 
     #[test]
+    fn round_trip_preserves_structured_config() {
+        let mut config: Config = serde_yaml::from_str(
+            r#"
+theme:
+  scheme: glacier-signal
+  mode: light
+agents:
+  reviewer:
+    command: claude
+    type: claude
+    args: [--model, sonnet]
+    env:
+      CLAUDE_PROFILE: review
+panes:
+  - command: "{agent}"
+    working_dir: backend
+sandbox:
+  enabled: true
+  env:
+    PROJECT_MODE: review
+  host_commands: [open]
+"#,
+        )
+        .unwrap();
+        config.selected_agent = Some("reviewer".to_string());
+        config.agent_type = Some("claude".to_string());
+        let (_directory, guard) = capture(&config, None);
+
+        let (loaded, _) = load(guard.path()).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&config).unwrap()
+        );
+        assert_eq!(loaded.selected_agent, config.selected_agent);
+        assert_eq!(loaded.agent_type, config.agent_type);
+    }
+
+    #[test]
     fn snapshot_file_is_private() {
-        let guard = FrozenConfigGuard::capture(&sample_config(), None).unwrap();
+        let (_directory, guard) = capture(&sample_config(), None);
 
         #[cfg(unix)]
         {
@@ -167,6 +270,22 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn rejects_snapshot_directory_inside_worktree() {
+        let worktree = Path::new("/tmp/project");
+        let directory = worktree.join(".workmux/frozen-config");
+
+        let error = ensure_outside_worktree(&directory, worktree).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be inside the worktree"));
+    }
+
+    #[test]
+    fn accepts_snapshot_directory_outside_worktree() {
+        ensure_outside_worktree(Path::new("/tmp/workmux-state"), Path::new("/tmp/project"))
+            .unwrap();
     }
 
     #[test]
@@ -193,7 +312,7 @@ mod tests {
             std::os::unix::fs::symlink(target, &link).unwrap();
 
             let error = load(&link).unwrap_err();
-            assert!(error.to_string().contains("must be a regular file"));
+            assert!(error.to_string().contains("Failed to open"));
         }
     }
 

@@ -71,7 +71,7 @@ pub fn run(worktree: PathBuf, worktree_root: Option<PathBuf>, command: Vec<Strin
 
     let worktree = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
     let (config, location) = Config::load_with_location_from(&worktree, None)?;
-    let frozen_config = FrozenConfigGuard::capture(&config, location.as_ref())?;
+    let frozen_config = FrozenConfigGuard::capture(&config, location.as_ref(), &worktree)?;
 
     match config.sandbox.backend() {
         SandboxBackend::Lima => run_lima(&config, frozen_config.path(), &worktree, &command),

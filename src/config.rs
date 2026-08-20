@@ -739,7 +739,7 @@ impl<'de> serde::Deserialize<'de> for ThemeMode {
 }
 
 /// Named color scheme for the dashboard
-#[derive(Debug, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThemeScheme {
     #[default]
     Default,
@@ -814,6 +814,12 @@ impl ThemeScheme {
 
     pub fn from_slug(s: &str) -> Option<Self> {
         Self::ALL.iter().find(|v| v.slug() == s).copied()
+    }
+}
+
+impl serde::Serialize for ThemeScheme {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.slug())
     }
 }
 
@@ -2207,15 +2213,12 @@ impl Config {
         config_override: Option<&Path>,
     ) -> anyhow::Result<(Self, Option<ConfigLocation>)> {
         let frozen_path = std::env::var_os(crate::frozen_config::FROZEN_CONFIG_ENV);
-        if frozen_path.is_some() && std::env::var_os("WM_SANDBOX_GUEST").is_some() {
-            anyhow::bail!("Frozen configuration is only valid for host commands");
-        }
-
         Self::load_with_location_from_sources(
             start_dir,
             cli_agent,
             config_override,
             frozen_path.as_deref().map(Path::new),
+            crate::sandbox::guest::is_sandbox_guest(),
         )
     }
 
@@ -2224,8 +2227,12 @@ impl Config {
         cli_agent: Option<&str>,
         config_override: Option<&Path>,
         frozen_path: Option<&Path>,
+        is_sandbox_guest: bool,
     ) -> anyhow::Result<(Self, Option<ConfigLocation>)> {
         if let Some(path) = frozen_path {
+            if is_sandbox_guest {
+                anyhow::bail!("Frozen configuration is only valid for host commands");
+            }
             if config_override.is_some() {
                 anyhow::bail!("Frozen configuration cannot be combined with --config");
             }
@@ -3257,13 +3264,16 @@ mod tests {
             },
             ..Default::default()
         };
-        let snapshot = crate::frozen_config::FrozenConfigGuard::capture(&trusted, None).unwrap();
+        let snapshot =
+            crate::frozen_config::FrozenConfigGuard::capture_in(&trusted, None, root.path())
+                .unwrap();
 
         let (loaded, location) = Config::load_with_location_from_sources(
             root.path(),
             Some("guest-agent"),
             None,
             Some(snapshot.path()),
+            false,
         )
         .unwrap();
 
@@ -3276,8 +3286,12 @@ mod tests {
     #[test]
     fn frozen_source_rejects_config_override() {
         let root = tempfile::tempdir().unwrap();
-        let snapshot =
-            crate::frozen_config::FrozenConfigGuard::capture(&Config::default(), None).unwrap();
+        let snapshot = crate::frozen_config::FrozenConfigGuard::capture_in(
+            &Config::default(),
+            None,
+            root.path(),
+        )
+        .unwrap();
         let override_path = root.path().join("other.yaml");
         std::fs::write(&override_path, "{}").unwrap();
 
@@ -3286,10 +3300,94 @@ mod tests {
             None,
             Some(&override_path),
             Some(snapshot.path()),
+            false,
         )
         .unwrap_err();
 
         assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn frozen_source_rejects_guest_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot = crate::frozen_config::FrozenConfigGuard::capture_in(
+            &Config::default(),
+            None,
+            root.path(),
+        )
+        .unwrap();
+
+        let error = Config::load_with_location_from_sources(
+            root.path(),
+            None,
+            None,
+            Some(snapshot.path()),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("only valid for host commands"));
+    }
+
+    #[test]
+    fn frozen_source_env_is_authoritative_in_child_process() {
+        const OUTPUT_ENV: &str = "WORKMUX_FROZEN_CONFIG_TEST_OUTPUT";
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".workmux.yaml"),
+            "status_icons:\n  working: hostile\n",
+        )
+        .unwrap();
+        let trusted = Config {
+            status_icons: super::StatusIcons {
+                working: Some("trusted".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let snapshot =
+            crate::frozen_config::FrozenConfigGuard::capture_in(&trusted, None, root.path())
+                .unwrap();
+        let output_path = root.path().join("loaded-icon");
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::frozen_source_env_subprocess_helper",
+                "--nocapture",
+            ])
+            .env(crate::frozen_config::FROZEN_CONFIG_ENV, snapshot.path())
+            .env(OUTPUT_ENV, &output_path)
+            .env_remove("WM_SANDBOX_GUEST")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(output_path).unwrap(), "trusted");
+    }
+
+    #[test]
+    fn frozen_source_env_subprocess_helper() {
+        const OUTPUT_ENV: &str = "WORKMUX_FROZEN_CONFIG_TEST_OUTPUT";
+        let Some(output_path) = std::env::var_os(OUTPUT_ENV) else {
+            return;
+        };
+
+        let config = Config::load(None).unwrap();
+        std::fs::write(
+            output_path,
+            config
+                .status_icons
+                .working
+                .expect("working icon in snapshot"),
+        )
+        .unwrap();
     }
 
     fn sandbox_extra_mounts(paths: &[&str]) -> Config {
