@@ -21,6 +21,15 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.242 (2026-08-20)
+
+- `workmux setup` installs the Copilot CLI status hook once at the user level
+  (`~/.copilot/hooks/workmux-status.json`), so pane status tracking works in
+  every repository without per-repository setup. Requires Copilot CLI 0.0.422 or
+  later, and unrelated hooks in that file are preserved. If a repository still
+  has a `.github/hooks/workmux-status` directory, remove it to avoid running the
+  hook twice. ([#247](https://github.com/raine/workmux/issues/247))
+
 ## v0.1.241 (2026-08-20)
 
 - Harden Git handling across sandbox backends. Container guests can no longer
