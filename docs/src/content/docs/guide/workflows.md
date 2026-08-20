@@ -61,13 +61,13 @@ See [Skills](/guide/skills/#worktree) for the skill setup.
 
 ### Forking conversations
 
-When you want a new worktree agent to pick up where the current conversation left off, use `--fork` (currently Claude Code only):
+When you want a new worktree agent to pick up where the current conversation left off, use `--fork` (Claude Code and Codex):
 
 ```bash
 workmux add -A --fork
 ```
 
-This copies the most recent conversation from the current worktree into the new one and launches the agent with `--resume`, so it has full context of what was discussed. Useful when:
+This takes the most recent conversation from the current worktree and launches the agent in the new worktree resuming it, so it has full context of what was discussed. Useful when:
 
 - You want to branch off a conversation to explore an alternative approach
 - The current agent has built up context you want to preserve in a new worktree
@@ -79,7 +79,9 @@ To fork a specific session (not the most recent), use `--fork=<session-id>` with
 workmux add my-branch --fork=abc123
 ```
 
-Currently supports Claude Code conversations. The forked conversation files are copied (not moved), so the original remains unchanged.
+Supports Claude Code and Codex conversations. The parent conversation is left as it was, so forking never disturbs the worktree you started from.
+
+Claude Code has no cross-project resume, so workmux copies the conversation files into the new worktree's project directory and launches `claude --resume <session-id>`. Codex forks natively, so workmux resolves which session to fork and launches `codex fork -C <worktree> <session-id>`, which keeps the forked conversation in the new worktree.
 
 ### Coordinating multiple agents
 

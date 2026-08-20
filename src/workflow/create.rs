@@ -500,7 +500,7 @@ pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResul
     if let Some(fork) = fork_source {
         let session_id = fork
             .forker
-            .fork_conversation(&fork.session, &worktree_path)
+            .prepare_fork(&fork.session, &worktree_path)
             .context("Failed to fork conversation into new worktree")?;
         options.resume_mode =
             crate::multiplexer::types::ResumeMode::ForkSession(session_id.clone());

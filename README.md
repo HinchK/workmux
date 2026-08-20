@@ -628,7 +628,7 @@ immediately. If the branch doesn't exist, it will be created automatically.
 - `--fork`: Fork the last conversation from the current worktree into the new
   one. The agent resumes with the forked conversation context. Use
   `--fork=<session-id>` to fork a specific session (prefix matching supported).
-  Currently supports Claude Code.
+  Supports Claude Code and Codex.
 
 #### Skip options
 

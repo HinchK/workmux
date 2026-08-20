@@ -675,7 +675,7 @@ pub trait Multiplexer: Send + Sync {
                             if let Some(forker) =
                                 crate::multiplexer::conversation::resolve_forker(agent_name)
                             {
-                                let resume_args = forker.resume_args(session_id);
+                                let resume_args = forker.resume_args(session_id, working_dir);
                                 selected_agent.command.args.extend(resume_args);
                             } else {
                                 tracing::warn!(
