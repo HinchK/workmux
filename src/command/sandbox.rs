@@ -123,6 +123,7 @@ fn resolve_agent(config: &Config) -> &'static str {
 
 fn run_agent(command: Vec<String>) -> Result<()> {
     let config = Config::load(None)?;
+    sandbox::notice::show_once();
 
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
@@ -924,6 +925,7 @@ fn run_shell(exec: bool, command: Vec<String>) -> Result<()> {
     use crate::config::SandboxBackend;
 
     let config = Config::load(None)?;
+    sandbox::notice::show_once();
 
     match config.sandbox.backend() {
         SandboxBackend::Container => run_shell_container(exec, command, &config),

@@ -446,6 +446,9 @@ pub fn run(
         if sandbox_override {
             rescue_config.sandbox.enabled = Some(true);
         }
+        if rescue_config.sandbox.is_enabled() {
+            crate::sandbox::notice::show_once();
+        }
         if let Some(layout_name) = &layout {
             resolve_layout(&mut rescue_config, layout_name)?;
         }
@@ -785,6 +788,9 @@ impl<'a> CreationPlan<'a> {
                 config::Config::load_with_location(spec.agent.as_deref(), self.config_override)?;
             if self.sandbox_override {
                 config.sandbox.enabled = Some(true);
+            }
+            if config.sandbox.is_enabled() && !self.dry_run {
+                crate::sandbox::notice::show_once();
             }
 
             // Resolve layout: replace top-level panes with layout's panes

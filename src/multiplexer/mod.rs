@@ -695,6 +695,8 @@ pub trait Multiplexer: Send + Sync {
                         crate::config::SandboxTarget::Agent => is_agent_pane,
                     };
                     if should_wrap {
+                        crate::sandbox::notice::show_once();
+
                         // Use worktree_root for mounting, working_dir for cwd
                         let wt_root = options.worktree_root.unwrap_or(working_dir);
 
