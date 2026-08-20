@@ -21,6 +21,16 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.241 (2026-08-20)
+
+- Harden Git handling across sandbox backends. Container guests can no longer
+  modify shared Git configuration or hooks, while normal commits and branch
+  operations continue to work. Workmux host Git operations also ignore
+  repository-controlled hooks and executable Git settings.
+- Freeze the effective configuration when a sandbox session starts, preventing
+  guest changes to `.workmux.yaml` from altering host-side spawn, status, merge,
+  or close operations during that session.
+
 ## v0.1.240 (2026-08-19)
 
 - Apply configured pane `percentage` values in the Kitty backend, so layouts
