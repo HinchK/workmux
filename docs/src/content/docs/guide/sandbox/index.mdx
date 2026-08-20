@@ -6,7 +6,7 @@ description: Run agents in isolated containers or VMs for enhanced security
 import Screenshot from "../../../../components/Screenshot.astro";
 import screenshot from "../../../../assets/screenshots/sandbox-claude.webp";
 
-workmux provides first-class sandboxing for agents in containers or VMs. Agents are isolated from host secrets like SSH keys, AWS credentials, and other sensitive files. That makes YOLO mode safe to use without risking your host.
+workmux provides first-class sandboxing for agents in containers or VMs. Agents are isolated from host secrets like SSH keys, AWS credentials, and other sensitive files. When a supported agent runs in a sandboxed agent pane, workmux automatically disables its interactive permission prompts and relies on the configured sandbox backend as the security boundary.
 
 Status indicators, the dashboard, [spawning agents](/guide/workflows/#from-an-ongoing-agent-session), [merging](/guide/workflows/#direct-merge), and [image pasting](/guide/sandbox/features/#clipboard-proxy) all work the same with or without a sandbox. A built-in RPC bridge keeps host-side workmux features in sync with agent activity inside the sandbox.
 
@@ -18,6 +18,15 @@ Status indicators, the dashboard, [spawning agents](/guide/workflows/#from-an-on
 />
 
 ## Security model
+
+:::caution[Threat model]
+The sandbox limits an agent's access to host files, credentials, and processes.
+It does not make repository content trusted: host-side hooks and pane commands
+from `.workmux.yaml`, explicitly proxied host commands, and repository code you
+later run on the host are outside its boundary. Lima also exposes writable Git
+metadata. Choose the backend, mounts, and agent permissions according to your
+threat model.
+:::
 
 When sandbox is enabled, agents have access to:
 
@@ -31,6 +40,14 @@ pane. See [Git hooks](/guide/sandbox/container/#git-hooks) for details.
 
 The Lima backend uses broad writable project mounts and requires explicit
 acceptance of its [reduced Git metadata isolation](/guide/sandbox/lima/#git-metadata-boundary).
+
+### Agent permission prompts
+
+For sandboxed agent panes, workmux automatically enables each supported agent's
+noninteractive approval mode, such as `--dangerously-skip-permissions` for
+Claude or `--yolo` for Codex and Gemini. The sandbox backend, rather than the
+agent's permission prompts, is the security boundary. Agents without a known
+approval flag are unchanged.
 
 Host secrets like SSH keys, AWS credentials, and GPG keys are not accessible. Additional directories can be mounted via [`extra_mounts`](/guide/sandbox/features/#extra-mounts).
 
