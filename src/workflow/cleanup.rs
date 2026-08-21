@@ -248,6 +248,14 @@ fn is_inside_matching_target(
     }
 }
 
+/// Controls cleanup behavior for worktree resources.
+pub struct CleanupOptions {
+    pub force: bool,
+    pub keep_branch: bool,
+    pub no_hooks: bool,
+    pub show_hook_output: bool,
+}
+
 /// Centralized function to clean up tmux and git resources.
 /// `branch_name` is used for git operations (branch deletion).
 /// `handle` is used for tmux operations (window/session lookup/kill).
@@ -256,11 +264,15 @@ pub fn cleanup(
     branch_name: &str,
     handle: &str,
     worktree_path: &Path,
-    force: bool,
-    keep_branch: bool,
-    no_hooks: bool,
-    show_hook_output: bool,
+    options: CleanupOptions,
 ) -> Result<CleanupResult> {
+    let CleanupOptions {
+        force,
+        keep_branch,
+        no_hooks,
+        show_hook_output,
+    } = options;
+
     if context.is_main_worktree(worktree_path) {
         return Err(anyhow!(
             "Refusing to clean up the main worktree at '{}'",

@@ -680,10 +680,12 @@ pub fn create_with_changes(
                 branch_name,
                 &create_result.resolved_handle,
                 &create_result.worktree_path,
-                true,  // force
-                false, // keep_branch
-                false, // no_hooks: run hooks normally for rollback
-                true,  // show_hook_output
+                cleanup::CleanupOptions {
+                    force: true,
+                    keep_branch: false,
+                    no_hooks: false,
+                    show_hook_output: true,
+                },
             )
             .context(
                 "Rollback failed: could not clean up the new worktree. Please do so manually.",

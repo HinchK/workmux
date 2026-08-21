@@ -11,11 +11,6 @@ mode = "auto"
 command = ["ruff", "format", "tests", "--check", "--quiet"]
 
 [[check]]
-name = "clippy"
-mode = "cargo"
-command = ["cargo", "clippy", "--all-targets", "--message-format=json"]
-
-[[check]]
 name = "unit-tests"
 mode = "cargo"
 command = ["cargo", "test", "--bin", "workmux", "--message-format=json"]

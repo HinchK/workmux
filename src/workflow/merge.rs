@@ -334,10 +334,12 @@ pub fn merge(
         &branch_to_merge,
         handle,
         &worktree_path,
-        true,
-        false, // keep_branch: always delete when merging
-        no_hooks,
-        true, // show_hook_output
+        cleanup::CleanupOptions {
+            force: true,
+            keep_branch: false,
+            no_hooks,
+            show_hook_output: true,
+        },
     )?;
 
     // Navigate to the target branch window/session and close the source

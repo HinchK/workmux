@@ -148,10 +148,12 @@ fn remove_with_hook_output(
         &branch_name,
         actual_handle,
         &worktree_path,
-        force,
-        keep_branch,
-        false, // no_hooks: run hooks normally for user-initiated remove
-        show_hook_output,
+        cleanup::CleanupOptions {
+            force,
+            keep_branch,
+            no_hooks: false,
+            show_hook_output,
+        },
     )?;
 
     // Navigate to the main branch window/session and close the source

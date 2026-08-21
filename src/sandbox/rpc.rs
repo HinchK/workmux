@@ -1406,8 +1406,7 @@ mod tests {
             return;
         }
 
-        let (stdout, stderr, code) = exec_collect(&mut client, "ls", &[&ssh_dir]);
-        let _ = &stdout; // used conditionally per platform
+        let (_stdout, _stderr, code) = exec_collect(&mut client, "ls", &[&ssh_dir]);
 
         #[cfg(target_os = "macos")]
         {
@@ -1416,7 +1415,7 @@ mod tests {
                 code,
                 0,
                 "ls ~/.ssh should fail under sandbox-exec (stderr: {})",
-                stderr.trim()
+                _stderr.trim()
             );
         }
 
@@ -1425,9 +1424,9 @@ mod tests {
             // bwrap masks ~/.ssh with tmpfs so ls succeeds but sees nothing
             assert_eq!(code, 0);
             assert!(
-                stdout.trim().is_empty(),
+                _stdout.trim().is_empty(),
                 "~/.ssh should appear empty under bwrap, got: {}",
-                stdout.trim()
+                _stdout.trim()
             );
         }
     }
