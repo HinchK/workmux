@@ -21,11 +21,28 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.243 (2026-08-21)
 
 - Add Grok (SpaceXAI) as a supported agent for status tracking, interactive
   prompt injection, and skills. `workmux setup` installs status hooks and
   bundled skills under `~/.grok/` or `$GROK_HOME`.
+  ([#207](https://github.com/raine/workmux/pull/207))
+- `workmux add --fork` works with Codex. Bare `--fork` picks the Codex session
+  you are in, or the most recent one recorded for the current worktree, and
+  `--fork=<id>` takes a session ID or an unambiguous prefix.
+  ([#229](https://github.com/raine/workmux/issues/229))
+- The dashboard agents table can be reordered and trimmed with the
+  `dashboard.agent_columns` option.
+  ([#225](https://github.com/raine/workmux/pull/225))
+- `workmux add --pr` accepts pull request URLs from GitHub Enterprise
+  installations, not only github.com.
+- Passing `-a`/`--agent` no longer replaces explicitly configured pane commands
+  such as `nvim`, which also stops a second agent from being spawned. The agent
+  goes into a plain shell pane, and layouts where every pane has a command are
+  left as they are. ([#243](https://github.com/raine/workmux/issues/243))
+- Fix the prompt being injected twice into panes whose command is written out
+  literally as the agent's own command.
+  ([#242](https://github.com/raine/workmux/pull/242))
 
 ## v0.1.242 (2026-08-20)
 
