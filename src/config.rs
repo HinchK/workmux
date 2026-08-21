@@ -91,7 +91,47 @@ pub struct DashboardConfig {
     /// Show check pass/total counts alongside check icon (default: false)
     #[serde(default)]
     pub show_check_counts: Option<bool>,
+
+    /// Columns of the agents table, in display order. Columns left out of the
+    /// list are not rendered.
+    /// Default: number, project, worktree, git, pr, status, time, title.
+    pub agent_columns: Option<Vec<AgentColumn>>,
 }
+
+/// A configurable column of the dashboard agents table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentColumn {
+    /// Jump key of the row, shown under the `#` header.
+    Number,
+    /// Project name.
+    Project,
+    /// Worktree name, with a pane suffix for multi-pane windows.
+    Worktree,
+    /// Git status of the worktree.
+    Git,
+    /// Pull request and check status. Rendered only while at least one agent
+    /// has GitHub status to show.
+    Pr,
+    /// Agent status (icons).
+    Status,
+    /// Time elapsed in the current status.
+    Time,
+    /// Agent pane title.
+    Title,
+}
+
+/// Columns used when the config does not set `dashboard.agent_columns`.
+pub const DEFAULT_AGENT_COLUMNS: [AgentColumn; 8] = [
+    AgentColumn::Number,
+    AgentColumn::Project,
+    AgentColumn::Worktree,
+    AgentColumn::Git,
+    AgentColumn::Pr,
+    AgentColumn::Status,
+    AgentColumn::Time,
+    AgentColumn::Title,
+];
 
 impl DashboardConfig {
     pub fn commit(&self) -> &str {
@@ -108,6 +148,28 @@ impl DashboardConfig {
     /// Default: 60
     pub fn preview_size(&self) -> u8 {
         self.preview_size.unwrap_or(60).clamp(10, 90)
+    }
+
+    /// Columns of the agents table, in display order. Duplicates are dropped so
+    /// a column is never rendered twice, and an empty or absent list falls back
+    /// to the default order.
+    pub fn agent_columns(&self) -> Vec<AgentColumn> {
+        let Some(configured) = self.agent_columns.as_ref() else {
+            return DEFAULT_AGENT_COLUMNS.to_vec();
+        };
+
+        let mut seen = Vec::new();
+        for column in configured {
+            if !seen.contains(column) {
+                seen.push(*column);
+            }
+        }
+
+        if seen.is_empty() {
+            DEFAULT_AGENT_COLUMNS.to_vec()
+        } else {
+            seen
+        }
     }
 
     /// Whether to show check pass/total counts alongside check icons.
@@ -2572,6 +2634,11 @@ impl Config {
                 .dashboard
                 .show_check_counts
                 .or(self.dashboard.show_check_counts),
+            agent_columns: project
+                .dashboard
+                .agent_columns
+                .clone()
+                .or_else(|| self.dashboard.agent_columns.clone()),
         };
 
         // Sidebar config: per-field override
@@ -3046,10 +3113,13 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Actions for dashboard keybindings (c = commit, m = merge).
 # Values are sent to the agent's pane. Use ! prefix for shell commands.
 # Preview size (10-90): larger = more preview, less table. Use +/- keys to adjust.
+# Columns of the agents table, in display order. Omit a column to hide it:
+# number, project, worktree, git, pr, status, time, title.
 # dashboard:
 #   commit: "Commit staged changes with a descriptive message"
 #   merge: "!workmux merge"
 #   preview_size: 60
+#   agent_columns: [number, project, worktree, git, pr, status, time, title]
 
 #-------------------------------------------------------------------------------
 # Sidebar
@@ -3218,15 +3288,95 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        AgentEnvValue, AgentIconConfig, AgentIconDetails, AllowedDomainDetails, AllowedDomainEntry,
-        Config, ContainerConfig, ContainerDevice, ExtraMount, FileConfig, LayoutConfig, LimaConfig,
-        NetworkConfig, NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime, SandboxTarget,
-        SidebarHeight, SidebarPosition, SidebarWidth, SplitDirection, ToolchainMode,
-        WindowPlacement, is_agent_command, validate_domain, validate_group_add_entry,
-        validate_layouts_config,
+        AgentColumn, AgentEnvValue, AgentIconConfig, AgentIconDetails, AllowedDomainDetails,
+        AllowedDomainEntry, Config, ContainerConfig, ContainerDevice, DEFAULT_AGENT_COLUMNS,
+        ExtraMount, FileConfig, LayoutConfig, LimaConfig, NetworkConfig, NetworkPolicy, PaneConfig,
+        SandboxConfig, SandboxRuntime, SandboxTarget, SidebarHeight, SidebarPosition, SidebarWidth,
+        SplitDirection, ToolchainMode, WindowPlacement, is_agent_command, validate_domain,
+        validate_group_add_entry, validate_layouts_config,
     };
     use crate::test_support;
     use tempfile::TempDir;
+
+    #[test]
+    fn agent_columns_default_when_unset() {
+        let config = Config::default();
+        assert_eq!(
+            config.dashboard.agent_columns(),
+            vec![
+                AgentColumn::Number,
+                AgentColumn::Project,
+                AgentColumn::Worktree,
+                AgentColumn::Git,
+                AgentColumn::Pr,
+                AgentColumn::Status,
+                AgentColumn::Time,
+                AgentColumn::Title
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_columns_follow_configured_order() {
+        let config: Config = serde_yaml::from_str(
+            "dashboard:\n  agent_columns: [title, status, number, worktree, git, pr, project, time]\n",
+        )
+        .expect("config parses");
+        assert_eq!(
+            config.dashboard.agent_columns(),
+            vec![
+                AgentColumn::Title,
+                AgentColumn::Status,
+                AgentColumn::Number,
+                AgentColumn::Worktree,
+                AgentColumn::Git,
+                AgentColumn::Pr,
+                AgentColumn::Project,
+                AgentColumn::Time
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_columns_drop_duplicates_and_allow_omitting() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  agent_columns: [title, title, status]\n")
+                .expect("config parses");
+        assert_eq!(
+            config.dashboard.agent_columns(),
+            vec![AgentColumn::Title, AgentColumn::Status]
+        );
+    }
+
+    #[test]
+    fn agent_columns_empty_list_falls_back_to_default() {
+        let config: Config =
+            serde_yaml::from_str("dashboard:\n  agent_columns: []\n").expect("config parses");
+        assert_eq!(config.dashboard.agent_columns(), DEFAULT_AGENT_COLUMNS);
+    }
+
+    #[test]
+    fn agent_columns_project_overrides_global() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  agent_columns: [status, title]\n")
+            .expect("config parses");
+        let project: Config =
+            serde_yaml::from_str("dashboard:\n  agent_columns: [title, status]\n")
+                .expect("config parses");
+        assert_eq!(
+            global.merge(project).dashboard.agent_columns(),
+            vec![AgentColumn::Title, AgentColumn::Status]
+        );
+    }
+
+    #[test]
+    fn agent_columns_inherit_global_when_project_unset() {
+        let global: Config = serde_yaml::from_str("dashboard:\n  agent_columns: [status, title]\n")
+            .expect("config parses");
+        assert_eq!(
+            global.merge(Config::default()).dashboard.agent_columns(),
+            vec![AgentColumn::Status, AgentColumn::Title]
+        );
+    }
 
     fn cfg(edit: impl FnOnce(&mut Config)) -> Config {
         let mut config = Config::default();
