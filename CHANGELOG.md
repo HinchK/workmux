@@ -21,8 +21,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.244 (2026-08-22)
 
+- `window_prefix` accepts the `{project}` placeholder, which expands to the main
+  worktree's directory name. A single global config can namespace tmux window
+  and session names per repository.
+  ([#230](https://github.com/raine/workmux/issues/230))
 - Fix a regression from the Git security hardening in v0.1.241 that caused
   protected Git operations to ignore standard global and system configuration.
   Global ignore rules apply consistently to merge safety checks.
