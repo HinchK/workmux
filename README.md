@@ -87,33 +87,35 @@ New to worktrees? See [Why git worktrees?](#why-git-worktrees)
   prompts using LLM
 - Shell completions
 
-## Hype
+## What people say
 
-> "I've been using (and loving) workmux which brings together tmux, git
-> worktrees, and CLI agents into an opinionated workflow."  
-> — @Coolin96 [🔗](https://news.ycombinator.com/item?id=46029809)
-
-> "Thank you so much for your work with workmux! It's a tool I've been wanting
-> to exist for a long time."  
-> — @rstacruz [🔗](https://github.com/raine/workmux/issues/2)
-
-> "It's become my daily driver - the perfect level of abstraction over tmux +
-> git, without getting in the way or obscuring the underlying tooling."  
-> — @cisaacstern [🔗](https://github.com/raine/workmux/issues/33)
-
-> "I have to mention workmux at every opportunity because it's the perfect glue
-> between worktrees, agents and tmux windows."  
-> — @dedbrizz [🔗](https://www.threads.com/@dedbrizz/post/DVt1DtLkr_l)
-
-> "Since I discovered workmux I'm cooking. Amazing parallel-agent driver if you
-> like tmux and want to keep your config."  
-> — @MatijaSosic [🔗](https://x.com/MatijaSosic/status/2080022087281127659)
-
-> "Using workmux with a well-configured tmux has been a breath of fresh air"  
-> — @sbeirakh_il [🔗](https://x.com/sbeirakh_il/status/2080279929778733305)
-
-> "I've been using it for about a month now, and it's been nothing but great."  
-> — @gabrielrockson_ [🔗](https://x.com/gabrielrockson_/status/2080386326566736189)
+- *"I've been using (and loving) workmux which brings together tmux, git
+  worktrees, and CLI agents into an opinionated workflow."* -
+  [Coolin96 on Hacker News](https://news.ycombinator.com/item?id=46029809)
+- *"Thank you so much for your work with workmux! It's a tool I've been wanting
+  to exist for a long time."* -
+  [rstacruz on GitHub](https://github.com/raine/workmux/issues/2)
+- *"It's become my daily driver - the perfect level of abstraction over tmux +
+  git, without getting in the way or obscuring the underlying tooling."* -
+  [cisaacstern on GitHub](https://github.com/raine/workmux/issues/33)
+- *"I have to mention workmux at every opportunity because it's the perfect glue
+  between worktrees, agents and tmux windows."* -
+  [dedbrizz on Threads](https://www.threads.com/@dedbrizz/post/DVt1DtLkr_l)
+- *"Since I discovered workmux I'm cooking. Amazing parallel-agent driver if you
+  like tmux and want to keep your config."* -
+  [MatijaSosic on X](https://x.com/MatijaSosic/status/2080022087281127659)
+- *"Using workmux with a well-configured tmux has been a breath of fresh air"* -
+  [sbeirakh_il on X](https://x.com/sbeirakh_il/status/2080279929778733305)
+- *"I've been using it for about a month now, and it's been nothing but
+  great."* -
+  [gabrielrockson_ on X](https://x.com/gabrielrockson_/status/2080386326566736189)
+- *"I still don't see the need for Herdr. Workmux adds busy/question/done
+  status, manages worktrees by itself, and etc. It lives on an already existing
+  tmux setup."* -
+  [13hcoks on X](https://x.com/13hcoks/status/2080278051309355485)
+- *"Want modern terminal workspace features without abandoning your setup?
+  Here is how to keep Tmux and boost your workflow using Workmux."* -
+  [Sam Natale on YouTube](https://www.youtube.com/watch?v=ww1wykxJps8)
 
 ## Installation
 
