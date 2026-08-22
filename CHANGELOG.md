@@ -21,6 +21,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Fix a regression from the Git security hardening in v0.1.241 that caused
+  protected Git operations to ignore standard global and system configuration.
+  Global ignore rules apply consistently to merge safety checks.
+
 ## v0.1.243 (2026-08-21)
 
 - Add Grok (SpaceXAI) as a supported agent for status tracking, interactive

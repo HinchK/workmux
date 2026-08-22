@@ -360,10 +360,6 @@ pub fn clear_ambient_git_env(command: &mut Command) {
     for key in GIT_ENVIRONMENT {
         command.env_remove(key);
     }
-    command
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1");
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_CONFIG_KEY_")
             || key.to_string_lossy().starts_with("GIT_CONFIG_VALUE_")
@@ -555,15 +551,39 @@ mod tests {
         ] {
             assert_eq!(environment.get(key), Some(&None), "{key} was not cleared");
         }
-        assert_eq!(
-            environment.get("GIT_CONFIG_GLOBAL"),
-            Some(&Some("/dev/null".to_string()))
-        );
-        assert_eq!(
-            environment.get("GIT_CONFIG_SYSTEM"),
-            Some(&Some("/dev/null".to_string()))
-        );
+        for key in [
+            "GIT_CONFIG",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_NOSYSTEM",
+        ] {
+            assert_eq!(environment.get(key), Some(&None), "{key} was not cleared");
+        }
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn protected_git_honors_global_excludes() {
+        let (temp, worktree) = linked_repo();
+        let global_config = temp.path().join("global-config");
+        let global_excludes = temp.path().join("global-excludes");
+        std::fs::write(&global_excludes, "globally-ignored\n").unwrap();
+        std::fs::write(
+            &global_config,
+            format!("[core]\n\texcludesFile = {}\n", global_excludes.display()),
+        )
+        .unwrap();
+        std::fs::write(worktree.join("globally-ignored"), "ignored\n").unwrap();
+
+        let output = pinned_git(&worktree)
+            .unwrap()
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert!(String::from_utf8(output.stdout).unwrap().is_empty());
     }
 
     #[test]
