@@ -37,6 +37,7 @@ from .support.agent_state import (
     get_agents_dir,
     list_agent_state_files,
     read_agent_state,
+    start_active_agent,
 )
 
 
@@ -283,6 +284,214 @@ def test_state_file_contains_pane_info(
 
     # Verify workdir is set (useful for context)
     assert state["workdir"], "workdir should be set"
+
+
+def test_same_status_update_preserves_state_for_same_process(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """Repeated status updates retain the status age and stored title."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-same-process-state",
+        status="working",
+    )
+    state_file = list_agent_state_files(env)[0]
+    state = read_agent_state(state_file)
+    state["status_ts"] = 1
+    state["updated_ts"] = 1
+    state["pane_title"] = "same-process title"
+    state_file.write_text(json.dumps(state))
+
+    marker = env.tmp_path / "same-process-status-finished"
+    env.send_keys(
+        agent.window,
+        build_status_cmd_with_marker(env, workmux_exe_path, "working", marker),
+    )
+    assert poll_until(lambda: marker.exists(), timeout=5.0)
+
+    updated = read_agent_state(state_file)
+    assert updated["status_ts"] == 1
+    assert updated["pane_title"] == "same-process title"
+    assert updated["updated_ts"] > 1
+
+
+@pytest.mark.tmux_only
+def test_same_status_update_discards_state_for_recycled_pane(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """A pane process mismatch starts a fresh status age and title."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-recycled-pane-state",
+        status="working",
+    )
+    state_file = list_agent_state_files(env)[0]
+    state = read_agent_state(state_file)
+    live_pid = state["pane_pid"]
+    state["pane_pid"] = live_pid + 1
+    state["status_ts"] = 1
+    state["updated_ts"] = 1
+    state["pane_title"] = "title from recycled pane"
+    state_file.write_text(json.dumps(state))
+
+    marker = env.tmp_path / "recycled-pane-status-finished"
+    env.send_keys(
+        agent.window,
+        build_status_cmd_with_marker(env, workmux_exe_path, "working", marker),
+    )
+    assert poll_until(lambda: marker.exists(), timeout=5.0)
+
+    updated = read_agent_state(state_file)
+    assert updated["pane_pid"] == live_pid
+    assert updated["status"] == "working"
+    assert updated["status_ts"] > 1
+    assert updated["pane_title"] != "title from recycled pane"
+
+
+@pytest.mark.tmux_only
+def test_same_status_update_discards_state_from_prior_tmux_server(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """A tmux server lifecycle mismatch starts fresh pane state."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-prior-server-state",
+        status="working",
+    )
+    state_file = list_agent_state_files(env)[0]
+    state = read_agent_state(state_file)
+    assert state["boot_id"]
+    state["boot_id"] = "prior-server"
+    state["status_ts"] = 1
+    state["updated_ts"] = 1
+    state["pane_title"] = "title from prior server"
+    state_file.write_text(json.dumps(state))
+
+    marker = env.tmp_path / "prior-server-status-finished"
+    env.send_keys(
+        agent.window,
+        build_status_cmd_with_marker(env, workmux_exe_path, "working", marker),
+    )
+    assert poll_until(lambda: marker.exists(), timeout=5.0)
+
+    updated = read_agent_state(state_file)
+    assert updated["boot_id"] != "prior-server"
+    assert updated["status"] == "working"
+    assert updated["status_ts"] > 1
+    assert updated["pane_title"] != "title from prior server"
+
+
+@pytest.mark.tmux_only
+def test_status_update_preserves_state_when_tmux_boot_id_is_unavailable(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """A failed server identity query leaves valid pane state intact."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-boot-id-unavailable",
+        status="working",
+    )
+    state_file = list_agent_state_files(env)[0]
+    state = read_agent_state(state_file)
+    state["status_ts"] = 1
+    state["updated_ts"] = 1
+    state["pane_title"] = "preserved during query failure"
+    state_file.write_text(json.dumps(state))
+
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None, "tmux binary not found"
+    wrapper_dir = env.tmp_path / "boot-id-failure-bin"
+    wrapper_dir.mkdir()
+    tmux_wrapper = wrapper_dir / "tmux"
+    tmux_wrapper.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = display-message ] && [ "$2" = -p ] '
+        "&& [ \"$3\" = '#{start_time}' ]; then\n"
+        "  exit 1\n"
+        "fi\n"
+        f'exec {shlex.quote(real_tmux)} "$@"\n'
+    )
+    tmux_wrapper.chmod(0o755)
+
+    marker = env.tmp_path / "boot-id-failure-status-finished"
+    env.send_keys(
+        agent.window,
+        build_status_cmd_with_marker(
+            env,
+            workmux_exe_path,
+            "working",
+            marker,
+            {"PATH": f"{wrapper_dir}:{env.env['PATH']}"},
+        ),
+    )
+    assert poll_until(lambda: marker.exists(), timeout=5.0)
+
+    assert read_agent_state(state_file) == state
+
+
+@pytest.mark.tmux_only
+def test_status_update_preserves_state_when_tmux_pane_pid_is_unavailable(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """An unparseable live PID leaves valid pane state intact."""
+    env = mux_server
+    agent = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-pane-pid-unavailable",
+        status="working",
+    )
+    state_file = list_agent_state_files(env)[0]
+    state = read_agent_state(state_file)
+    state["status_ts"] = 1
+    state["updated_ts"] = 1
+    state["pane_title"] = "preserved during missing PID"
+    state_file.write_text(json.dumps(state))
+
+    real_tmux = shutil.which("tmux", path=os.environ.get("PATH", ""))
+    assert real_tmux is not None, "tmux binary not found"
+    wrapper_dir = env.tmp_path / "pane-pid-failure-bin"
+    wrapper_dir.mkdir()
+    tmux_wrapper = wrapper_dir / "tmux"
+    tmux_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ ${1:-} == display-message && ${2:-} == -t "
+        "&& ${4:-} == -p && ${5:-} == *'#{pane_pid}'* ]]; then\n"
+        "  format=${5//'#{pane_pid}'/not-a-pid}\n"
+        f'  exec {shlex.quote(real_tmux)} "$1" "$2" "$3" "$4" "$format"\n'
+        "fi\n"
+        f'exec {shlex.quote(real_tmux)} "$@"\n'
+    )
+    tmux_wrapper.chmod(0o755)
+
+    marker = env.tmp_path / "pane-pid-failure-status-finished"
+    env.send_keys(
+        agent.window,
+        build_status_cmd_with_marker(
+            env,
+            workmux_exe_path,
+            "working",
+            marker,
+            {"PATH": f"{wrapper_dir}:{env.env['PATH']}"},
+        ),
+    )
+    assert poll_until(lambda: marker.exists(), timeout=5.0)
+
+    assert read_agent_state(state_file) == state
 
 
 def test_status_update_overwrites_state(

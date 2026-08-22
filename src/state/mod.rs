@@ -31,7 +31,8 @@ pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
 
 /// Persist an agent state update to the StateStore.
 ///
-/// Merges with existing state so partial updates don't wipe other fields:
+/// For tmux, merges state from the same pane process and server lifecycle so
+/// partial updates don't wipe other fields. Other backends merge by pane key:
 /// - If `status` is Some, updates the agent's status. If None, preserves existing.
 /// - If `title_override` is Some, uses it. If None, preserves existing stored title,
 ///   falling back to the live pane title.
@@ -66,10 +67,38 @@ pub fn persist_agent_update(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // Load existing state to merge with
+    let (live_pid, boot_id) = if mux.name() == "tmux" {
+        let Some(live_pid) = live_info.pid else {
+            warn!(%pane_id, "tmux pane PID unavailable, skipping state persist");
+            return;
+        };
+        let boot_id = match mux.server_boot_id() {
+            Ok(Some(boot_id)) => Some(boot_id),
+            Ok(None) => {
+                warn!(%pane_id, "tmux server identity unavailable, skipping state persist");
+                return;
+            }
+            Err(error) => {
+                warn!(%pane_id, %error, "failed to get tmux server identity, skipping state persist");
+                return;
+            }
+        };
+        (live_pid, boot_id)
+    } else {
+        (
+            live_info.pid.unwrap_or(0),
+            mux.server_boot_id().unwrap_or(None),
+        )
+    };
+
+    // tmux pane PIDs and server lifecycles form a stable process identity.
+    // Other backends retain their established pane-key merge behavior.
     let existing = StateStore::new()
         .ok()
-        .and_then(|store| store.get_agent(&pane_key).ok().flatten());
+        .and_then(|store| store.get_agent(&pane_key).ok().flatten())
+        .filter(|state| {
+            mux.name() != "tmux" || (state.pane_pid == live_pid && state.boot_id == boot_id)
+        });
 
     // Resolve status: explicit update wins, otherwise preserve existing
     let final_status = status.or(existing.as_ref().and_then(|e| e.status));
@@ -93,16 +122,13 @@ pub fn persist_agent_update(
         .or(existing.and_then(|e| e.pane_title))
         .or(live_info.title);
 
-    // Get server boot ID for crash detection (best-effort)
-    let boot_id = mux.server_boot_id().unwrap_or(None);
-
     // Classify the agent kind once and lock it in. The classifier sees the
     // *live* title (not the merged `pane_title` above, which prefers the
     // stored value): a stale stored title would otherwise re-confirm the
     // previous identity even after the foreground command has changed.
-    // Pane reuse (Claude exits, another agent launches in the same pane) is
-    // handled by reconcile in `state::store`, which deletes the stored
-    // entry on `command` change before this path runs again.
+    // Reconcile clears entries when it observes a foreground command change.
+    // This path does not use the command as process identity because a status
+    // hook can temporarily become the pane's foreground command.
     let agent_kind = merge_agent_kind(
         classify_agent_kind(
             live_info.current_command.as_deref(),
@@ -117,7 +143,7 @@ pub fn persist_agent_update(
         status: final_status,
         status_ts: Some(status_ts),
         pane_title,
-        pane_pid: live_info.pid.unwrap_or(0),
+        pane_pid: live_pid,
         command: live_info.current_command.unwrap_or_default(),
         updated_ts: now,
         window_name: live_info.window,
