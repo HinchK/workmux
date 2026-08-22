@@ -21,7 +21,9 @@ use super::{Multiplexer, PaneHandshake, util};
 /// This struct wraps all tmux-specific operations and implements the Multiplexer
 /// trait to provide a unified interface with other backends.
 #[derive(Debug, Default)]
-pub struct TmuxBackend;
+pub struct TmuxBackend {
+    socket_path: Option<String>,
+}
 
 const LIVE_PANE_RECORD_SEPARATOR: char = '\x1e';
 const LIVE_PANE_FIELD_SEPARATOR: char = '\x1f';
@@ -340,7 +342,27 @@ fn select_session_for_cwd(
 impl TmuxBackend {
     /// Create a new TmuxBackend instance.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn for_socket(socket_path: &str) -> Self {
+        Self {
+            socket_path: (socket_path != "default").then(|| socket_path.to_string()),
+        }
+    }
+
+    fn tmux_command(&self) -> Cmd<'_> {
+        match self.socket_path.as_deref() {
+            Some(socket_path) => Cmd::new("tmux").args(&["-S", socket_path]),
+            None => Cmd::new("tmux"),
+        }
+    }
+
+    fn shell_tmux_command(&self) -> String {
+        self.socket_path.as_deref().map_or_else(
+            || "tmux".to_string(),
+            |socket_path| format!("tmux -S {}", Self::shell_escape(socket_path)),
+        )
     }
 
     /// Query all tmux state consumed by one sidebar daemon refresh.
@@ -351,7 +373,7 @@ impl TmuxBackend {
 
     /// Run a tmux command, returning an error with context on failure.
     fn tmux_cmd(&self, args: &[&str]) -> Result<()> {
-        Cmd::new("tmux")
+        self.tmux_command()
             .args(args)
             .run()
             .with_context(|| format!("tmux command failed: {:?}", args))?;
@@ -360,7 +382,7 @@ impl TmuxBackend {
 
     /// Run a tmux command and capture stdout.
     fn tmux_query(&self, args: &[&str]) -> Result<String> {
-        Cmd::new("tmux")
+        self.tmux_command()
             .args(args)
             .run_and_capture_stdout()
             .with_context(|| format!("tmux query failed: {:?}", args))
@@ -464,7 +486,8 @@ impl TmuxBackend {
         // Uses run() instead of tmux_query()/run_and_capture_stdout() because the latter
         // calls .trim() which strips meaningful whitespace from format strings (e.g.,
         // padding spaces in tmux themes). We only strip trailing newlines from command output.
-        let window_format = Cmd::new("tmux")
+        let window_format = self
+            .tmux_command()
             .args(&["show-option", "-wv", "-t", pane, option])
             .run()
             .ok()
@@ -474,7 +497,8 @@ impl TmuxBackend {
 
         let current = match window_format {
             Some(fmt) => fmt,
-            None => Cmd::new("tmux")
+            None => self
+                .tmux_command()
                 .args(&["show-option", "-gv", option])
                 .run()
                 .ok()
@@ -516,7 +540,7 @@ impl TmuxBackend {
             .to_str()
             .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
 
-        let mut cmd = Cmd::new("tmux").args(&[
+        let mut cmd = self.tmux_command().args(&[
             "split-window",
             split_arg,
             "-t",
@@ -561,7 +585,10 @@ impl TmuxBackend {
         };
         let target = format!("{}={}", session_prefix, full_name);
         let escaped = Self::shell_escape(&target);
-        Ok(format!("tmux {command} -t {escaped} >/dev/null 2>&1"))
+        Ok(format!(
+            "{} {command} -t {escaped} >/dev/null 2>&1",
+            self.shell_tmux_command()
+        ))
     }
 }
 
@@ -573,7 +600,7 @@ impl Multiplexer for TmuxBackend {
     // === Server/Session ===
 
     fn is_running(&self) -> Result<bool> {
-        Cmd::new("tmux").arg("has-session").run_as_check()
+        self.tmux_command().arg("has-session").run_as_check()
     }
 
     fn current_pane_id(&self) -> Option<String> {
@@ -588,11 +615,12 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn get_client_active_pane_path(&self) -> Result<PathBuf> {
+        let tmux = self.shell_tmux_command();
+        let script = format!(
+            "{tmux} display-message -p -t \"$({tmux} display-message -p '#{{client_session}}')\" '#{{pane_current_path}}'"
+        );
         let output = Cmd::new("sh")
-            .args(&[
-                "-c",
-                "tmux display-message -p -t \"$(tmux display-message -p '#{client_session}')\" '#{pane_current_path}'",
-            ])
+            .args(&["-c", &script])
             .run_and_capture_stdout()
             .context("Failed to get client active pane path")?;
 
@@ -613,7 +641,7 @@ impl Multiplexer for TmuxBackend {
             .to_str()
             .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
 
-        let mut cmd = Cmd::new("tmux").args(&["new-window", "-d", "-a"]);
+        let mut cmd = self.tmux_command().args(&["new-window", "-d", "-a"]);
 
         // With no explicit target, tmux inserts after the current window.
         if let Some(target) = params.after_window {
@@ -649,7 +677,7 @@ impl Multiplexer for TmuxBackend {
         // -s: session name
         // -c: start directory
         // -P -F: print the pane ID of the initial window
-        let mut cmd = Cmd::new("tmux").args(&[
+        let mut cmd = self.tmux_command().args(&[
             "new-session",
             "-d",
             "-s",
@@ -695,7 +723,8 @@ impl Multiplexer for TmuxBackend {
         let target = format!("{}:", params.session_name);
 
         let mut cmd =
-            Cmd::new("tmux").args(&["new-window", "-d", "-t", &target, "-c", working_dir_str]);
+            self.tmux_command()
+                .args(&["new-window", "-d", "-t", &target, "-c", working_dir_str]);
 
         // Optionally name the window
         if let Some(window_name) = params.name {
@@ -797,7 +826,7 @@ impl Multiplexer for TmuxBackend {
 
     fn session_exists(&self, full_name: &str) -> Result<bool> {
         // has-session returns 0 if session exists, 1 if not
-        Cmd::new("tmux")
+        self.tmux_command()
             .args(&["has-session", "-t", full_name])
             .run_as_check()
     }
@@ -947,18 +976,18 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn shell_close_window_by_id_guard_cmd(&self, id: &str) -> Result<String> {
-        let escaped = Self::shell_escape(id);
+        let tmux = self.shell_tmux_command();
+        let target = Self::shell_escape(id);
         Ok(format!(
-            "tmux display-message -p -t {target} '#{{window_id}}' >/dev/null 2>&1 && tmux kill-window -t {target} >/dev/null 2>&1 || true",
-            target = escaped
+            "{tmux} display-message -p -t {target} '#{{window_id}}' >/dev/null 2>&1 && {tmux} kill-window -t {target} >/dev/null 2>&1 || true"
         ))
     }
 
     fn shell_close_session_by_id_guard_cmd(&self, id: &str) -> Result<String> {
-        let escaped = Self::shell_escape(id);
+        let tmux = self.shell_tmux_command();
+        let target = Self::shell_escape(id);
         Ok(format!(
-            "tmux has-session -t {target} >/dev/null 2>&1 && tmux kill-session -t {target} >/dev/null 2>&1 || true",
-            target = escaped
+            "{tmux} has-session -t {target} >/dev/null 2>&1 && {tmux} kill-session -t {target} >/dev/null 2>&1 || true"
         ))
     }
 
@@ -973,21 +1002,36 @@ impl Multiplexer for TmuxBackend {
     fn shell_kill_window_target_cmd(&self, target: &WindowTarget) -> Result<String> {
         let target_arg = Self::window_target_arg(target);
         let escaped = Self::shell_escape(&target_arg);
-        Ok(format!("tmux kill-window -t {} >/dev/null 2>&1", escaped))
+        Ok(format!(
+            "{} kill-window -t {} >/dev/null 2>&1",
+            self.shell_tmux_command(),
+            escaped
+        ))
     }
 
     fn shell_switch_session_cmd(&self, full_name: &str) -> Result<String> {
-        let escaped = format!("'{}'", full_name.replace('\'', r#"'\''"#));
-        Ok(format!("tmux switch-client -t {} >/dev/null 2>&1", escaped))
+        let escaped = Self::shell_escape(full_name);
+        Ok(format!(
+            "{} switch-client -t {} >/dev/null 2>&1",
+            self.shell_tmux_command(),
+            escaped
+        ))
     }
 
     fn shell_kill_session_cmd(&self, full_name: &str) -> Result<String> {
-        let escaped = format!("'{}'", full_name.replace('\'', r#"'\''"#));
-        Ok(format!("tmux kill-session -t {} >/dev/null 2>&1", escaped))
+        let escaped = Self::shell_escape(full_name);
+        Ok(format!(
+            "{} kill-session -t {} >/dev/null 2>&1",
+            self.shell_tmux_command(),
+            escaped
+        ))
     }
 
     fn shell_switch_to_last_session_cmd(&self) -> Result<String> {
-        Ok("tmux switch-client -l >/dev/null 2>&1".to_string())
+        Ok(format!(
+            "{} switch-client -l >/dev/null 2>&1",
+            self.shell_tmux_command()
+        ))
     }
 
     fn select_window(&self, prefix: &str, name: &str) -> Result<()> {
@@ -1133,7 +1177,8 @@ impl Multiplexer for TmuxBackend {
             .ok_or_else(|| anyhow!("Working directory path contains non-UTF8 characters"))?;
 
         let mut command =
-            Cmd::new("tmux").args(&["respawn-pane", "-t", pane_id, "-c", working_dir_str, "-k"]);
+            self.tmux_command()
+                .args(&["respawn-pane", "-t", pane_id, "-c", working_dir_str, "-k"]);
 
         // Wrap in sh -c "..." to ensure POSIX evaluation even when tmux's
         // default-shell is a non-POSIX shell like nushell.
@@ -1172,7 +1217,11 @@ impl Multiplexer for TmuxBackend {
     fn paste_text(&self, pane_id: &str, content: &str) -> Result<()> {
         use std::io::Write;
 
-        let mut child = std::process::Command::new("tmux")
+        let mut command = std::process::Command::new("tmux");
+        if let Some(socket_path) = self.socket_path.as_deref() {
+            command.args(["-S", socket_path]);
+        }
+        let mut child = command
             .args(["load-buffer", "-"])
             .stdin(std::process::Stdio::piped())
             .spawn()
@@ -1286,6 +1335,10 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn resolve_instance_id(&self) -> Result<String> {
+        if let Some(socket_path) = self.socket_path.as_ref() {
+            return Ok(socket_path.clone());
+        }
+
         // TMUX env var format: /path/to/socket,pid,session_index
         // The socket path identifies the server shared by all of its sessions.
         if let Some(socket_path) = std::env::var("TMUX")
@@ -1411,6 +1464,14 @@ mod tests {
         let error = parse_sidebar_snapshot("\x1e%7\x1f12345\n").unwrap_err();
 
         assert!(error.to_string().contains("malformed sidebar state"));
+    }
+
+    #[test]
+    fn configured_socket_identifies_tmux_instance() {
+        let backend = TmuxBackend::for_socket("/tmp/tmux socket");
+
+        assert_eq!(backend.instance_id(), "/tmp/tmux socket");
+        assert_eq!(backend.shell_tmux_command(), "tmux -S '/tmp/tmux socket'");
     }
 
     #[test]

@@ -2513,6 +2513,7 @@ mod tests {
                 session_name: None,
                 boot_id: None,
                 agent_kind: None,
+                agent_session_id: None,
             };
             store.upsert_agent(&state).unwrap();
         }

@@ -36,6 +36,7 @@ pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
 /// - If `status` is Some, updates the agent's status. If None, preserves existing.
 /// - If `title_override` is Some, uses it. If None, preserves existing stored title,
 ///   falling back to the live pane title.
+/// - If `agent_session_id` is Some, uses it. If None, preserves the existing binding.
 ///
 /// Logs warnings on failure without propagating errors (best-effort persistence).
 pub fn persist_agent_update(
@@ -43,8 +44,9 @@ pub fn persist_agent_update(
     pane_id: &str,
     status: Option<AgentStatus>,
     title_override: Option<String>,
+    agent_session_id: Option<String>,
 ) {
-    persist_agent_snapshot(mux, pane_id, status, title_override, true);
+    persist_agent_snapshot(mux, pane_id, status, title_override, agent_session_id, true);
 }
 
 /// Register a live agent pane without assigning it an activity status.
@@ -52,7 +54,7 @@ pub fn persist_agent_update(
 /// Registration snapshots only live pane data, preventing state from an
 /// unrelated agent process in the same pane from leaking into this record.
 pub fn persist_agent_registration(mux: &dyn Multiplexer, pane_id: &str) {
-    persist_agent_snapshot(mux, pane_id, None, None, false);
+    persist_agent_snapshot(mux, pane_id, None, None, None, false);
 }
 
 fn persist_agent_snapshot(
@@ -60,6 +62,7 @@ fn persist_agent_snapshot(
     pane_id: &str,
     status: Option<AgentStatus>,
     title_override: Option<String>,
+    agent_session_id: Option<String>,
     preserve_existing: bool,
 ) {
     let pane_key = PaneKey {
@@ -147,6 +150,11 @@ fn persist_agent_snapshot(
 
     // Capture existing agent_kind before `existing` is consumed below.
     let existing_agent_kind = existing.as_ref().and_then(|e| e.agent_kind.clone());
+    let agent_session_id = agent_session_id.or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|state| state.agent_session_id.clone())
+    });
 
     // Snapshot the live title for classification before the resolved
     // `pane_title` consumes `live_info.title`.
@@ -154,7 +162,7 @@ fn persist_agent_snapshot(
 
     // Resolve title: explicit override wins, then existing stored title, then live
     let pane_title = title_override
-        .or(existing.and_then(|e| e.pane_title))
+        .or_else(|| existing.as_ref().and_then(|state| state.pane_title.clone()))
         .or(live_info.title);
 
     // Classify the agent kind once and lock it in. The classifier sees the
@@ -186,6 +194,7 @@ fn persist_agent_snapshot(
         session_name: live_info.session,
         boot_id,
         agent_kind,
+        agent_session_id,
     };
 
     if let Ok(store) = StateStore::new()
