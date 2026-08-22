@@ -122,6 +122,23 @@ fn expand_tilde_with_home(path: &str, home: Option<&Path>) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Placeholder replaced with the project directory name in config templates.
+pub const PROJECT_PLACEHOLDER: &str = "{project}";
+
+/// Replace `{project}` in a template with `project_root`'s directory name.
+pub fn expand_project_placeholder(template: &str, project_root: &Path) -> Result<String> {
+    let project_name = project_root
+        .file_name()
+        .ok_or_else(|| {
+            anyhow!(
+                "Could not determine project name from path: {}",
+                project_root.display()
+            )
+        })?
+        .to_string_lossy();
+    Ok(template.replace(PROJECT_PLACEHOLDER, &project_name))
+}
+
 /// Expand a `worktree_dir` template against a project root.
 ///
 /// Supported syntax:
@@ -149,7 +166,7 @@ pub(crate) fn expand_worktree_dir_with_home(
             .ok_or_else(|| anyhow!("worktree_dir: unterminated '{{' in template '{}'", template))?;
         let close = open + rel_close;
         let token = &template[open..=close];
-        if token != "{project}" {
+        if token != PROJECT_PLACEHOLDER {
             return Err(anyhow!(
                 "worktree_dir: unknown placeholder '{}' in '{}' (only '{{project}}' is supported)",
                 token,
@@ -160,17 +177,7 @@ pub(crate) fn expand_worktree_dir_with_home(
     }
 
     let tilde_expanded = expand_tilde_with_home(template, home);
-    let project_name = project_root
-        .file_name()
-        .ok_or_else(|| {
-            anyhow!(
-                "Could not determine project name from path: {}",
-                project_root.display()
-            )
-        })?
-        .to_string_lossy();
-    let as_str = tilde_expanded.to_string_lossy();
-    let with_project = as_str.replace("{project}", &project_name);
+    let with_project = expand_project_placeholder(&tilde_expanded.to_string_lossy(), project_root)?;
     let path = Path::new(&with_project);
 
     if path.is_absolute() {
@@ -273,6 +280,20 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "stored");
         assert_eq!(fs::read_to_string(&temp).unwrap(), "pending");
+    }
+
+    #[test]
+    fn expand_project_placeholder_replaces_every_occurrence() {
+        let project = PathBuf::from("/x/y/myproj");
+        let expanded = expand_project_placeholder("{project}-{project} ", &project).unwrap();
+        assert_eq!(expanded, "myproj-myproj ");
+    }
+
+    #[test]
+    fn expand_project_placeholder_leaves_plain_template_untouched() {
+        let project = PathBuf::from("/x/y/myproj");
+        let expanded = expand_project_placeholder("wm-", &project).unwrap();
+        assert_eq!(expanded, "wm-");
     }
 
     #[test]

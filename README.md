@@ -276,7 +276,7 @@ customize.
 | `main_branch`    | Branch to merge into                                                                                  | Auto-detected               |
 | `base_branch`    | Default base ref for new worktrees, or `auto` for the effective main branch                           | Current branch              |
 | `worktree_dir`   | Directory for worktrees (absolute or relative). Supports `~` and `{project}`.                         | `<project>__worktrees/`     |
-| `window_prefix`    | Prefix for tmux window/session names                                                                  | `wm-`                       |
+| `window_prefix`    | Prefix for tmux window/session names. Supports `{project}`.                                           | `wm-`                       |
 | `mode`             | Tmux mode (`window` or `session`)                                                                     | `window`                    |
 | `window_placement` | New tmux window placement (`after_current` or `rightmost`)                                            | `after_current`             |
 | `agent`            | Default agent for `<agent>` placeholder                                                               | `claude`                    |

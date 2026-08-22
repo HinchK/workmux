@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::util::{PROJECT_PLACEHOLDER, expand_project_placeholder};
 use crate::{cmd, git, nerdfont};
 use which::{which, which_in};
 
@@ -475,6 +476,7 @@ pub struct Config {
     pub worktree_dir: Option<String>,
 
     /// Prefix for tmux window names (optional, defaults to "wm-")
+    /// Supports a `{project}` placeholder for the main worktree's directory name.
     #[serde(default)]
     pub window_prefix: Option<String>,
 
@@ -2354,12 +2356,22 @@ impl Config {
             .or_else(|| git::get_repo_root_for(start_dir).ok())
             .unwrap_or_else(|| start_dir.to_path_buf());
 
-        let config = Self::merge_and_apply_defaults(
+        let mut config = Self::merge_and_apply_defaults(
             global_config,
             project_config,
             cli_agent,
             &defaults_root,
         )?;
+
+        // Expand `{project}` against the main worktree so every worktree of a
+        // repository resolves the same prefix, whatever directory it runs from.
+        // Outside a repository there is no project, so the template stands.
+        if let Some(prefix) = config.window_prefix.as_deref()
+            && prefix.contains(PROJECT_PLACEHOLDER)
+            && let Ok(main_root) = git::get_main_worktree_root_in(Some(start_dir))
+        {
+            config.window_prefix = Some(expand_project_placeholder(prefix, &main_root)?);
+        }
 
         debug!(
             agent = ?config.agent,
@@ -2979,7 +2991,8 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 # Prefix added to worktree directories and tmux window names.
 # worktree_prefix: ""
 
-# Prefix for tmux window names.
+# Prefix for tmux window and session names. Supports `{project}` for the main
+# worktree's directory name, e.g. `{project} ` to scope session names by repo.
 # Default: "wm-"
 # window_prefix: "wm-"
 

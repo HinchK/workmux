@@ -7,6 +7,7 @@ from ..conftest import (
     get_session_name,
     get_window_name,
     run_workmux_command,
+    write_global_workmux_config,
     write_workmux_config,
 )
 from .conftest import add_branch_and_get_worktree
@@ -106,6 +107,32 @@ class TestSessionCreation:
         # Session should use custom prefix
         expected_session = f"{custom_prefix}feature-prefix-test"
         assert_session_exists(env, expected_session)
+
+    def test_add_session_prefix_expands_project_placeholder(
+        self, mux_server, workmux_exe_path, repo_path
+    ):
+        """Verifies `{project}` in window_prefix resolves to the project directory name."""
+        env = mux_server
+        branch_name = "feature-project-prefix"
+        expected_session = f"{repo_path.name} {branch_name}"
+
+        write_workmux_config(repo_path)
+        write_global_workmux_config(env, window_prefix="{project} ")
+
+        worktree_path = add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            repo_path,
+            branch_name,
+            extra_args="--session --background",
+        )
+
+        assert_session_exists(env, expected_session)
+
+        # Commands run from inside a worktree must resolve the same prefix
+        run_workmux_command(env, workmux_exe_path, worktree_path, "close")
+
+        assert_session_not_exists(env, expected_session)
 
     def test_add_session_target_name_overrides_session_target(
         self, mux_server, workmux_exe_path, repo_path
