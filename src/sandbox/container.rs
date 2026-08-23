@@ -803,11 +803,18 @@ fn build_docker_run_args_inner(
         }
     }
 
+    // Rootless Podman remaps UIDs. keep-id maps the host user to the same UID
+    // inside the container so bind-mounted files remain accessible to that UID.
+    if runtime.needs_userns_keep_id() {
+        args.push("--userns=keep-id".to_string());
+    }
+
     if network_deny {
-        // Deny mode: start as root for iptables setup, drop privileges via setpriv.
-        // Do NOT use --userns=keep-id (Podman) in deny mode since the container
-        // starts as root and drops privileges after iptables setup.
+        // Docker-compatible runtimes start as root for firewall setup before
+        // network-init.sh drops privileges to the bind-mount owner.
         if runtime.needs_deny_mode_caps() {
+            args.push("--user".to_string());
+            args.push("0:0".to_string());
             args.extend(deny_mode_run_flags());
         }
         args.push("--env".to_string());
@@ -815,21 +822,14 @@ fn build_docker_run_args_inner(
         args.push("--env".to_string());
         args.push(format!("WM_TARGET_GID={}", gid));
         // Supplementary groups are applied inside the container by setpriv
-        // (see docker/Dockerfile.base). We do NOT pass --group-add here because
-        // in deny mode the root process drops privileges after iptables setup,
-        // and the --group-add groups would be stripped during that drop.
+        // (see docker/Dockerfile.base). The root process drops privileges after
+        // firewall setup, so setpriv receives the complete supplementary list.
         if !group_add.is_empty() {
             args.push("--env".to_string());
             args.push(format!("WM_EXTRA_GIDS={}", group_add.join(",")));
         }
     } else {
-        // Normal mode: run as user directly.
-        // Rootless Podman uses a user namespace that remaps UIDs. Without --userns=keep-id,
-        // the host UID appears as root inside the container, making bind-mounted files
-        // (credentials, config) inaccessible to the --user process.
-        if runtime.needs_userns_keep_id() {
-            args.push("--userns=keep-id".to_string());
-        }
+        // Normal mode runs as the host user directly.
         args.push("--user".to_string());
         args.push(format!("{}:{}", uid, gid));
         for g in group_add {
@@ -1193,7 +1193,7 @@ fn build_docker_run_args_inner(
 
     if network_deny {
         // In deny mode, wrap command with network-init.sh which sets up
-        // iptables firewall rules and then drops privileges via gosu.
+        // iptables firewall rules and then drops privileges via setpriv.
         args.push("network-init.sh".to_string());
         args.push("sh".to_string());
         args.push("-c".to_string());
@@ -2303,11 +2303,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_args_network_deny_no_user_flag() {
+    fn test_build_args_network_deny_docker_starts_as_root() {
         let args = test_build_deny_args();
 
-        // Deny mode should NOT have --user (container starts as root)
-        assert!(!args.contains(&"--user".to_string()));
+        assert_flag_eq(&args, "--user", "0:0");
+        assert!(!args.contains(&"--userns=keep-id".to_string()));
     }
 
     #[test]
@@ -2357,12 +2357,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_args_network_deny_podman_no_keep_id() {
+    fn test_build_args_network_deny_podman_keeps_id_and_starts_as_root() {
         let config = sandbox_config(SandboxRuntime::Podman, |_| {});
         let args = test_build_run_args(&config, true);
 
-        // Deny mode should NOT use --userns=keep-id
-        assert!(!args.contains(&"--userns=keep-id".to_string()));
+        assert!(args.contains(&"--userns=keep-id".to_string()));
+        assert_flag_eq(&args, "--user", "0:0");
     }
 
     #[test]
@@ -2402,10 +2402,11 @@ mod tests {
         let config = sandbox_config(SandboxRuntime::AppleContainer, |_| {});
         let args = test_build_run_args(&config, true);
 
-        // Should NOT have --cap-add=NET_ADMIN or --security-opt
+        // Apple Container handles isolation without Docker/Podman run flags.
         assert!(!args.contains(&"--cap-add=NET_ADMIN".to_string()));
         assert!(!args.contains(&"--security-opt".to_string()));
-        // Should still have UID/GID env vars for deny mode
+        assert!(!args.contains(&"--user".to_string()));
+        // UID/GID env vars supply the network-init.sh privilege-drop target.
         assert!(args.iter().any(|a| a.starts_with("WM_TARGET_UID=")));
         assert!(args.iter().any(|a| a.starts_with("WM_TARGET_GID=")));
     }
