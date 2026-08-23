@@ -21,6 +21,14 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.245 (2026-08-23)
+
+- Fix agents losing write access to the worktree under rootless Podman with
+  `network.policy: deny`.
+  ([#253](https://github.com/raine/workmux/issues/253))
+- Fix stale agent status, title, and activity age lingering in the sidebar when
+  tmux reuses a pane ID for a different process.
+
 ## v0.1.244 (2026-08-22)
 
 - `window_prefix` accepts the `{project}` placeholder, which expands to the main
