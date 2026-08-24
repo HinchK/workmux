@@ -9,9 +9,11 @@ sessions with live status updates. Use `workmux sidebar filter session` to show
 only agents in the current tmux session.
 
 ```bash
-workmux sidebar                 # Toggle sidebar on/off (all sessions)
-workmux sidebar --session       # Toggle current session only, or opt out of global mode
-workmux sidebar --position top  # Override configured placement for this toggle
+workmux sidebar                  # Toggle sidebar on/off (all sessions)
+workmux sidebar --session        # Toggle current session only, or opt out of global mode
+workmux sidebar --position top   # Override configured placement for this toggle
+workmux sidebar --width 40       # Set left sidebar width in columns
+workmux sidebar --height 3       # Set top sidebar height in rows
 ```
 
 ## What it shows
@@ -107,7 +109,8 @@ as many configured lines as the current height allows. `horizontal.item_width`
 controls each chip width and is clamped between 12 and 80 columns. Position
 changes take effect after toggling the sidebar off and on. Use
 `workmux sidebar --position top` or `--position left` to override the configured
-placement for that toggle.
+placement for that toggle. Width and height also accept percentages, such as
+`workmux sidebar --width 15%`.
 
 ## How it works
 

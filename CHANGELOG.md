@@ -21,6 +21,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Allow `workmux sidebar` to set its width or height when toggling it, using
+  terminal units or percentages.
+
 ## v0.1.246 (2026-08-24)
 
 - Fix container startup failing with `network.policy: deny` when the host

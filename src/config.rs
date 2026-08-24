@@ -419,6 +419,17 @@ impl_dimension_deserialize!(
     "a number (columns) or a string like \"15%\""
 );
 
+impl std::str::FromStr for SidebarWidth {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_sidebar_dimension(value, "width").map(|value| match value {
+            SidebarDimension::Absolute(value) => Self::Absolute(value),
+            SidebarDimension::Percent(value) => Self::Percent(value),
+        })
+    }
+}
+
 /// Sidebar height: either absolute rows or a percentage of terminal height.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarHeight {
@@ -450,6 +461,42 @@ impl_dimension_deserialize!(
     "height",
     "a number (rows) or a string like \"10%\""
 );
+
+impl std::str::FromStr for SidebarHeight {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_sidebar_dimension(value, "height").map(|value| match value {
+            SidebarDimension::Absolute(value) => Self::Absolute(value),
+            SidebarDimension::Percent(value) => Self::Percent(value),
+        })
+    }
+}
+
+/// Shared parser for command-line sidebar dimensions.
+fn parse_sidebar_dimension(value: &str, name: &str) -> Result<SidebarDimension, String> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let percent = percent
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("invalid {name} percentage"))?;
+        if percent == 0 || percent > 100 {
+            return Err(format!("{name} percentage must be 1-100"));
+        }
+        Ok(SidebarDimension::Percent(percent))
+    } else {
+        let value = value
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("invalid {name}"))?;
+        Ok(SidebarDimension::Absolute(value))
+    }
+}
+
+enum SidebarDimension {
+    Absolute(u16),
+    Percent(u16),
+}
 
 /// Configuration for a single window within a session (session mode only)
 #[derive(Debug, Deserialize, Serialize, Clone)]

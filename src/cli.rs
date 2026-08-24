@@ -1,5 +1,5 @@
 use crate::command::args::{MultiArgs, PromptArgs, RescueArgs, SetupFlags};
-use crate::config::{MuxMode, SidebarPosition};
+use crate::config::{MuxMode, SidebarHeight, SidebarPosition, SidebarWidth};
 use crate::workflow::pr::PrReference;
 use crate::{claude, command, config, git, nerdfont};
 use anyhow::{Context, Result};
@@ -644,6 +644,14 @@ enum Commands {
         #[arg(long, value_enum)]
         position: Option<SidebarPosition>,
 
+        /// Sidebar width in columns or as a percentage, for example 40 or 15%
+        #[arg(long)]
+        width: Option<SidebarWidth>,
+
+        /// Sidebar height in rows or as a percentage, for example 3 or 10%
+        #[arg(long)]
+        height: Option<SidebarHeight>,
+
         #[command(subcommand)]
         action: Option<SidebarAction>,
     },
@@ -1058,6 +1066,8 @@ pub fn run() -> Result<()> {
         Commands::Sidebar {
             session,
             position,
+            width,
+            height,
             action,
         } => match action {
             Some(SidebarAction::Next) => {
@@ -1074,9 +1084,9 @@ pub fn run() -> Result<()> {
             }
             None => {
                 if session {
-                    command::sidebar::toggle_session(position)
+                    command::sidebar::toggle_session(position, width, height)
                 } else {
-                    command::sidebar::toggle(position)
+                    command::sidebar::toggle(position, width, height)
                 }
             }
         },
@@ -1278,6 +1288,20 @@ mod tests {
             } => {
                 assert_eq!(position, Some(SidebarPosition::Top));
                 assert!(action.is_none());
+            }
+            _ => panic!("expected sidebar command"),
+        }
+    }
+
+    #[test]
+    fn sidebar_dimension_flags_parse_columns_rows_and_percentages() {
+        let cli = Cli::try_parse_from(["workmux", "sidebar", "--width", "40", "--height", "10%"])
+            .unwrap();
+
+        match cli.command {
+            Commands::Sidebar { width, height, .. } => {
+                assert_eq!(width, Some(crate::config::SidebarWidth::Absolute(40)));
+                assert_eq!(height, Some(crate::config::SidebarHeight::Percent(10)));
             }
             _ => panic!("expected sidebar command"),
         }

@@ -31,7 +31,7 @@ mod template;
 mod ui;
 
 use crate::cmd::Cmd;
-use crate::config::SidebarPosition;
+use crate::config::{SidebarHeight, SidebarPosition, SidebarWidth};
 use anyhow::{Result, anyhow, bail};
 
 use self::daemon_ctrl::{ensure_daemon_running, kill_daemon, signal_daemon};
@@ -486,9 +486,27 @@ pub(super) fn reflow_all_to_window_extent(
     Ok(())
 }
 
+fn apply_cli_dimensions(
+    config: &mut crate::config::Config,
+    width: Option<SidebarWidth>,
+    height: Option<SidebarHeight>,
+) {
+    if width.is_some() {
+        config.sidebar.width = width;
+    }
+    if height.is_some() {
+        config.sidebar.height = height;
+    }
+}
+
 /// Toggle the sidebar globally across all tmux windows.
-pub fn toggle(position: Option<SidebarPosition>) -> Result<()> {
-    let config = crate::config::Config::load(None)?;
+pub fn toggle(
+    position: Option<SidebarPosition>,
+    width: Option<SidebarWidth>,
+    height: Option<SidebarHeight>,
+) -> Result<()> {
+    let mut config = crate::config::Config::load(None)?;
+    apply_cli_dimensions(&mut config, width, height);
 
     if std::env::var("TMUX").is_err() {
         return Err(anyhow!("Sidebar requires tmux"));
@@ -541,8 +559,13 @@ pub fn toggle(position: Option<SidebarPosition>) -> Result<()> {
 }
 
 /// Toggle the sidebar for the current tmux session only.
-pub fn toggle_session(position: Option<SidebarPosition>) -> Result<()> {
-    let config = crate::config::Config::load(None)?;
+pub fn toggle_session(
+    position: Option<SidebarPosition>,
+    width: Option<SidebarWidth>,
+    height: Option<SidebarHeight>,
+) -> Result<()> {
+    let mut config = crate::config::Config::load(None)?;
+    apply_cli_dimensions(&mut config, width, height);
 
     if std::env::var("TMUX").is_err() {
         return Err(anyhow!("Sidebar requires tmux"));
