@@ -21,6 +21,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.246 (2026-08-24)
+
+- Fix container startup failing with `network.policy: deny` when the host
+  provides IPv6 nameservers, which happens with Podman.
+  ([#254](https://github.com/raine/workmux/issues/254))
+
 ## v0.1.245 (2026-08-23)
 
 - Fix agents losing write access to the worktree under rootless Podman with
