@@ -456,8 +456,7 @@ impl SidebarApp {
         self.interrupted_pane_ids = snapshot.interrupted_pane_ids;
         self.sleeping_pane_ids = snapshot.sleeping_pane_ids;
 
-        // Check if host window is active
-        let was_active = self.host_window_active;
+        // Track whether the host window and its sidebar pane are active.
         self.host_window_active = if let Some(identity) = &self.host_identity {
             snapshot
                 .active_windows
@@ -465,9 +464,14 @@ impl SidebarApp {
         } else {
             true
         };
+        let host_sidebar_active = self
+            .host_identity
+            .as_ref()
+            .map(|identity| snapshot.active_pane_ids.contains(&identity.pane_id));
 
-        // Re-arm FollowHost when window becomes active
-        if !was_active && self.host_window_active {
+        // Manual selection belongs to direct sidebar interaction. When an agent
+        // pane has focus, the selection follows the agent in the host window.
+        if self.host_window_active && host_sidebar_active == Some(false) {
             self.selection_mode = SelectionMode::FollowHost;
         }
 
@@ -1468,6 +1472,88 @@ mod tests {
                 message: "unknown token 'bad_compact' at column 1".to_string(),
             })
         );
+    }
+
+    fn selection_agent(pane_id: &str, window_id: &str) -> AgentPane {
+        AgentPane {
+            session: "s".to_string(),
+            window_name: window_id.to_string(),
+            pane_id: pane_id.to_string(),
+            window_id: window_id.to_string(),
+            window_index: None,
+            path: PathBuf::from(format!("/tmp/{pane_id}")),
+            pane_title: None,
+            status: None,
+            status_ts: None,
+            updated_ts: None,
+            window_cmd: None,
+            agent_command: None,
+            agent_kind: None,
+        }
+    }
+
+    fn selection_snapshot(active_pane_ids: &[&str]) -> SidebarSnapshot {
+        SidebarSnapshot {
+            position: SidebarPosition::Left,
+            layout_mode: SidebarLayoutMode::Tiles,
+            filter_mode: SidebarFilterMode::None,
+            active_windows: std::collections::HashSet::from([(
+                "s".to_string(),
+                "@host".to_string(),
+            )]),
+            active_pane_ids: active_pane_ids
+                .iter()
+                .map(|pane_id| (*pane_id).to_string())
+                .collect(),
+            window_pane_counts: HashMap::new(),
+            git_statuses: HashMap::new(),
+            pr_statuses: HashMap::new(),
+            check_statuses: HashMap::new(),
+            interrupted_pane_ids: std::collections::HashSet::new(),
+            sleeping_pane_ids: std::collections::HashSet::new(),
+            agents: vec![
+                selection_agent("%host-agent", "@host"),
+                selection_agent("%other-agent", "@other"),
+            ],
+            config_version: 0,
+        }
+    }
+
+    fn selection_app() -> SidebarApp {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.host_identity = Some(HostIdentity {
+            session_name: "s".to_string(),
+            session_id: "$1".to_string(),
+            window_id: "@host".to_string(),
+            pane_id: "%sidebar".to_string(),
+        });
+        app.apply_snapshot(selection_snapshot(&["%host-agent"]));
+        app
+    }
+
+    #[test]
+    fn active_agent_pane_restores_follow_host_selection() {
+        let mut app = selection_app();
+        app.select_index(1);
+
+        app.apply_snapshot(selection_snapshot(&["%host-agent"]));
+
+        assert_eq!(app.list_state.selected(), Some(0));
+        assert_eq!(app.selection_mode, SelectionMode::FollowHost);
+    }
+
+    #[test]
+    fn active_sidebar_pane_preserves_manual_selection() {
+        let mut app = selection_app();
+        app.select_index(1);
+
+        app.apply_snapshot(selection_snapshot(&["%sidebar"]));
+
+        assert_eq!(app.list_state.selected(), Some(1));
+        assert_eq!(app.selection_mode, SelectionMode::Manual);
     }
 
     #[test]
