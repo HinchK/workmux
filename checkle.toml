@@ -33,7 +33,7 @@ command = ["bash", "-lc", "source tests/venv/bin/activate && pyright tests"]
 [[check]]
 name = "docs-check"
 mode = "auto"
-command = ["node", "docs/scripts/check-content.mjs"]
+command = ["bash", "-lc", "cd docs && bun run format:check && node scripts/check-content.mjs"]
 
 [[group]]
 name = "all"
