@@ -21,19 +21,25 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.247 (2026-08-25)
 
-- Add idempotent `workmux sidebar on` and `workmux sidebar off` commands for
+- Use `workmux status --all` and `workmux list --all` to inspect tracked agents
+  and worktrees across every repository in the current multiplexer.
+- Configure the dashboard's initial sort order with `dashboard.sort_mode`.
+  ([#249](https://github.com/raine/workmux/issues/249),
+  [#250](https://github.com/raine/workmux/pull/250))
+- Use idempotent `workmux sidebar on` and `workmux sidebar off` commands for
   global and session-scoped sidebar lifecycle control.
-- Allow `workmux sidebar` to set its width or height when toggling it, using
-  terminal units or percentages.
+- Set sidebar width or height when enabling it, using terminal units or
+  percentages.
+- Fix sidebar colors failing to update after configuration changes and stale
+  selections lingering after switching agents.
 - Raise the deny-mode network proxy connection limit, make it configurable,
   and return an HTTP 503 response when the proxy reaches capacity.
-- Honor Git content filters, merge drivers, credential helpers, and transport
-  configuration during host Git operations, restoring `workmux add` for
-  repositories that use Git LFS. Container sandbox backends keep shared Git
-  configuration and hooks read-only while repository content remains writable.
-  ([#256](https://github.com/raine/workmux/issues/256))
+- Restore `workmux add` for Git LFS repositories while keeping shared Git
+  configuration and hooks read-only in container sandboxes.
+  ([#256](https://github.com/raine/workmux/issues/256),
+  [#258](https://github.com/raine/workmux/issues/258))
 
 ## v0.1.246 (2026-08-24)
 
