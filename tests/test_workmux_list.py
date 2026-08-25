@@ -588,7 +588,9 @@ def test_list_all_json_aggregates_repositories_and_agent_statuses(
 ):
     """List --all discovers projects through tracked agents."""
     assert isinstance(mux_server, TmuxEnvironment)
-    runner_window = mux_server.list_windows()[0]
+    runner_window = mux_server.tmux(
+        ["display-message", "-p", "#{window_id}"]
+    ).stdout.strip()
     first = start_active_agent(
         mux_server,
         workmux_exe_path,
