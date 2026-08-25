@@ -84,7 +84,9 @@ root privileges. Lima's mount model cannot make selected Git policy files
 read-only while leaving refs, objects, indexes, and worktree files writable with
 a boundary that guest root cannot undo. The guest can therefore modify common
 Git config, hooks, linked-worktree pointers, config includes, and submodule Git
-metadata that host Git may later consume.
+metadata that host Git may later consume. Configured content filters, merge
+drivers, and credential helpers can execute as the host user during those Git
+operations.
 
 Workmux requires explicit acceptance once per Lima VM. The acknowledgement lives
 in the host-only

@@ -275,7 +275,10 @@ The exact flags vary by runtime (e.g., Podman adds `--userns=keep-id`, Apple Con
 \* Git pointer files, per-worktree config, object information, hooks, and nested
 administrative namespaces remain read-only within writable Git data mounts.
 Extra mounts are read-only by default. Set `writable: true` to allow writes.
-Writable mounts that overlap protected Git paths are rejected.
+Writable mounts that overlap protected Git paths are rejected. This boundary
+protects Git policy files, not repository programs referenced by that policy.
+Configured content filters and merge drivers may execute programs from the
+writable worktree during host Git operations.
 
 Docker and Podman use nested bind mounts. Apple Container uses nested mounts
 with `--read-only-path`. Workmux checks for that capability before startup, so

@@ -9,10 +9,7 @@ const CONFIG_OVERRIDES: &[(&str, &str)] = &[
     ("core.pager", "cat"),
     ("core.editor", "true"),
     ("core.askPass", ""),
-    ("core.sshCommand", "ssh"),
-    ("core.gitProxy", "none"),
     ("sequence.editor", "true"),
-    ("credential.helper", ""),
     ("credential.interactive", "false"),
     ("commit.gpgSign", "false"),
     ("tag.gpgSign", "false"),
@@ -228,73 +225,6 @@ impl RepositoryIdentity {
     }
 }
 
-fn add_repository_config_overrides(
-    command: &mut Command,
-    identity: &RepositoryIdentity,
-) -> Result<()> {
-    let mut inspect = Command::new("git");
-    clear_ambient_git_env(&mut inspect);
-    inspect
-        .current_dir(&identity.worktree)
-        .env("GIT_DIR", &identity.admin_dir)
-        .env("GIT_COMMON_DIR", &identity.common_dir);
-    if !identity.is_bare {
-        inspect.env("GIT_WORK_TREE", &identity.worktree);
-    }
-    let output = inspect
-        .args(["--no-pager", "config", "--null", "--list"])
-        .output()
-        .context("Failed to inspect repository Git policy")?;
-    if !output.status.success() {
-        bail!("Failed to inspect repository Git policy");
-    }
-
-    let mut overrides = std::collections::BTreeSet::new();
-    for entry in output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-    {
-        let Some(separator) = entry.iter().position(|byte| *byte == b'\n') else {
-            continue;
-        };
-        let key = String::from_utf8_lossy(&entry[..separator]).to_ascii_lowercase();
-        let executable = (key.starts_with("filter.")
-            && (key.ends_with(".clean") || key.ends_with(".smudge") || key.ends_with(".process")))
-            || (key.starts_with("diff.")
-                && (key.ends_with(".command") || key.ends_with(".textconv")))
-            || (key.starts_with("difftool.") && key.ends_with(".cmd"))
-            || (key.starts_with("merge.") && key.ends_with(".driver"))
-            || (key.starts_with("mergetool.") && key.ends_with(".cmd"))
-            || (key.starts_with("submodule.") && key.ends_with(".update"));
-        if executable {
-            overrides.insert(key);
-        }
-    }
-
-    for key in overrides {
-        let value = if key.starts_with("merge.")
-            || key.starts_with("mergetool.")
-            || key.starts_with("submodule.")
-            || key.ends_with(".process")
-        {
-            "false"
-        } else if key.ends_with(".command") || key.ends_with(".cmd") {
-            "true"
-        } else {
-            "cat"
-        };
-        command.args(["-c", &format!("{key}={value}")]);
-        if let Some(driver) = key
-            .strip_prefix("filter.")
-            .and_then(|rest| rest.rsplit_once('.').map(|(driver, _)| driver))
-        {
-            command.args(["-c", &format!("filter.{driver}.required=false")]);
-        }
-    }
-    Ok(())
-}
-
 fn protected_git(workdir: Option<&Path>, interactive: bool) -> Result<Command> {
     let mut command = Command::new("git");
     clear_ambient_git_env(&mut command);
@@ -318,7 +248,6 @@ fn protected_git(workdir: Option<&Path>, interactive: bool) -> Result<Command> {
         command.current_dir(path);
         match RepositoryIdentity::discover(path) {
             Ok(identity) => {
-                add_repository_config_overrides(&mut command, &identity)?;
                 command
                     .env("GIT_DIR", &identity.admin_dir)
                     .env("GIT_COMMON_DIR", &identity.common_dir);
@@ -340,17 +269,17 @@ fn protected_git(workdir: Option<&Path>, interactive: bool) -> Result<Command> {
     Ok(command)
 }
 
-/// Construct a Git process with non-interactive behavior and repository executable policy disabled.
+/// Construct a non-interactive Git process with hooks, prompts, and ambient overrides disabled.
 pub fn unattended_git(workdir: Option<&Path>) -> Result<Command> {
     protected_git(workdir, false)
 }
 
-/// Construct an interactive Git process with repository executable policy disabled.
+/// Construct an interactive Git process with hooks and ambient overrides disabled.
 pub fn interactive_git(workdir: &Path) -> Result<Command> {
     protected_git(Some(workdir), true)
 }
 
-/// Construct a Git process that requires a validated and pinned repository identity.
+/// Construct a non-interactive Git process with a validated and pinned repository identity.
 pub fn pinned_git(workdir: &Path) -> Result<Command> {
     RepositoryIdentity::discover(workdir)?;
     protected_git(Some(workdir), false)
@@ -499,7 +428,7 @@ mod tests {
                         || production.contains("std::process::Command::new(\"git\")")
                     {
                         let is_constructor = path.ends_with("git/security.rs")
-                            && production.matches("Command::new(\"git\")").count() == 2;
+                            && production.matches("Command::new(\"git\")").count() == 1;
                         let is_test_support = path.ends_with("test_support.rs");
                         if !is_constructor && !is_test_support {
                             violations.push(path.display().to_string());
@@ -597,9 +526,6 @@ mod tests {
         for expected in [
             "core.fsmonitor=false",
             "core.hooksPath=/dev/null",
-            "core.sshCommand=ssh",
-            "core.gitProxy=none",
-            "credential.helper=",
             "gpg.program=false",
             "interactive.diffFilter=",
             "protocol.allow=never",
@@ -665,52 +591,94 @@ mod tests {
         assert!(!marker.exists());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn protected_diff_does_not_run_configured_drivers() {
+    fn protected_worktree_add_runs_configured_content_filter() {
+        use std::os::unix::fs::PermissionsExt;
+
         let (temp, worktree) = linked_repo();
-        let marker = temp.path().join("diff-marker");
-        let driver = worktree.join("diff-driver.sh");
+        let marker = temp.path().join("filter-marker");
+        let filter = temp.path().join("smudge-filter.sh");
         std::fs::write(
-            &driver,
-            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            &filter,
+            format!("#!/bin/sh\ncat\ntouch '{}'\n", marker.display()),
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&driver).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&driver, permissions).unwrap();
-        }
-        std::fs::write(worktree.join(".gitattributes"), "tracked diff=hostdriver\n").unwrap();
-        std::fs::write(worktree.join("tracked"), "changed\n").unwrap();
-        let common = RepositoryIdentity::discover(&worktree).unwrap().common_dir;
+        let mut permissions = std::fs::metadata(&filter).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&filter, permissions).unwrap();
+
         Command::new("git")
             .args([
                 "config",
-                "--file",
-                common.join("config").to_string_lossy().as_ref(),
-                "diff.hostdriver.command",
-                driver.to_string_lossy().as_ref(),
+                "filter.workmux-test.smudge",
+                filter.to_string_lossy().as_ref(),
             ])
+            .current_dir(&worktree)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "filter.workmux-test.clean", "cat"])
+            .current_dir(&worktree)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "filter.workmux-test.required", "true"])
+            .current_dir(&worktree)
+            .status()
+            .unwrap();
+        std::fs::write(
+            worktree.join(".gitattributes"),
+            "filtered filter=workmux-test\n",
+        )
+        .unwrap();
+        std::fs::write(worktree.join("filtered"), "filtered content\n").unwrap();
+        Command::new("git")
+            .args(["add", ".gitattributes", "filtered"])
+            .current_dir(&worktree)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "add filtered content"])
+            .current_dir(&worktree)
             .status()
             .unwrap();
 
-        assert!(!marker.exists());
-        let mut command = pinned_git(&worktree).unwrap();
+        let destination = temp.path().join("filtered-worktree");
+        let output = pinned_git(&worktree)
+            .unwrap()
+            .args(["worktree", "add", "-qb", "filtered-topic"])
+            .arg(&destination)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(marker.exists());
+        assert_eq!(
+            std::fs::read_to_string(destination.join("filtered")).unwrap(),
+            "filtered content\n"
+        );
+    }
+
+    #[test]
+    fn protected_git_honors_credential_and_transport_configuration() {
+        let (_temp, worktree) = linked_repo();
+        let command = pinned_git(&worktree).unwrap();
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(
-            arguments
-                .iter()
-                .any(|argument| argument == "diff.hostdriver.command=true"),
-            "{arguments:?}"
-        );
-        let status = command.arg("diff").stdout(Stdio::null()).status().unwrap();
-        assert!(status.success());
-        assert!(!marker.exists());
+        for blocked in [
+            "credential.helper=",
+            "core.sshCommand=ssh",
+            "core.gitProxy=none",
+        ] {
+            assert!(!arguments.iter().any(|argument| argument == blocked));
+        }
     }
 
     #[test]

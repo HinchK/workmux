@@ -29,6 +29,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
   terminal units or percentages.
 - Raise the deny-mode network proxy connection limit, make it configurable,
   and return an HTTP 503 response when the proxy reaches capacity.
+- Honor Git content filters, merge drivers, credential helpers, and transport
+  configuration during host Git operations, restoring `workmux add` for
+  repositories that use Git LFS. Container sandbox backends keep shared Git
+  configuration and hooks read-only while repository content remains writable.
+  ([#256](https://github.com/raine/workmux/issues/256))
 
 ## v0.1.246 (2026-08-24)
 

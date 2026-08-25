@@ -19,13 +19,19 @@ Status indicators, the dashboard, [spawning agents](/guide/workflows/#from-an-on
 
 ## Security model
 
-:::caution[Threat model]
-The sandbox limits an agent's access to host files, credentials, and processes.
-It does not make repository content trusted: host-side hooks and pane commands
-from `.workmux.yaml`, explicitly proxied host commands, and repository code you
-later run on the host are outside its boundary. Lima also exposes writable Git
-metadata. Choose the backend, mounts, and agent permissions according to your
-threat model.
+:::danger[Threat model]
+The sandbox limits an agent's access to host files, credentials, and processes,
+but the agent can edit the Git repository. Those edits are inherently untrusted
+and may run as your host user when you later build, test, or otherwise use the
+repository. Workmux host Git operations can also run configured content filters
+and merge drivers from the writable worktree.
+
+Host-side hooks and pane commands from `.workmux.yaml` and explicitly proxied
+host commands are also outside the sandbox boundary. Lima exposes writable Git
+metadata.
+
+**Do not use workmux sandbox if your threat model requires sandboxed agents to
+have no influence over code that runs on the host.**
 :::
 
 When sandbox is enabled, agents have access to:
@@ -36,7 +42,10 @@ When sandbox is enabled, agents have access to:
 
 Container backends keep repository config and shared hooks read-only. Existing
 hooks can run inside the container, while hook setup stays in a regular host
-pane. See [Git hooks](/guide/sandbox/container/#git-hooks) for details.
+pane. Git operations on the host honor configured content filters, merge
+drivers, and credential helpers. Programs stored in the writable worktree remain
+repository content and may change during a sandbox session. See [Git
+hooks](/guide/sandbox/container/#git-hooks) for details.
 
 The Lima backend uses broad writable project mounts and requires explicit
 acceptance of its [reduced Git metadata isolation](/guide/sandbox/lima/#git-metadata-boundary).
