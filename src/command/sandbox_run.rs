@@ -354,7 +354,8 @@ fn run_container(
     let network_deny = config.sandbox.network_policy_is_deny();
     let proxy = if network_deny {
         let allowed = config.sandbox.network.allowed_domain_rules();
-        let proxy = NetworkProxy::bind(&allowed)?;
+        let max_connections = config.sandbox.network.max_connections();
+        let proxy = NetworkProxy::bind(&allowed, max_connections)?;
         let proxy_port = proxy.port();
         let proxy_token = proxy.token().to_string();
         let handle = proxy.spawn();

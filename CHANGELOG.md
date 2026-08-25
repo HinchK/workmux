@@ -25,6 +25,8 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 - Allow `workmux sidebar` to set its width or height when toggling it, using
   terminal units or percentages.
+- Raise the deny-mode network proxy connection limit, make it configurable,
+  and return an HTTP 503 response when the proxy reaches capacity.
 
 ## v0.1.246 (2026-08-24)
 

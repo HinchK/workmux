@@ -1781,6 +1781,9 @@ pub struct AllowedDomainRule {
     pub allow_private_ips: bool,
 }
 
+pub const DEFAULT_NETWORK_MAX_CONNECTIONS: usize = 128;
+pub const MAX_NETWORK_MAX_CONNECTIONS: usize = 1024;
+
 /// Network restriction configuration for the container sandbox.
 ///
 /// When `policy` is `deny`, all outbound connections are blocked except those
@@ -1799,6 +1802,10 @@ pub struct NetworkConfig {
     /// The host RPC endpoint is always allowed regardless of this list.
     #[serde(default)]
     pub allowed_domains: Option<Vec<AllowedDomainEntry>>,
+
+    /// Maximum number of concurrent CONNECT proxy connections.
+    #[serde(default)]
+    pub max_connections: Option<usize>,
 }
 
 impl NetworkConfig {
@@ -1810,6 +1817,12 @@ impl NetworkConfig {
     /// Get the allowed domains list (empty if not set).
     pub fn allowed_domains(&self) -> &[AllowedDomainEntry] {
         self.allowed_domains.as_deref().unwrap_or(&[])
+    }
+
+    /// Get the maximum number of concurrent proxy connections.
+    pub fn max_connections(&self) -> usize {
+        self.max_connections
+            .unwrap_or(DEFAULT_NETWORK_MAX_CONNECTIONS)
     }
 
     /// Get normalized allowed domain rules.
@@ -1825,6 +1838,15 @@ impl NetworkConfig {
 
     /// Validate all domain entries. Called at config load time.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(max_connections) = self.max_connections
+            && !(1..=MAX_NETWORK_MAX_CONNECTIONS).contains(&max_connections)
+        {
+            anyhow::bail!(
+                "network.max_connections must be between 1 and {}",
+                MAX_NETWORK_MAX_CONNECTIONS
+            );
+        }
+
         for entry in self.allowed_domains() {
             let host = entry.host();
             validate_domain(host)?;
@@ -2877,6 +2899,7 @@ impl Config {
             network: {
                 if project.sandbox.network.policy.is_some()
                     || project.sandbox.network.allowed_domains.is_some()
+                    || project.sandbox.network.max_connections.is_some()
                 {
                     tracing::warn!(
                         "network in project config (.workmux.yaml) is ignored -- \
@@ -3639,6 +3662,7 @@ mod tests {
                             .collect(),
                     )
                 },
+                ..Default::default()
             };
         })
     }
@@ -4982,13 +5006,44 @@ container:
     }
 
     #[test]
+    fn network_max_connections_has_bounded_default() {
+        let config = NetworkConfig::default();
+        assert_eq!(
+            config.max_connections(),
+            super::DEFAULT_NETWORK_MAX_CONNECTIONS
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn network_max_connections_validation() {
+        for max_connections in [0, super::MAX_NETWORK_MAX_CONNECTIONS + 1] {
+            let config = NetworkConfig {
+                max_connections: Some(max_connections),
+                ..Default::default()
+            };
+            assert!(config.validate().is_err());
+        }
+
+        let config = NetworkConfig {
+            max_connections: Some(64),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        assert_eq!(config.max_connections(), 64);
+    }
+
+    #[test]
     fn network_config_global_only() {
-        let global = sandbox_network(NetworkPolicy::Deny, &["api.anthropic.com"]);
-        let project = sandbox_network(NetworkPolicy::Allow, &["evil.com"]);
+        let mut global = sandbox_network(NetworkPolicy::Deny, &["api.anthropic.com"]);
+        global.sandbox.network.max_connections = Some(64);
+        let mut project = sandbox_network(NetworkPolicy::Allow, &["evil.com"]);
+        project.sandbox.network.max_connections = Some(32);
 
         let merged = global.merge(project);
         // Global value should win
         assert_eq!(merged.sandbox.network.policy(), NetworkPolicy::Deny);
+        assert_eq!(merged.sandbox.network.max_connections(), 64);
         assert_eq!(
             merged.sandbox.network.allowed_domains(),
             &[AllowedDomainEntry::Plain("api.anthropic.com".to_string())]
@@ -5057,6 +5112,7 @@ container:
                 AllowedDomainEntry::Plain("good.com".to_string()),
                 AllowedDomainEntry::Plain("192.168.1.1".to_string()),
             ]),
+            ..Default::default()
         };
         assert!(config.validate().is_err());
     }
@@ -5070,6 +5126,7 @@ container:
                 AllowedDomainEntry::Plain("*.github.com".to_string()),
                 AllowedDomainEntry::Plain("registry.npmjs.org".to_string()),
             ]),
+            ..Default::default()
         };
         assert!(config.validate().is_ok());
     }
@@ -5082,10 +5139,12 @@ network:
   allowed_domains:
     - api.anthropic.com
     - "*.github.com"
+  max_connections: 64
 "#;
         let config: SandboxConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.network.policy(), NetworkPolicy::Deny);
         assert_eq!(config.network.allowed_domains().len(), 2);
+        assert_eq!(config.network.max_connections(), 64);
         assert_eq!(
             config.network.allowed_domain_rules(),
             vec![
@@ -5140,6 +5199,7 @@ network:
                 host: "*.example.com".to_string(),
                 allow_private_ips: true,
             })]),
+            ..Default::default()
         };
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("allow_private_ips"));
@@ -5157,6 +5217,7 @@ network:
                             allow_private_ips: true,
                         },
                     )]),
+                    ..Default::default()
                 },
                 ..Default::default()
             },

@@ -60,6 +60,7 @@ workmux sandbox pull
 | `agent_config_dir`        | per-agent default                       | Custom host directory for agent config. Supports `{agent}` placeholder. Overrides default mounts (e.g. `~/.claude/`). Auto-created if missing. **Global config only.**                                                                                                                                |
 | `network.policy`          | `allow`                                 | Network restriction policy: `allow` (no restrictions) or `deny` (block all except allowed domains). See [network restrictions](#network-restrictions). **Global config only.**                                                                                                                        |
 | `network.allowed_domains` | `[]`                                    | Allowed outbound HTTPS domains when policy is `deny`. Supports exact matches, `*.` wildcard prefixes, and exact-host private destination opt-in. **Global config only.**                                                                                                                              |
+| `network.max_connections` | `128`                                   | Maximum concurrent HTTPS proxy connections in deny mode. Must be between 1 and 1024. **Global config only.**                                                                                                                                                                                         |
 
 ### Example configurations
 
@@ -332,6 +333,8 @@ sandbox:
 ```
 
 `network` is a global-only setting. If set in a project's `.workmux.yaml`, it is ignored and a warning is logged. This ensures that project config cannot weaken network restrictions set by the user.
+
+The proxy accepts up to 128 concurrent HTTPS connections by default. Set `max_connections` under `network` to adjust the limit for workloads with different connection-pool requirements. A connection that exceeds the limit receives an HTTP 503 response.
 
 Domain entries support exact matches (`github.com`) and wildcard prefixes (`*.github.com`). Wildcards match subdomains only, not the base domain itself (e.g., `*.github.com` matches `api.github.com` but not `github.com`).
 
