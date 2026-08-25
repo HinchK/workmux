@@ -19,6 +19,8 @@ use crate::workflow;
 struct StatusEntry {
     worktree: String,
     branch: String,
+    project: Option<String>,
+    project_path: Option<PathBuf>,
     status: String,
     elapsed_secs: Option<u64>,
     title: Option<String>,
@@ -41,6 +43,7 @@ struct StatusContext {
 #[derive(Serialize)]
 struct StatusScope {
     repository: Option<PathBuf>,
+    all: bool,
     targets: Vec<String>,
 }
 
@@ -146,6 +149,16 @@ fn normalized_branch(branch: String) -> String {
     }
 }
 
+fn project_identity(worktree: &std::path::Path) -> (Option<String>, Option<PathBuf>) {
+    let Ok(root) = git::get_main_worktree_root_in(Some(worktree)) else {
+        return (None, None);
+    };
+    let project = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    (project, Some(root))
+}
+
 fn status_entry(
     agent: &AgentPane,
     worktree: String,
@@ -153,9 +166,12 @@ fn status_entry(
     now: u64,
     git: Option<GitInfo>,
 ) -> StatusEntry {
+    let (project, project_path) = project_identity(&agent.path);
     StatusEntry {
         worktree,
         branch,
+        project,
+        project_path,
         status: status_label(agent.status),
         elapsed_secs: agent.status_ts.map(|ts| now.saturating_sub(ts)),
         title: agent.pane_title.clone(),
@@ -187,7 +203,7 @@ fn compute_git_info(wt_path: &std::path::Path, branch: &str) -> Result<GitInfo> 
     })
 }
 
-pub fn run(worktrees: &[String], json: bool, show_git: bool) -> Result<()> {
+pub fn run(worktrees: &[String], json: bool, all: bool, show_git: bool) -> Result<()> {
     let mux = create_backend(detect_backend_strict()?);
     let store = StateStore::open_read_only()?;
     let mut report = store.load_reconciled_agent_report(mux.as_ref())?;
@@ -214,7 +230,7 @@ pub fn run(worktrees: &[String], json: bool, show_git: bool) -> Result<()> {
     let repository;
 
     if worktrees.is_empty() {
-        if git::get_repo_root_if_present()?.is_some() {
+        if !all && git::get_repo_root_if_present()?.is_some() {
             let all_worktrees = git::list_worktrees()?;
             repository = Some(git::get_main_worktree_root()?);
             let has_scoped_agents = all_worktrees.iter().any(|(wt_path, _)| {
@@ -340,6 +356,7 @@ pub fn run(worktrees: &[String], json: bool, show_git: bool) -> Result<()> {
             },
             scope: StatusScope {
                 repository,
+                all,
                 targets: worktrees.to_vec(),
             },
             state_files_total: report.state_files_total,

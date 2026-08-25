@@ -3,7 +3,7 @@ title: "list"
 description: List all git worktrees with their agent, window, and merge status
 ---
 
-Lists all git worktrees with their agent status, multiplexer window status, and merge status. Alias: `ls`
+Lists git worktrees with their agent status, multiplexer window status, and merge status. Alias: `ls`
 
 ```bash
 workmux list [options] [worktree-or-branch...]
@@ -19,8 +19,9 @@ workmux list [options] [worktree-or-branch...]
 
 | Flag     | Description                                                                                                                                                                                                                                          |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--all`  | Include worktrees from every repository represented by a tracked agent in the current multiplexer instance. Repositories without tracked agents cannot be discovered.                                                                                |
 | `--pr`   | Show GitHub PR status for each worktree. Requires the `gh` CLI to be installed and authenticated. Note that it shows pull requests' statuses with [Nerd Font](https://www.nerdfonts.com/) icons, which requires Nerd Font compatible font installed. |
-| `--json` | Output as JSON. Produces a JSON array of objects with fields: `handle`, `branch`, `path`, `is_main`, `mode`, `has_uncommitted_changes`, `is_open`, `created_at`.                                                                                     |
+| `--json` | Output as JSON. Produces a JSON array with `project`, `project_path`, `handle`, `branch`, `path`, `is_main`, `mode`, `has_uncommitted_changes`, `is_open`, `agent_statuses`, and `created_at`.                                                       |
 
 ## Examples
 
@@ -31,8 +32,8 @@ workmux list
 # List with PR status
 workmux list --pr
 
-# Output as JSON for scripting
-workmux list --json
+# Output tracked projects as one JSON response
+workmux list --all --json
 
 # Filter to a specific worktree
 workmux list my-feature

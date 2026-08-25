@@ -489,6 +489,10 @@ enum Commands {
         #[arg(long)]
         json: bool,
 
+        /// List worktrees across repositories with tracked agents
+        #[arg(long)]
+        all: bool,
+
         /// Filter by worktree name or branch (supports multiple)
         #[arg(value_parser = WorktreeBranchParser::new())]
         filter: Vec<String>,
@@ -536,6 +540,10 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Report tracked agents across all repositories
+        #[arg(long, conflicts_with = "worktrees")]
+        all: bool,
 
         /// Include git info (staged/unstaged changes, unmerged commits)
         #[arg(long)]
@@ -1041,7 +1049,12 @@ pub fn run() -> Result<()> {
             keep_branch,
         } => command::remove::run(names, gone, all, force, keep_branch),
         Commands::Rename { names, branch } => command::rename::run(names, branch),
-        Commands::List { pr, json, filter } => command::list::run(pr, json, &filter),
+        Commands::List {
+            pr,
+            json,
+            all,
+            filter,
+        } => command::list::run(pr, json, all, &filter),
         Commands::Path { name } => command::path::run(&name),
         Commands::Send { name, text, file } => {
             command::send::run(&name, text.as_deref(), file.as_deref())
@@ -1050,8 +1063,9 @@ pub fn run() -> Result<()> {
         Commands::Status {
             worktrees,
             json,
+            all,
             git,
-        } => command::status::run(&worktrees, json, git),
+        } => command::status::run(&worktrees, json, all, git),
         Commands::Wait {
             worktrees,
             status,

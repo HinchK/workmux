@@ -504,17 +504,17 @@ struct PrBatchItem {
     status_check_rollup: Vec<CheckRollupItem>,
 }
 
-/// Fetch all PRs for the current repository.
-pub fn list_prs() -> Result<HashMap<String, PrSummary>> {
+/// Fetch all PRs for the repository containing `repo_root`.
+pub fn list_prs_in(repo_root: Option<&Path>) -> Result<HashMap<String, PrSummary>> {
     let args = ["pr", "list", "--state", "all", "--limit", "200"];
-    let output = run_pr_list(None, &args, PR_LIST_FIELDS_WITH_CHECKS);
+    let output = run_pr_list(repo_root, &args, PR_LIST_FIELDS_WITH_CHECKS);
 
     let output = match output {
         Ok(out) if out.status.success() => out,
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             debug!(stderr = %stderr, "github:pr list batch with checks failed, retrying without checks");
-            match run_pr_list(None, &args, PR_LIST_FIELDS) {
+            match run_pr_list(repo_root, &args, PR_LIST_FIELDS) {
                 Ok(retry) => retry,
                 Err(e) => return Err(e).context("Failed to execute gh command"),
             }

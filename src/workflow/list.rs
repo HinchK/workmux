@@ -115,7 +115,7 @@ pub fn list_in(
     // Batch fetch all PRs if requested (single API call)
     let pr_map = if fetch_pr_status {
         spinner::with_spinner("Fetching PR status", || {
-            Ok(github::list_prs().unwrap_or_default())
+            Ok(github::list_prs_in(repo).unwrap_or_default())
         })?
     } else {
         std::collections::HashMap::new()

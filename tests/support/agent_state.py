@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..conftest import (
     MuxEnvironment,
+    TmuxEnvironment,
     get_window_name,
     get_worktree_path,
     make_env_script,
@@ -106,3 +107,36 @@ def start_active_agent(
         window=window_name,
         worktree=get_worktree_path(repo_path, branch),
     )
+
+
+def stabilize_tmux_agent(env: TmuxEnvironment, agent: ActiveAgent) -> None:
+    """Keep a synthetic tracked agent live across subsequent test commands."""
+    env.send_keys(agent.window, "exec sleep 30")
+    assert poll_until(
+        lambda: "sleep"
+        in env.tmux(
+            ["list-panes", "-t", agent.window, "-F", "#{pane_current_command}"]
+        ).stdout.splitlines(),
+        timeout=5.0,
+    )
+    pane_id, command, pane_pid = (
+        env.tmux(
+            [
+                "list-panes",
+                "-t",
+                agent.window,
+                "-F",
+                "#{pane_id}|#{pane_current_command}|#{pane_pid}",
+            ]
+        )
+        .stdout.strip()
+        .split("|", 2)
+    )
+    for state_file in list_agent_state_files(env):
+        state = read_agent_state(state_file)
+        if state["pane_key"]["pane_id"] == pane_id:
+            state["command"] = command
+            state["pane_pid"] = int(pane_pid)
+            state_file.write_text(json.dumps(state))
+            return
+    raise AssertionError(f"No state file found for pane {pane_id}")

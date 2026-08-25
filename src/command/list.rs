@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::config::MuxMode;
@@ -16,6 +18,7 @@ use tabled::{
 };
 
 struct WorktreeRow {
+    project: String,
     branch: String,
     age: String,
     pr_status: String,
@@ -26,10 +29,11 @@ struct WorktreeRow {
 }
 
 impl Tabled for WorktreeRow {
-    const LENGTH: usize = 7;
+    const LENGTH: usize = 8;
 
     fn fields(&self) -> Vec<Cow<'_, str>> {
         vec![
+            Cow::Borrowed(&self.project),
             Cow::Borrowed(&self.branch),
             Cow::Borrowed(&self.age),
             Cow::Borrowed(&self.pr_status),
@@ -42,6 +46,7 @@ impl Tabled for WorktreeRow {
 
     fn headers() -> Vec<Cow<'static, str>> {
         vec![
+            Cow::Borrowed("PROJECT"),
             Cow::Borrowed("BRANCH"),
             Cow::Borrowed("AGE"),
             Cow::Borrowed("PR"),
@@ -137,6 +142,8 @@ fn format_agent_status(
 
 #[derive(Serialize)]
 struct JsonWorktree {
+    project: String,
+    project_path: String,
     handle: String,
     branch: String,
     path: String,
@@ -144,14 +151,72 @@ struct JsonWorktree {
     mode: String,
     has_uncommitted_changes: bool,
     is_open: bool,
+    agent_statuses: Vec<AgentStatus>,
     created_at: Option<u64>,
 }
 
-pub fn run(show_pr: bool, json: bool, filter: &[String]) -> Result<()> {
-    let config = config::Config::load(None)?;
+struct ProjectWorktree {
+    project: String,
+    project_path: PathBuf,
+    worktree: workflow::types::WorktreeInfo,
+}
+
+fn project_name(root: &Path) -> String {
+    root.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.to_string_lossy().into_owned())
+}
+
+fn discover_project_roots(mux: &dyn crate::multiplexer::Multiplexer) -> Result<Vec<PathBuf>> {
+    let agents = crate::state::StateStore::new()?.load_reconciled_agents(mux)?;
+    let roots: BTreeSet<PathBuf> = agents
+        .iter()
+        .filter_map(|agent| git::get_main_worktree_root_in(Some(&agent.path)).ok())
+        .map(|root| crate::util::canon_or_self(&root))
+        .collect();
+    Ok(roots.into_iter().collect())
+}
+
+fn list_project(
+    root: &Path,
+    mux: &dyn crate::multiplexer::Multiplexer,
+    show_pr: bool,
+    filter: &[String],
+) -> Result<Vec<ProjectWorktree>> {
+    let (config, _) = config::Config::load_with_location_from(root, None)?;
+    let project = project_name(root);
+    let worktrees = workflow::list_in(&config, mux, show_pr, filter, Some(root))?;
+    Ok(worktrees
+        .into_iter()
+        .map(|worktree| ProjectWorktree {
+            project: project.clone(),
+            project_path: root.to_path_buf(),
+            worktree,
+        })
+        .collect())
+}
+
+pub fn run(show_pr: bool, json: bool, all: bool, filter: &[String]) -> Result<()> {
+    let display_config = config::Config::load(None)?;
     let mux = create_backend(detect_backend());
-    // Skip PR fetch when outputting JSON since it's not included in the JSON schema
-    let worktrees = workflow::list(&config, mux.as_ref(), show_pr && !json, filter)?;
+    let mut worktrees = Vec::new();
+    if all {
+        for root in discover_project_roots(mux.as_ref())? {
+            worktrees.extend(list_project(&root, mux.as_ref(), show_pr && !json, filter)?);
+        }
+    } else {
+        let root = git::get_main_worktree_root()?;
+        let project = project_name(&root);
+        worktrees.extend(
+            workflow::list(&display_config, mux.as_ref(), show_pr && !json, filter)?
+                .into_iter()
+                .map(|worktree| ProjectWorktree {
+                    project: project.clone(),
+                    project_path: root.clone(),
+                    worktree,
+                }),
+        );
+    }
 
     if worktrees.is_empty() {
         if json {
@@ -165,18 +230,27 @@ pub fn run(show_pr: bool, json: bool, filter: &[String]) -> Result<()> {
     if json {
         let entries: Vec<JsonWorktree> = worktrees
             .into_iter()
-            .map(|wt| JsonWorktree {
-                handle: wt.handle,
-                branch: wt.branch,
-                path: wt.path.to_string_lossy().to_string(),
-                is_main: wt.is_main,
-                mode: match wt.mode {
-                    MuxMode::Window => "window".to_string(),
-                    MuxMode::Session => "session".to_string(),
-                },
-                has_uncommitted_changes: git::has_uncommitted_changes(&wt.path).unwrap_or(true),
-                is_open: wt.has_mux_window,
-                created_at: wt.created_at,
+            .map(|entry| {
+                let wt = entry.worktree;
+                JsonWorktree {
+                    project: entry.project,
+                    project_path: entry.project_path.to_string_lossy().into_owned(),
+                    handle: wt.handle,
+                    branch: wt.branch,
+                    path: wt.path.to_string_lossy().to_string(),
+                    is_main: wt.is_main,
+                    mode: match wt.mode {
+                        MuxMode::Window => "window".to_string(),
+                        MuxMode::Session => "session".to_string(),
+                    },
+                    has_uncommitted_changes: git::has_uncommitted_changes(&wt.path).unwrap_or(true),
+                    is_open: wt.has_mux_window,
+                    agent_statuses: wt
+                        .agent_status
+                        .map(|summary| summary.statuses)
+                        .unwrap_or_default(),
+                    created_at: wt.created_at,
+                }
             })
             .collect();
         println!("{}", serde_json::to_string(&entries)?);
@@ -193,7 +267,8 @@ pub fn run(show_pr: bool, json: bool, filter: &[String]) -> Result<()> {
 
     let display_data: Vec<WorktreeRow> = worktrees
         .into_iter()
-        .map(|wt| {
+        .map(|entry| {
+            let wt = entry.worktree;
             let path_str = diff_paths(&wt.path, &current_dir)
                 .map(|p| {
                     let s = p.display().to_string();
@@ -214,10 +289,15 @@ pub fn run(show_pr: bool, json: bool, filter: &[String]) -> Result<()> {
             };
 
             WorktreeRow {
+                project: entry.project,
                 branch: wt.branch,
                 age,
                 pr_status: format_pr_status(wt.pr_info),
-                agent_status: format_agent_status(wt.agent_status.as_ref(), &config, use_icons),
+                agent_status: format_agent_status(
+                    wt.agent_status.as_ref(),
+                    &display_config,
+                    use_icons,
+                ),
                 mux_status: if wt.has_mux_window {
                     "✓".to_string()
                 } else {
@@ -236,9 +316,11 @@ pub fn run(show_pr: bool, json: bool, filter: &[String]) -> Result<()> {
     let mut table = Table::new(display_data);
     table
         .with(Style::blank())
-        .modify(Columns::new(0..7), Padding::new(0, 1, 0, 0));
+        .modify(Columns::new(0..8), Padding::new(0, 1, 0, 0));
 
-    // Hide PR column if --pr flag not used
+    if !all {
+        table.with(Remove::column(ByColumnName::new("PROJECT")));
+    }
     if !show_pr {
         table.with(Remove::column(ByColumnName::new("PR")));
     }

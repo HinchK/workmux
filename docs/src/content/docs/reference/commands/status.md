@@ -7,11 +7,13 @@ Reports tracked agents in the current repository or in explicitly requested
 worktrees.
 
 ```bash
-workmux status [WORKTREE ...] [--json] [--git]
+workmux status [WORKTREE ...] [--all] [--json] [--git]
 ```
 
 ## Options
 
+- `--all`: Include tracked agents across every repository in the current
+  multiplexer instance. This option conflicts with explicit worktree arguments.
 - `--json`: Emit a machine-readable observation object.
 - `--git`: Include staged, unstaged, and unmerged commit information for each
   returned agent.
@@ -28,6 +30,7 @@ Worktree arguments support `project:handle` syntax for cross-project queries.
   },
   "scope": {
     "repository": "/Users/user/code/project",
+    "all": false,
     "targets": []
   },
   "state_files_total": 3,
@@ -69,14 +72,17 @@ directory under the workmux XDG state directory and remove or repair the file
 reported in the warning log.
 
 `scope.repository` is the current repository when it can be resolved. With no
-explicit targets, agents are filtered to that repository. Outside a Git
-repository it is `null`, and a no-target query returns all reconciled agents in
-the selected multiplexer context. `scope.targets` contains the requested
-worktree selectors.
+explicit targets, agents are filtered to that repository. `--all` sets
+`scope.all` to `true`, sets `scope.repository` to `null`, and returns every
+reconciled agent in the selected multiplexer context. Outside a Git repository,
+a no-target query also returns every reconciled agent, with `scope.all` set to
+`false`. `scope.targets` contains the requested worktree selectors.
 
-Each agent contains `worktree`, `branch`, `status`, `elapsed_secs`, `title`,
-`pane_id`, `workdir`, `agent_kind`, `session`, `window_name`, and `updated_ts`.
-With `--git`, it also contains a `git` object.
+Each agent contains `worktree`, `branch`, `project`, `project_path`, `status`,
+`elapsed_secs`, `title`, `pane_id`, `workdir`, `agent_kind`, `session`,
+`window_name`, and `updated_ts`. `project` and `project_path` are `null` when the
+agent's Git repository cannot be resolved. With `--git`, the entry also contains
+a `git` object.
 
 ## Safe automation
 

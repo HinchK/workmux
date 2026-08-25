@@ -19,6 +19,7 @@ from .conftest import (
     poll_until,
     run_workmux_add,
     run_workmux_command,
+    setup_git_repo,
     wait_for_window_ready,
     write_workmux_config,
 )
@@ -26,6 +27,7 @@ from .support.agent_state import (
     build_status_cmd_with_marker,
     get_agents_dir,
     list_agent_state_files,
+    stabilize_tmux_agent,
     start_active_agent,
 )
 
@@ -184,8 +186,52 @@ def test_status_json_outside_repository_reports_all_reconciled_agents(
     parsed = json.loads(result.stdout)
 
     assert parsed["scope"]["repository"] is None
+    assert parsed["scope"]["all"] is False
     assert parsed["reconciled_agent_count"] == 1
     assert len(parsed["agents"]) == 1
+
+
+@pytest.mark.tmux_only
+def test_status_all_json_reports_agents_across_repositories(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """Status --all bypasses the current repository scope."""
+    env = cast(TmuxEnvironment, mux_server)
+    runner_window = env.list_windows()[0]
+    first = start_active_agent(
+        env,
+        workmux_exe_path,
+        mux_repo_path,
+        "feature-status-all-first",
+        status="working",
+    )
+    stabilize_tmux_agent(env, first)
+    env.select_window(runner_window)
+    second_repo = env.tmp_path.parent / "status-all-second-repo"
+    second_repo.mkdir()
+    setup_git_repo(second_repo, env.env)
+    second = start_active_agent(
+        env,
+        workmux_exe_path,
+        second_repo,
+        "feature-status-all-second",
+        status="waiting",
+    )
+    stabilize_tmux_agent(env, second)
+    env.select_window(runner_window)
+
+    result = run_workmux_command(
+        env, workmux_exe_path, mux_repo_path, "status --all --json"
+    )
+    parsed = json.loads(result.stdout)
+
+    by_workdir = {entry["workdir"]: entry for entry in parsed["agents"]}
+    assert set(by_workdir) == {str(first.worktree), str(second.worktree)}
+    assert parsed["scope"] == {"repository": None, "all": True, "targets": []}
+    assert by_workdir[str(first.worktree)]["project"] == mux_repo_path.name
+    assert by_workdir[str(first.worktree)]["project_path"] == str(mux_repo_path)
+    assert by_workdir[str(second.worktree)]["project"] == second_repo.name
+    assert by_workdir[str(second.worktree)]["project_path"] == str(second_repo)
 
 
 def test_status_json_fails_on_invalid_state(

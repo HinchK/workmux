@@ -1333,7 +1333,7 @@ are made.
 
 ### `workmux list` (alias: `ls`)
 
-Lists all git worktrees with their agent status, multiplexer window status, and
+Lists git worktrees with their agent status, multiplexer window status, and
 merge status. Supports filtering by worktree handle or branch name.
 
 #### Arguments
@@ -1347,9 +1347,12 @@ merge status. Supports filtering by worktree handle or branch name.
   installed and authenticated. Note that it shows pull requests' statuses with
   [Nerd Font](https://www.nerdfonts.com/) icons, which requires Nerd Font
   compatible font installed.
+- `--all`: Include worktrees from every repository represented by a tracked
+  agent in the current multiplexer instance. Repositories without tracked agents
+  cannot be discovered.
 - `--json`: Output as JSON. Produces a JSON array of objects with fields:
-  `handle`, `branch`, `path`, `is_main`, `mode`, `has_uncommitted_changes`,
-  `is_open`, `created_at`.
+  `project`, `project_path`, `handle`, `branch`, `path`, `is_main`, `mode`,
+  `has_uncommitted_changes`, `is_open`, `agent_statuses`, `created_at`.
 
 #### Examples
 
@@ -1362,6 +1365,9 @@ workmux list --pr
 
 # Output as JSON for scripting
 workmux list --json
+
+# List tracked projects in one JSON response
+workmux list --all --json
 
 # Filter to specific worktrees
 workmux list my-feature
@@ -1396,9 +1402,12 @@ api-work    1w   -      ✓    -         ~/project__worktrees/api-work
 Queries tracked agents in the current repository or in explicitly requested
 worktrees. Use `project:handle` to target a worktree in another project.
 
+- `--all`: Include tracked agents across every repository in the current
+  multiplexer instance. This option conflicts with explicit worktree targets.
 - `--json`: Emit an observation object containing the selected multiplexer
   context, repository and target scope, state-file counts, the reconciled agent
-  count before scope filtering, and the scoped `agents` array.
+  count before scope filtering, and the scoped `agents` array. Agent entries
+  include `project` and `project_path` when their Git repository can be resolved.
 - `--git`: Include staged, unstaged, and unmerged commit information.
 
 Automation must check the command exit status before interpreting an empty
