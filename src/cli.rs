@@ -4,7 +4,7 @@ use crate::workflow::pr::PrReference;
 use crate::{claude, command, config, git, nerdfont};
 use anyhow::{Context, Result};
 use clap::error::{ContextKind, ContextValue, ErrorKind};
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use std::path::PathBuf;
 
@@ -634,23 +634,14 @@ enum Commands {
     /// Update workmux to the latest version
     Update,
 
-    /// Toggle a live agent status sidebar in tmux
+    /// Control a live agent status sidebar in tmux
     Sidebar {
         /// Scope sidebar to this session, or toggle this session off when global sidebar is active
         #[arg(short = 's', long)]
         session: bool,
 
-        /// Sidebar placement for this toggle
-        #[arg(long, value_enum)]
-        position: Option<SidebarPosition>,
-
-        /// Sidebar width in columns or as a percentage, for example 40 or 15%
-        #[arg(long)]
-        width: Option<SidebarWidth>,
-
-        /// Sidebar height in rows or as a percentage, for example 3 or 10%
-        #[arg(long)]
-        height: Option<SidebarHeight>,
+        #[command(flatten)]
+        appearance: SidebarAppearanceArgs,
 
         #[command(subcommand)]
         action: Option<SidebarAction>,
@@ -795,8 +786,30 @@ enum Commands {
     CheckUpdate,
 }
 
+#[derive(Args, Debug, Default)]
+pub struct SidebarAppearanceArgs {
+    /// Sidebar placement when enabling
+    #[arg(long, value_enum)]
+    position: Option<SidebarPosition>,
+
+    /// Sidebar width in columns or as a percentage, for example 40 or 15%
+    #[arg(long)]
+    width: Option<SidebarWidth>,
+
+    /// Sidebar height in rows or as a percentage, for example 3 or 10%
+    #[arg(long)]
+    height: Option<SidebarHeight>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum SidebarAction {
+    /// Ensure the sidebar is running
+    On {
+        #[command(flatten)]
+        appearance: SidebarAppearanceArgs,
+    },
+    /// Ensure the sidebar is stopped
+    Off,
     /// Switch to the next agent in sidebar order
     Next,
     /// Switch to the previous agent in sidebar order
@@ -1065,11 +1078,35 @@ pub fn run() -> Result<()> {
         Commands::Update => command::update::run(),
         Commands::Sidebar {
             session,
-            position,
-            width,
-            height,
+            appearance,
             action,
         } => match action {
+            Some(SidebarAction::On { appearance }) => {
+                if session {
+                    command::sidebar::on_session(
+                        appearance.position,
+                        appearance.width,
+                        appearance.height,
+                    )
+                } else {
+                    command::sidebar::on(appearance.position, appearance.width, appearance.height)
+                }
+            }
+            Some(SidebarAction::Off) => {
+                if appearance.position.is_some()
+                    || appearance.width.is_some()
+                    || appearance.height.is_some()
+                {
+                    anyhow::bail!(
+                        "--position, --width, and --height only apply when enabling the sidebar"
+                    );
+                }
+                if session {
+                    command::sidebar::off_session()
+                } else {
+                    command::sidebar::off()
+                }
+            }
             Some(SidebarAction::Next) => {
                 command::sidebar::navigate(command::sidebar::NavAction::Next)
             }
@@ -1084,9 +1121,17 @@ pub fn run() -> Result<()> {
             }
             None => {
                 if session {
-                    command::sidebar::toggle_session(position, width, height)
+                    command::sidebar::toggle_session(
+                        appearance.position,
+                        appearance.width,
+                        appearance.height,
+                    )
                 } else {
-                    command::sidebar::toggle(position, width, height)
+                    command::sidebar::toggle(
+                        appearance.position,
+                        appearance.width,
+                        appearance.height,
+                    )
                 }
             }
         },
@@ -1284,9 +1329,9 @@ mod tests {
 
         match cli.command {
             Commands::Sidebar {
-                position, action, ..
+                appearance, action, ..
             } => {
-                assert_eq!(position, Some(SidebarPosition::Top));
+                assert_eq!(appearance.position, Some(SidebarPosition::Top));
                 assert!(action.is_none());
             }
             _ => panic!("expected sidebar command"),
@@ -1299,12 +1344,83 @@ mod tests {
             .unwrap();
 
         match cli.command {
-            Commands::Sidebar { width, height, .. } => {
-                assert_eq!(width, Some(crate::config::SidebarWidth::Absolute(40)));
-                assert_eq!(height, Some(crate::config::SidebarHeight::Percent(10)));
+            Commands::Sidebar { appearance, .. } => {
+                assert_eq!(
+                    appearance.width,
+                    Some(crate::config::SidebarWidth::Absolute(40))
+                );
+                assert_eq!(
+                    appearance.height,
+                    Some(crate::config::SidebarHeight::Percent(10))
+                );
             }
             _ => panic!("expected sidebar command"),
         }
+    }
+
+    #[test]
+    fn sidebar_on_parses_scope_and_appearance() {
+        let cli = Cli::try_parse_from([
+            "workmux",
+            "sidebar",
+            "--session",
+            "on",
+            "--position",
+            "top",
+            "--height",
+            "10%",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sidebar {
+                session: true,
+                action: Some(SidebarAction::On { appearance }),
+                ..
+            } => {
+                assert_eq!(appearance.position, Some(SidebarPosition::Top));
+                assert_eq!(
+                    appearance.height,
+                    Some(crate::config::SidebarHeight::Percent(10))
+                );
+            }
+            _ => panic!("expected session-scoped sidebar on command"),
+        }
+    }
+
+    #[test]
+    fn sidebar_off_parses_global_and_session_scopes() {
+        for args in [
+            vec!["workmux", "sidebar", "off"],
+            vec!["workmux", "sidebar", "--session", "off"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                cli.command,
+                Commands::Sidebar {
+                    action: Some(SidebarAction::Off),
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn sidebar_without_action_still_parses_as_toggle() {
+        let cli = Cli::try_parse_from(["workmux", "sidebar", "--session"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Sidebar {
+                session: true,
+                action: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sidebar_off_rejects_trailing_appearance_flags() {
+        assert!(Cli::try_parse_from(["workmux", "sidebar", "off", "--width", "40"]).is_err());
     }
 
     #[test]

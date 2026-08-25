@@ -1,19 +1,21 @@
 ---
 title: "sidebar"
-description: Toggle a live agent status sidebar in tmux
+description: Control a live agent status sidebar in tmux
 ---
 
-Toggles a live agent status sidebar on the left or top edge of all tmux
-windows. By default, each sidebar pane shows active agents across all tmux
+Controls a live agent status sidebar on the left or top edge of tmux windows. By default, each sidebar pane shows active agents across all tmux
 sessions with live status updates. Use `workmux sidebar filter session` to show
 only agents in the current tmux session.
 
 ```bash
-workmux sidebar                  # Toggle sidebar on/off (all sessions)
-workmux sidebar --session        # Toggle current session only, or opt out of global mode
-workmux sidebar --position top   # Override configured placement for this toggle
-workmux sidebar --width 40       # Set left sidebar width in columns
-workmux sidebar --height 3       # Set top sidebar height in rows
+workmux sidebar                         # Toggle sidebar on/off (all sessions)
+workmux sidebar on                      # Ensure the global sidebar is running
+workmux sidebar off                     # Ensure the global sidebar is stopped
+workmux sidebar --session on            # Ensure it is running in this session
+workmux sidebar --session off           # Ensure it is stopped in this session
+workmux sidebar on --position top       # Enable with a top sidebar
+workmux sidebar on --width 40           # Set left sidebar width in columns
+workmux sidebar on --height 3           # Set top sidebar height in rows
 ```
 
 ## What it shows
@@ -107,10 +109,12 @@ row count for the number of horizontal lines you want to show. The top bar uses 
 horizontal chip layout, so `v` has no effect there. Horizontal templates render
 as many configured lines as the current height allows. `horizontal.item_width`
 controls each chip width and is clamped between 12 and 80 columns. Position
-changes take effect after toggling the sidebar off and on. Use
-`workmux sidebar --position top` or `--position left` to override the configured
-placement for that toggle. Width and height also accept percentages, such as
-`workmux sidebar --width 15%`.
+changes take effect when the sidebar is enabled. Use
+`workmux sidebar on --position top` or `--position left` to override the
+configured placement. Width and height also accept percentages, such as
+`workmux sidebar on --width 15%`. Repeating `on` with appearance options applies
+them without creating duplicate panes. The `off` action rejects position and
+dimension flags because they have no effect while stopping the sidebar.
 
 ## How it works
 
@@ -121,7 +125,9 @@ pane on the configured edge of every existing window. A tmux hook
 automatically.
 
 Running `workmux sidebar` again disables the sidebar globally, killing all
-sidebar panes, the daemon, and removing hooks.
+sidebar panes, the daemon, and removing hooks. `workmux sidebar on` and
+`workmux sidebar off` provide idempotent alternatives for scripts and tmux
+configuration.
 
 ### Session-scoped mode
 
@@ -129,12 +135,13 @@ By default, the sidebar appears in all tmux sessions. Use `--session` to scope
 it to the current session only, leaving other sessions untouched:
 
 ```bash
-workmux sidebar --session  # Enable in current session only
-workmux sidebar --session  # Run again to disable
+workmux sidebar --session on   # Ensure it is enabled in the current session
+workmux sidebar --session off  # Ensure it is disabled in the current session
 ```
 
 You can enable session-scoped sidebars in multiple sessions independently. Each
-session can be toggled on/off without affecting others.
+session can be toggled or explicitly enabled and disabled without affecting
+others.
 
 If the global sidebar is already active, `workmux sidebar --session` hides the
 sidebar in the current tmux session only. Run it again to show the sidebar in

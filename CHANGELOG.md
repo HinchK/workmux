@@ -23,6 +23,8 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## Unreleased
 
+- Add idempotent `workmux sidebar on` and `workmux sidebar off` commands for
+  global and session-scoped sidebar lifecycle control.
 - Allow `workmux sidebar` to set its width or height when toggling it, using
   terminal units or percentages.
 - Raise the deny-mode network proxy connection limit, make it configurable,

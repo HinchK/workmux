@@ -499,26 +499,69 @@ fn apply_cli_dimensions(
     }
 }
 
+fn require_tmux() -> Result<()> {
+    if std::env::var("TMUX").is_err() {
+        return Err(anyhow!("Sidebar requires tmux"));
+    }
+    Ok(())
+}
+
+fn stop_all() {
+    kill_all_sidebars_and_restore_layouts();
+    kill_daemon();
+    remove_hooks();
+    clear_sidebar_globals();
+}
+
+/// Ensure the sidebar is running globally across all tmux windows.
+pub fn on(
+    position: Option<SidebarPosition>,
+    width: Option<SidebarWidth>,
+    height: Option<SidebarHeight>,
+) -> Result<()> {
+    require_tmux()?;
+    let mut config = crate::config::Config::load(None)?;
+    let scope = current_scope();
+    let appearance_changed = position.is_some() || width.is_some() || height.is_some();
+    apply_cli_dimensions(&mut config, width, height);
+    let position = if position.is_none() && matches!(&scope, SidebarScope::Global) {
+        read_sidebar_position(&config)
+    } else {
+        configured_position(&config, position)
+    };
+
+    if matches!(&scope, SidebarScope::Sessions(_)) {
+        stop_all();
+    } else if appearance_changed && matches!(&scope, SidebarScope::Global) {
+        kill_all_sidebars_and_restore_layouts();
+    }
+
+    let _ = std::thread::spawn(crate::tips::mark_sidebar_used);
+    Cmd::new("tmux")
+        .args(&["set-option", "-g", "@workmux_sidebar_enabled", "1"])
+        .run()?;
+    set_sidebar_position(position);
+    set_scope(&SidebarScope::Global);
+    ensure_daemon_running()?;
+    create_sidebars_in_all_windows(&config)?;
+    install_hooks()?;
+    Ok(())
+}
+
+/// Ensure the global sidebar is stopped.
+pub fn off() -> Result<()> {
+    require_tmux()?;
+    stop_all();
+    Ok(())
+}
+
 /// Toggle the sidebar globally across all tmux windows.
 pub fn toggle(
     position: Option<SidebarPosition>,
     width: Option<SidebarWidth>,
     height: Option<SidebarHeight>,
 ) -> Result<()> {
-    let mut config = crate::config::Config::load(None)?;
-    apply_cli_dimensions(&mut config, width, height);
-
-    if std::env::var("TMUX").is_err() {
-        return Err(anyhow!("Sidebar requires tmux"));
-    }
-
-    // If session-scoped sidebars are active, clean them up first
-    if let SidebarScope::Sessions(_) = current_scope() {
-        kill_all_sidebars_and_restore_layouts();
-        kill_daemon();
-        remove_hooks();
-        clear_sidebar_globals();
-    }
+    require_tmux()?;
 
     // Determine intent based on the current window's state
     let current_window = Cmd::new("tmux")
@@ -530,31 +573,87 @@ pub fn toggle(
     let current_has_sidebar = find_sidebar_in_window(&current_window).unwrap_or(false);
 
     if current_has_sidebar {
-        // Current window has sidebar → toggle OFF globally
-        kill_all_sidebars_and_restore_layouts();
-        kill_daemon();
-        remove_hooks();
-        clear_sidebar_globals();
+        off()
+    } else {
+        on(position, width, height)
+    }
+}
+
+/// Ensure the sidebar is running for the current tmux session.
+pub fn on_session(
+    position: Option<SidebarPosition>,
+    width: Option<SidebarWidth>,
+    height: Option<SidebarHeight>,
+) -> Result<()> {
+    require_tmux()?;
+    let mut config = crate::config::Config::load(None)?;
+    let appearance_changed = position.is_some() || width.is_some() || height.is_some();
+    apply_cli_dimensions(&mut config, width, height);
+    let scope = current_scope();
+    let session_id = get_current_session_id()?;
+    let position = if position.is_none() && !matches!(&scope, SidebarScope::Off) {
+        read_sidebar_position(&config)
+    } else {
+        configured_position(&config, position)
+    };
+
+    if matches!(&scope, SidebarScope::Global) {
+        let mut optouts = current_optout_sessions();
+        optouts.remove(&session_id);
+        set_optout_sessions(&optouts);
+        if appearance_changed {
+            kill_sidebars_in_session(&session_id);
+            set_sidebar_position(position);
+        }
+        create_sidebars_in_session(&session_id, &config)?;
+        ensure_daemon_running()?;
+        install_hooks()?;
         return Ok(());
     }
 
-    // Mark sidebar as used so the dashboard tip is dismissed
-    let _ = std::thread::spawn(crate::tips::mark_sidebar_used);
-
-    // Current window missing sidebar → enable/repair globally
+    if appearance_changed {
+        kill_sidebars_in_session(&session_id);
+    }
     Cmd::new("tmux")
         .args(&["set-option", "-g", "@workmux_sidebar_enabled", "1"])
         .run()?;
-    let position = configured_position(&config, position);
     set_sidebar_position(position);
-    set_scope(&SidebarScope::Global);
-
-    // Ensure daemon is running (spawns if needed)
+    let mut ids = match scope {
+        SidebarScope::Sessions(ids) => ids,
+        _ => std::collections::HashSet::new(),
+    };
+    ids.insert(session_id.clone());
+    set_scope(&SidebarScope::Sessions(ids));
+    let _ = std::thread::spawn(crate::tips::mark_sidebar_used);
     ensure_daemon_running()?;
-
-    create_sidebars_in_all_windows(&config)?;
+    create_sidebars_in_session(&session_id, &config)?;
     install_hooks()?;
+    Ok(())
+}
 
+/// Ensure the sidebar is stopped for the current tmux session.
+pub fn off_session() -> Result<()> {
+    require_tmux()?;
+    let scope = current_scope();
+    let session_id = get_current_session_id()?;
+    match scope {
+        SidebarScope::Global => {
+            let mut optouts = current_optout_sessions();
+            optouts.insert(session_id.clone());
+            set_optout_sessions(&optouts);
+            kill_sidebars_in_session(&session_id);
+        }
+        SidebarScope::Sessions(mut ids) => {
+            kill_sidebars_in_session(&session_id);
+            ids.remove(&session_id);
+            if ids.is_empty() {
+                stop_all();
+            } else {
+                set_scope(&SidebarScope::Sessions(ids));
+            }
+        }
+        SidebarScope::Off => {}
+    }
     Ok(())
 }
 
@@ -564,27 +663,17 @@ pub fn toggle_session(
     width: Option<SidebarWidth>,
     height: Option<SidebarHeight>,
 ) -> Result<()> {
-    let mut config = crate::config::Config::load(None)?;
-    apply_cli_dimensions(&mut config, width, height);
-
-    if std::env::var("TMUX").is_err() {
-        return Err(anyhow!("Sidebar requires tmux"));
-    }
+    require_tmux()?;
 
     let scope = current_scope();
     let session_id = get_current_session_id()?;
 
     if matches!(&scope, SidebarScope::Global) {
-        let mut optout_sessions = current_optout_sessions();
-        if optout_sessions.remove(&session_id) {
-            set_optout_sessions(&optout_sessions);
-            create_sidebars_in_session(&session_id, &config)?;
+        return if session_opted_out(&session_id) {
+            on_session(position, width, height)
         } else {
-            optout_sessions.insert(session_id.clone());
-            set_optout_sessions(&optout_sessions);
-            kill_sidebars_in_session(&session_id);
-        }
-        return Ok(());
+            off_session()
+        };
     }
 
     let current_window = Cmd::new("tmux")
@@ -596,52 +685,10 @@ pub fn toggle_session(
     let current_has_sidebar = find_sidebar_in_window(&current_window).unwrap_or(false);
 
     if current_has_sidebar {
-        // Toggle OFF for this session
-        kill_sidebars_in_session(&session_id);
-
-        // Remove this session from the scope set
-        if let SidebarScope::Sessions(mut ids) = scope {
-            ids.remove(&session_id);
-            if ids.is_empty() {
-                // Last session removed: full cleanup
-                kill_daemon();
-                remove_hooks();
-                clear_sidebar_globals();
-            } else {
-                set_scope(&SidebarScope::Sessions(ids));
-            }
-        }
-        return Ok(());
+        off_session()
+    } else {
+        on_session(position, width, height)
     }
-
-    // Toggle ON for this session
-    let _ = std::thread::spawn(crate::tips::mark_sidebar_used);
-
-    Cmd::new("tmux")
-        .args(&["set-option", "-g", "@workmux_sidebar_enabled", "1"])
-        .run()?;
-    let position = configured_position(&config, position);
-    set_sidebar_position(position);
-
-    // Add this session to the scope set
-    let new_scope = match scope {
-        SidebarScope::Sessions(mut ids) => {
-            ids.insert(session_id.clone());
-            SidebarScope::Sessions(ids)
-        }
-        _ => {
-            let mut ids = std::collections::HashSet::new();
-            ids.insert(session_id.clone());
-            SidebarScope::Sessions(ids)
-        }
-    };
-    set_scope(&new_scope);
-
-    ensure_daemon_running()?;
-    create_sidebars_in_session(&session_id, &config)?;
-    install_hooks()?;
-
-    Ok(())
 }
 
 fn get_sidebar_position_and_size(target: &str) -> Result<(SidebarPosition, u16)> {

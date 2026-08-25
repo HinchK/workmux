@@ -1799,9 +1799,12 @@ taking over the full screen like the dashboard. Use `workmux sidebar filter sess
 to show only agents in the current tmux session.
 
 ```bash
-workmux sidebar                 # Toggle sidebar on/off (all sessions)
-workmux sidebar --session       # Toggle current session only, or opt out of global mode
-workmux sidebar --position top  # Override configured placement for this toggle
+workmux sidebar                       # Toggle sidebar on/off (all sessions)
+workmux sidebar on                    # Ensure the global sidebar is running
+workmux sidebar off                   # Ensure the global sidebar is stopped
+workmux sidebar --session on          # Ensure it is running in this session
+workmux sidebar --session off         # Ensure it is stopped in this session
+workmux sidebar on --position top     # Enable with a top sidebar
 ```
 
 The sidebar displays:
@@ -1839,8 +1842,10 @@ The left sidebar defaults to 10% of terminal width, clamped between 25 and 50
 columns. Widths above 80 columns use the default width so tmux pane expansion
 recovers automatically.
 
-Use `workmux sidebar --position top` or `--position left` to override the
-configured placement when enabling the sidebar.
+Use `workmux sidebar on --position top` or `--position left` to override the
+configured placement when enabling the sidebar. The `on` action also accepts
+`--width` and `--height`. The `off` action rejects appearance flags because they
+have no effect while stopping the sidebar.
 
 #### Example tmux binding
 
