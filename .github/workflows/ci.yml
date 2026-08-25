@@ -31,6 +31,7 @@ jobs:
           cargo install checkle just --locked
           python -m venv tests/venv
           tests/venv/bin/pip install -r tests/requirements.txt pyright 'ruff==0.14.4'
+          (cd docs && bun install --frozen-lockfile)
           echo "$PWD/tests/venv/bin" >> "$GITHUB_PATH"
       - name: Run full checks
         run: just check-ci
