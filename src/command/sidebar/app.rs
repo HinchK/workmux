@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use crate::agent_display::{extract_project_name, extract_worktree_name, resolve_labels};
 use crate::cmd::Cmd;
-use crate::config::{AgentIcons, Config, SidebarPosition, SidebarWidth, StatusIcons};
+use crate::config::{
+    AgentIcons, Config, SidebarPosition, SidebarWidth, StatusIcons, ThemeConfig, ThemeMode,
+};
 use crate::git::GitStatus;
 use crate::github::{CheckSummary, PrSummary};
 use ratatui::style::Color;
@@ -220,6 +222,8 @@ pub struct SidebarApp {
     pub quit_silent: bool,
     pub quit_reason: Option<String>,
     pub palette: ThemePalette,
+    /// Terminal background mode detected before the TUI input reader starts.
+    detected_theme_mode: ThemeMode,
     pub status_icons: StatusIcons,
     pub spinner_frame: u8,
     pub stale_threshold_secs: u64,
@@ -291,6 +295,13 @@ pub struct SidebarApp {
     pub filter_mode: SidebarFilterMode,
 }
 
+fn detect_terminal_theme_mode() -> ThemeMode {
+    match terminal_light::luma() {
+        Ok(luma) if luma > 0.6 => ThemeMode::Light,
+        _ => ThemeMode::Dark,
+    }
+}
+
 impl SidebarApp {
     #[cfg(test)]
     pub(crate) fn test_with_template_error(template_error: TemplateError) -> Self {
@@ -303,10 +314,8 @@ impl SidebarApp {
             pending_exit: false,
             quit_silent: false,
             quit_reason: None,
-            palette: ThemePalette::from_config(
-                &Config::default().theme,
-                crate::config::ThemeMode::Dark,
-            ),
+            palette: ThemePalette::from_config(&Config::default().theme, ThemeMode::Dark),
+            detected_theme_mode: ThemeMode::Dark,
             status_icons: StatusIcons::default(),
             spinner_frame: 0,
             stale_threshold_secs: 3600,
@@ -354,13 +363,10 @@ impl SidebarApp {
     pub fn new_client(mux: Arc<dyn Multiplexer>) -> Result<Self> {
         let config = Config::load(None)?;
 
-        let theme_mode = config
-            .theme
-            .mode
-            .unwrap_or_else(|| match terminal_light::luma() {
-                Ok(luma) if luma > 0.6 => crate::config::ThemeMode::Light,
-                _ => crate::config::ThemeMode::Dark,
-            });
+        // Detection must happen before the TUI input reader starts because the
+        // terminal query reads its response from stdin.
+        let detected_theme_mode = detect_terminal_theme_mode();
+        let theme_mode = config.theme.mode.unwrap_or(detected_theme_mode);
         let palette = ThemePalette::from_config(&config.theme, theme_mode);
         let window_prefix = config.window_prefix().to_string();
         let status_icons = config.status_icons.clone();
@@ -390,6 +396,7 @@ impl SidebarApp {
             quit_silent: false,
             quit_reason: None,
             palette,
+            detected_theme_mode,
             status_icons,
             spinner_frame: 0,
             stale_threshold_secs: 60 * 60, // 60 minutes
@@ -528,10 +535,10 @@ impl SidebarApp {
         }
     }
 
-    /// Re-read the merged config from disk and apply live-reloadable fields:
-    /// templates, agent icons, and width. Templates are anchored at the host
-    /// agent's worktree path so per-project `.workmux.yaml` overrides are
-    /// honored. On any parse error, keep the previously valid templates.
+    /// Re-read the merged config from disk and apply live presentation fields.
+    /// Templates are anchored at the host agent's worktree path so per-project
+    /// `.workmux.yaml` overrides are honored. On any parse error, keep the
+    /// previously valid templates.
     fn reload_config_from_disk(&mut self, snapshot: &SidebarSnapshot) {
         let host_path = self
             .host_agent_idx
@@ -566,10 +573,16 @@ impl SidebarApp {
             );
         }
 
+        self.apply_theme_config(&cfg.theme);
         self.agent_icons = ResolvedAgentIcons::from_config(cfg.sidebar.agent_icons.as_ref());
         self.horizontal_item_width = cfg.sidebar.horizontal.item_width();
         self.current_width = cfg.sidebar.width.clone();
         self.dim_stale = cfg.sidebar.dim_stale();
+    }
+
+    fn apply_theme_config(&mut self, theme: &ThemeConfig) {
+        let mode = theme.mode.unwrap_or(self.detected_theme_mode);
+        self.palette = ThemePalette::from_config(theme, mode);
     }
 
     pub(super) fn host_identity(&self) -> Option<&HostIdentity> {
@@ -1238,7 +1251,51 @@ fn parse_host_identity(output: &str) -> Option<HostIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AgentIconConfig, AgentIconDetails};
+    use crate::config::{AgentIconConfig, AgentIconDetails, CustomThemeColors, ThemeScheme};
+
+    #[test]
+    fn theme_reload_uses_detected_mode_after_explicit_mode_is_removed() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.detected_theme_mode = ThemeMode::Light;
+
+        let mut theme = ThemeConfig {
+            scheme: ThemeScheme::Default,
+            mode: Some(ThemeMode::Dark),
+            custom: None,
+        };
+        app.apply_theme_config(&theme);
+        assert_eq!(app.palette.text, Color::Rgb(205, 214, 244));
+
+        theme.mode = None;
+        app.apply_theme_config(&theme);
+        assert_eq!(app.palette.text, Color::Rgb(76, 79, 105));
+    }
+
+    #[test]
+    fn theme_reload_removes_custom_color_overrides() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        let mut theme = ThemeConfig {
+            scheme: ThemeScheme::Default,
+            mode: Some(ThemeMode::Dark),
+            custom: Some(CustomThemeColors {
+                accent: Some("#010203".to_string()),
+                ..Default::default()
+            }),
+        };
+
+        app.apply_theme_config(&theme);
+        assert_eq!(app.palette.accent, Color::Rgb(1, 2, 3));
+
+        theme.custom = None;
+        app.apply_theme_config(&theme);
+        assert_eq!(app.palette.accent, Color::Rgb(203, 166, 247));
+    }
 
     #[test]
     fn parses_complete_host_identity() {
