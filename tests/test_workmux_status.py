@@ -197,7 +197,7 @@ def test_status_all_json_reports_agents_across_repositories(
 ):
     """Status --all bypasses the current repository scope."""
     env = cast(TmuxEnvironment, mux_server)
-    runner_window = env.list_windows()[0]
+    runner_window = env.tmux(["display-message", "-p", "#{window_id}"]).stdout.strip()
     first = start_active_agent(
         env,
         workmux_exe_path,
