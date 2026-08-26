@@ -21,6 +21,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.248 (2026-08-26)
+
+- Set `dashboard.close_on_jump: false` to keep the dashboard open when jumping
+  between agents and worktrees.
+  ([#226](https://github.com/raine/workmux/pull/226))
+
 ## v0.1.247 (2026-08-25)
 
 - Use `workmux status --all` and `workmux list --all` to inspect tracked agents
