@@ -84,6 +84,12 @@ pub struct AgentState {
     /// Unix timestamp when status was last set
     pub status_ts: Option<u64>,
 
+    /// Unix timestamp when the agent entered its sidebar activity state.
+    /// Set by registration, status transitions, and resumption after interruption.
+    /// Drives recency and staleness without assigning a status during registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_ts: Option<u64>,
+
     /// Pane title (set by Claude Code to show session summary)
     pub pane_title: Option<String>,
 
@@ -97,7 +103,7 @@ pub struct AgentState {
 
     /// Unix timestamp of last persisted state update (any RPC call that writes state).
     /// Updated on status changes, title changes, and repeated same-status updates.
-    /// Used for staleness detection, recency sorting, and interruption resume detection.
+    /// Used for process reaping and interruption resume detection.
     pub updated_ts: u64,
 
     /// Window/tab name where this agent is running.
@@ -129,6 +135,13 @@ pub struct AgentState {
 }
 
 impl AgentState {
+    /// Timestamp used for recency ordering and age-based staleness.
+    pub fn activity_ts(&self) -> Option<u64> {
+        self.activity_ts
+            .or(self.status_ts)
+            .or_else(|| self.status.is_none().then_some(self.updated_ts))
+    }
+
     /// Convert to AgentPane for dashboard display.
     ///
     /// The caller is responsible for providing the best available session/window names
@@ -144,6 +157,7 @@ impl AgentState {
             pane_title: self.pane_title.clone(),
             status: self.status,
             status_ts: self.status_ts,
+            activity_ts: self.activity_ts(),
             updated_ts: Some(self.updated_ts),
             window_cmd: None,
             agent_command: Some(self.command.clone()),
@@ -229,6 +243,47 @@ pub struct RuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_state(status: Option<&str>, status_ts: Option<u64>, updated_ts: u64) -> AgentState {
+        serde_json::from_value(serde_json::json!({
+            "pane_key": {
+                "backend": "tmux",
+                "instance": "default",
+                "pane_id": "%1"
+            },
+            "workdir": "/tmp/project",
+            "status": status,
+            "status_ts": status_ts,
+            "pane_title": null,
+            "pane_pid": 123,
+            "command": "node",
+            "updated_ts": updated_ts,
+            "window_name": "wm-test",
+            "session_name": "main",
+            "boot_id": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_status_state_uses_status_time_for_activity() {
+        let state = legacy_state(Some("done"), Some(100), 200);
+        assert_eq!(state.activity_ts, None);
+        assert_eq!(state.activity_ts(), Some(100));
+        assert_eq!(
+            state
+                .to_agent_pane("main".into(), "wm-test".into())
+                .activity_ts,
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn legacy_statusless_registration_uses_update_time_for_activity() {
+        let state = legacy_state(None, None, 200);
+        assert_eq!(state.activity_ts, None);
+        assert_eq!(state.activity_ts(), Some(200));
+    }
 
     #[test]
     fn test_pane_key_to_filename() {

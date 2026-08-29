@@ -1681,7 +1681,7 @@ pub fn run() -> Result<()> {
                 .map(|a| GitWorkerPath {
                     path: a.path.clone(),
                     is_stale: a
-                        .status_ts
+                        .activity_ts()
                         .map(|ts| now_ts.saturating_sub(ts) > stale_threshold)
                         .unwrap_or(false),
                 })
@@ -1828,7 +1828,7 @@ struct TickInput {
 /// A state-file write to apply after computing the tick.
 struct AgentWrite {
     pane_id: String,
-    status_ts: u64,
+    resumed_ts: u64,
 }
 
 /// Output of a single tick computation.
@@ -1844,7 +1844,7 @@ struct TickOutput {
 /// Compute one daemon tick from in-memory inputs.
 ///
 /// 1. Runs inactivity detection
-/// 2. Mutates agents in memory (status_ts reset for resumed agents)
+/// 2. Mutates agents in memory (status and activity timestamps reset for resumed agents)
 /// 3. Builds the snapshot from the already-mutated agents
 /// 4. Returns side effects (state file writes, runtime file write)
 #[allow(clippy::too_many_arguments)]
@@ -1881,9 +1881,10 @@ fn compute_tick(
         for agent in &mut agents {
             if last_interrupted.contains(&agent.pane_id) && !interrupted.contains(&agent.pane_id) {
                 agent.status_ts = Some(now_ts);
+                agent.activity_ts = Some(now_ts);
                 agent_writes.push(AgentWrite {
                     pane_id: agent.pane_id.clone(),
-                    status_ts: now_ts,
+                    resumed_ts: now_ts,
                 });
             }
         }
@@ -1943,7 +1944,8 @@ fn apply_tick_effects(
             pane_id: write.pane_id.clone(),
         };
         if let Ok(Some(mut state)) = store.get_agent(&pane_key) {
-            state.status_ts = Some(write.status_ts);
+            state.status_ts = Some(write.resumed_ts);
+            state.activity_ts = Some(write.resumed_ts);
             let _ = store.upsert_agent(&state);
         }
     }
@@ -1992,6 +1994,7 @@ mod tests {
             pane_title: None,
             status: Some(AgentStatus::Working),
             status_ts: Some(100),
+            activity_ts: Some(100),
             updated_ts: Some(updated_ts),
             window_cmd: None,
             agent_command: None,
@@ -2501,6 +2504,7 @@ mod tests {
                 workdir: PathBuf::from("/tmp"),
                 status: Some(AgentStatus::Working),
                 status_ts: Some(status_ts),
+                activity_ts: Some(status_ts),
                 pane_title: None,
                 pane_pid: 1,
                 command: "node".to_string(),
@@ -2620,17 +2624,17 @@ mod tests {
                 .find(|a| a.pane_id == "%1")
                 .unwrap();
             assert_eq!(agent.status_ts, Some(1012));
+            assert_eq!(agent.activity_ts, Some(1012));
 
             // Side effect says to write it to disk
             assert_eq!(output.agent_writes.len(), 1);
-            assert_eq!(output.agent_writes[0].status_ts, 1012);
+            assert_eq!(output.agent_writes[0].resumed_ts, 1012);
 
             // Apply effects and verify store
             apply_tick_effects(&output, &store, BACKEND, INSTANCE);
-            assert_eq!(
-                store.get_agent(&pane_key("%1")).unwrap().unwrap().status_ts,
-                Some(1012)
-            );
+            let persisted = store.get_agent(&pane_key("%1")).unwrap().unwrap();
+            assert_eq!(persisted.status_ts, Some(1012));
+            assert_eq!(persisted.activity_ts, Some(1012));
         }
 
         #[test]
@@ -2680,14 +2684,12 @@ mod tests {
 
             // Apply and verify
             apply_tick_effects(&output, &store, BACKEND, INSTANCE);
-            assert_eq!(
-                store.get_agent(&pane_key("%1")).unwrap().unwrap().status_ts,
-                Some(1012)
-            );
-            assert_eq!(
-                store.get_agent(&pane_key("%2")).unwrap().unwrap().status_ts,
-                Some(200)
-            );
+            let resumed = store.get_agent(&pane_key("%1")).unwrap().unwrap();
+            assert_eq!(resumed.status_ts, Some(1012));
+            assert_eq!(resumed.activity_ts, Some(1012));
+            let untouched = store.get_agent(&pane_key("%2")).unwrap().unwrap();
+            assert_eq!(untouched.status_ts, Some(200));
+            assert_eq!(untouched.activity_ts, Some(200));
         }
 
         #[test]
@@ -2824,6 +2826,7 @@ mod tests {
                 .find(|a| a.pane_id == "%1")
                 .unwrap();
             assert_eq!(agent.status_ts, Some(1012));
+            assert_eq!(agent.activity_ts, Some(1012));
             assert!(!output.snapshot.interrupted_pane_ids.contains("%1"));
         }
     }

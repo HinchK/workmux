@@ -44,6 +44,24 @@ pub fn persist_agent_update(
     status: Option<AgentStatus>,
     title_override: Option<String>,
 ) {
+    persist_agent_snapshot(mux, pane_id, status, title_override, true);
+}
+
+/// Register a live agent pane without assigning it an activity status.
+///
+/// Registration snapshots only live pane data, preventing state from an
+/// unrelated agent process in the same pane from leaking into this record.
+pub fn persist_agent_registration(mux: &dyn Multiplexer, pane_id: &str) {
+    persist_agent_snapshot(mux, pane_id, None, None, false);
+}
+
+fn persist_agent_snapshot(
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+    status: Option<AgentStatus>,
+    title_override: Option<String>,
+    preserve_existing: bool,
+) {
     let pane_key = PaneKey {
         backend: mux.name().to_string(),
         instance: mux.instance_id(),
@@ -93,22 +111,39 @@ pub fn persist_agent_update(
 
     // tmux pane PIDs and server lifecycles form a stable process identity.
     // Other backends retain their established pane-key merge behavior.
-    let existing = StateStore::new()
-        .ok()
-        .and_then(|store| store.get_agent(&pane_key).ok().flatten())
-        .filter(|state| {
-            mux.name() != "tmux" || (state.pane_pid == live_pid && state.boot_id == boot_id)
-        });
+    let existing = preserve_existing
+        .then(|| {
+            StateStore::new()
+                .ok()
+                .and_then(|store| store.get_agent(&pane_key).ok().flatten())
+                .filter(|state| {
+                    mux.name() != "tmux" || (state.pane_pid == live_pid && state.boot_id == boot_id)
+                })
+        })
+        .flatten();
 
     // Resolve status: explicit update wins, otherwise preserve existing
     let final_status = status.or(existing.as_ref().and_then(|e| e.status));
 
+    let previous_status = existing.as_ref().and_then(|state| state.status);
+
     // Preserve existing status_ts if status hasn't changed (avoids resetting timer)
-    let status_ts = if final_status == existing.as_ref().and_then(|e| e.status) {
-        existing.as_ref().and_then(|e| e.status_ts).unwrap_or(now)
-    } else {
-        now
+    let status_ts = match final_status {
+        None => None,
+        Some(_) if final_status == previous_status => {
+            Some(existing.as_ref().and_then(|e| e.status_ts).unwrap_or(now))
+        }
+        Some(_) => Some(now),
     };
+
+    let previous_activity_ts = existing.as_ref().and_then(AgentState::activity_ts);
+    let activity_ts = resolve_activity_ts(
+        preserve_existing,
+        status,
+        previous_status,
+        previous_activity_ts,
+        now,
+    );
 
     // Capture existing agent_kind before `existing` is consumed below.
     let existing_agent_kind = existing.as_ref().and_then(|e| e.agent_kind.clone());
@@ -141,7 +176,8 @@ pub fn persist_agent_update(
         pane_key,
         workdir: live_info.working_dir,
         status: final_status,
-        status_ts: Some(status_ts),
+        status_ts,
+        activity_ts,
         pane_title,
         pane_pid: live_pid,
         command: live_info.current_command.unwrap_or_default(),
@@ -159,6 +195,23 @@ pub fn persist_agent_update(
     }
 }
 
+fn resolve_activity_ts(
+    preserve_existing: bool,
+    explicit_status: Option<AgentStatus>,
+    previous_status: Option<AgentStatus>,
+    previous_activity_ts: Option<u64>,
+    now: u64,
+) -> Option<u64> {
+    if !preserve_existing
+        || previous_activity_ts.is_none()
+        || (explicit_status.is_some() && explicit_status != previous_status)
+    {
+        Some(now)
+    } else {
+        previous_activity_ts
+    }
+}
+
 /// Merge a freshly classified agent kind with the previously cached one.
 ///
 /// Locks in the first definitive answer: once `existing` is `Some(_)`, that
@@ -173,6 +226,58 @@ fn merge_agent_kind(new: Option<String>, existing: Option<String>) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_starts_activity_without_status() {
+        assert_eq!(
+            resolve_activity_ts(false, None, Some(AgentStatus::Done), Some(10), 20),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn first_status_starts_new_activity() {
+        assert_eq!(
+            resolve_activity_ts(true, Some(AgentStatus::Working), None, Some(10), 20),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn status_transition_starts_new_activity() {
+        assert_eq!(
+            resolve_activity_ts(
+                true,
+                Some(AgentStatus::Done),
+                Some(AgentStatus::Working),
+                Some(10),
+                20,
+            ),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn repeated_status_preserves_activity() {
+        assert_eq!(
+            resolve_activity_ts(
+                true,
+                Some(AgentStatus::Working),
+                Some(AgentStatus::Working),
+                Some(10),
+                20,
+            ),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn metadata_update_preserves_activity() {
+        assert_eq!(
+            resolve_activity_ts(true, None, None, Some(10), 20),
+            Some(10)
+        );
+    }
 
     #[test]
     fn merge_keeps_existing_when_new_is_none() {

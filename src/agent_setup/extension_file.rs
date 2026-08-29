@@ -20,7 +20,7 @@ pub fn check_installed(path: Option<&Path>, source: &str) -> Result<StatusCheck>
     if installed == source {
         Ok(StatusCheck::Installed)
     } else {
-        Ok(StatusCheck::NotInstalled)
+        Ok(StatusCheck::UpdateAvailable)
     }
 }
 
@@ -67,7 +67,7 @@ mod tests {
 
         assert!(matches!(
             check_installed(Some(&path), "current extension").unwrap(),
-            StatusCheck::NotInstalled
+            StatusCheck::UpdateAvailable
         ));
 
         fs::write(&path, "current extension").unwrap();

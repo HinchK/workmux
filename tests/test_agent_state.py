@@ -16,6 +16,7 @@ import json
 import os
 import shlex
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,42 @@ def test_set_window_status_creates_state_file(
         f"No agent state file created after set-window-status. "
         f"State dir: {get_agents_dir(env)}"
     )
+
+
+def test_register_agent_creates_statusless_state(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    env = mux_server
+    branch_name = "feature-register-agent-test"
+    window_name = get_window_name(branch_name)
+
+    write_workmux_config(mux_repo_path, panes=[{"focus": True}])
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    wait_for_window_ready(env, window_name)
+
+    env.send_keys(window_name, build_status_cmd(env, workmux_exe_path, "working"))
+    assert poll_until(lambda: len(list_agent_state_files(env)) == 1, timeout=5.0)
+
+    register_cmd = make_env_script(
+        env,
+        f"{shlex.quote(str(workmux_exe_path))} register-agent",
+        {"XDG_STATE_HOME": env.env["XDG_STATE_HOME"]},
+    )
+    registered_after = int(time.time())
+    env.send_keys(window_name, register_cmd)
+
+    def registration_is_persisted():
+        files = list_agent_state_files(env)
+        if len(files) != 1:
+            return False
+        state = read_agent_state(files[0])
+        return (
+            state["status"] is None
+            and state["status_ts"] is None
+            and state["activity_ts"] >= registered_after
+        )
+
+    assert poll_until(registration_is_persisted, timeout=5.0)
 
 
 def test_set_window_status_disabled_by_env(
@@ -301,6 +338,7 @@ def test_same_status_update_preserves_state_for_same_process(
     state_file = list_agent_state_files(env)[0]
     state = read_agent_state(state_file)
     state["status_ts"] = 1
+    state["activity_ts"] = 2
     state["updated_ts"] = 1
     state["pane_title"] = "same-process title"
     state_file.write_text(json.dumps(state))
@@ -314,6 +352,7 @@ def test_same_status_update_preserves_state_for_same_process(
 
     updated = read_agent_state(state_file)
     assert updated["status_ts"] == 1
+    assert updated["activity_ts"] == 2
     assert updated["pane_title"] == "same-process title"
     assert updated["updated_ts"] > 1
 
@@ -336,6 +375,7 @@ def test_same_status_update_discards_state_for_recycled_pane(
     live_pid = state["pane_pid"]
     state["pane_pid"] = live_pid + 1
     state["status_ts"] = 1
+    state["activity_ts"] = 1
     state["updated_ts"] = 1
     state["pane_title"] = "title from recycled pane"
     state_file.write_text(json.dumps(state))
@@ -351,6 +391,7 @@ def test_same_status_update_discards_state_for_recycled_pane(
     assert updated["pane_pid"] == live_pid
     assert updated["status"] == "working"
     assert updated["status_ts"] > 1
+    assert updated["activity_ts"] > 1
     assert updated["pane_title"] != "title from recycled pane"
 
 

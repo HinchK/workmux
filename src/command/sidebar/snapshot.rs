@@ -123,7 +123,7 @@ pub fn build_snapshot(
         SidebarSort::Recency => agents.sort_by_cached_key(|a| {
             let is_sleeping = sleeping_pane_ids.contains(&a.pane_id);
             let elapsed = a
-                .status_ts
+                .activity_ts()
                 .map(|ts| now.saturating_sub(ts))
                 .unwrap_or(u64::MAX);
             (is_sleeping, elapsed, pane_num(a))
@@ -207,6 +207,7 @@ mod tests {
             pane_title: None,
             status: None,
             status_ts: None,
+            activity_ts: None,
             updated_ts: None,
             window_cmd: None,
             agent_command: None,
@@ -275,6 +276,47 @@ mod tests {
             check_statuses,
             &HashSet::new(),
         )
+    }
+
+    #[test]
+    fn newly_registered_agent_sorts_first_by_activity() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut registered = agent("/repo/new");
+        registered.pane_id = "%2".to_string();
+        registered.activity_ts = Some(now);
+
+        let mut done = agent("/repo/done");
+        done.pane_id = "%1".to_string();
+        done.status = Some(AgentStatus::Done);
+        done.status_ts = Some(now - 60);
+        done.activity_ts = Some(now - 60);
+
+        let snapshot = build(vec![done, registered], HashMap::new(), HashMap::new());
+        assert_eq!(snapshot.agents[0].pane_id, "%2");
+        assert!(snapshot.agents[0].status.is_none());
+        assert!(snapshot.agents[0].status_ts.is_none());
+    }
+
+    #[test]
+    fn legacy_statusless_registration_uses_updated_time_for_recency() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut registered = agent("/repo/new");
+        registered.pane_id = "%2".to_string();
+        registered.updated_ts = Some(now);
+
+        let mut done = agent("/repo/done");
+        done.pane_id = "%1".to_string();
+        done.status = Some(AgentStatus::Done);
+        done.status_ts = Some(now - 60);
+
+        let snapshot = build(vec![done, registered], HashMap::new(), HashMap::new());
+        assert_eq!(snapshot.agents[0].pane_id, "%2");
     }
 
     #[test]

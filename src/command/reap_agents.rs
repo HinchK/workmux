@@ -171,6 +171,7 @@ mod tests {
             pane_title: None,
             status: None,
             status_ts,
+            activity_ts: None,
             updated_ts,
             window_cmd: None,
             agent_command: None,

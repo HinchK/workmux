@@ -59,17 +59,19 @@ class TestSetupNoPrompt:
         )
         assert "All agents have status tracking configured" in result.stdout
 
-    def test_claude_plugin_disabled_counts_as_configured(
+    def test_claude_plugin_disabled_uses_manual_hook_status(
         self,
         mux_server: MuxEnvironment,
         workmux_exe_path: Path,
         repo_path: Path,
     ):
-        """Disabled plugin still counts as configured (user knows about it)."""
+        """A disabled plugin does not hide a complete manual integration."""
         claude_dir = mux_server.home_path / ".claude"
-        claude_dir.mkdir()
-        settings = {"enabledPlugins": {"workmux-status@workmux": False}}
-        (claude_dir / "settings.json").write_text(json.dumps(settings))
+        write_claude_manual_status_hook(claude_dir)
+        settings_path = claude_dir / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["enabledPlugins"] = {"workmux-status@workmux": False}
+        settings_path.write_text(json.dumps(settings))
 
         result = run_workmux_command(
             mux_server, workmux_exe_path, repo_path, "setup --hooks"
@@ -157,6 +159,69 @@ class TestSetupNoPrompt:
 
 class TestSetupInstall:
     """Tests that exercise the interactive install prompt."""
+
+    def test_outdated_claude_hooks_explain_update_prompt(
+        self,
+        mux_server: MuxEnvironment,
+        workmux_exe_path: Path,
+    ):
+        claude_dir = mux_server.home_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "workmux set-window-status working",
+                                    }
+                                ]
+                            }
+                        ],
+                        "Notification": [
+                            {
+                                "matcher": "permission_prompt|elicitation_dialog",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "workmux set-window-status waiting",
+                                    }
+                                ],
+                            }
+                        ],
+                        "PostToolUse": [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "workmux set-window-status working",
+                                    }
+                                ]
+                            }
+                        ],
+                        "Stop": [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "workmux set-window-status done",
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                }
+            )
+        )
+
+        run_setup_with_answers(
+            mux_server,
+            workmux_exe_path,
+            expected_output=("workmux register-agent",),
+        )
 
     def test_claude_install_accept(
         self,
@@ -271,6 +336,7 @@ class TestSetupInstall:
         assert settings_path.exists()
         settings = json.loads(settings_path.read_text())
         assert "hooks" in settings
+        assert "SessionStart" in settings["hooks"]
         assert "Stop" in settings["hooks"]
 
         package_json_path = opencode_dir / "package.json"
@@ -316,6 +382,12 @@ class TestSetupInstall:
         ]
         assert "afplay /System/Library/Sounds/Glass.aiff" in stop_commands
         assert "workmux set-window-status done" in stop_commands
+        assert settings["hooks"]["SessionStart"][0]["matcher"] == (
+            "startup|resume|clear|fork"
+        )
+        assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+            "workmux register-agent"
+        )
         assert "UserPromptSubmit" in settings["hooks"]
         assert "Notification" in settings["hooks"]
         assert "PostToolUse" in settings["hooks"]

@@ -102,6 +102,9 @@ pub struct AgentPane {
     pub status: Option<AgentStatus>,
     /// Unix timestamp when status was last set
     pub status_ts: Option<u64>,
+    /// Unix timestamp when the agent entered its sidebar activity state.
+    #[serde(default)]
+    pub activity_ts: Option<u64>,
     /// Unix timestamp of last state update (any RPC call, not just status change).
     /// Used by the inactivity tracker to detect when an agent resumes working.
     #[serde(default)]
@@ -121,6 +124,15 @@ pub struct AgentPane {
     /// before falling back to stem-based profile resolution.
     #[serde(default)]
     pub agent_kind: Option<String>,
+}
+
+impl AgentPane {
+    /// Timestamp used for recency ordering and age-based staleness.
+    pub fn activity_ts(&self) -> Option<u64> {
+        self.activity_ts
+            .or(self.status_ts)
+            .or_else(|| self.status.is_none().then_some(self.updated_ts).flatten())
+    }
 }
 
 /// Parameters for creating a new window/tab

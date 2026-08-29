@@ -84,7 +84,7 @@ sidebar:
   width: 40 # left width in columns (default: "10%", clamped 25-50)
   # width: "15%"
   layout: tiles # left only: "compact" or "tiles" (default)
-  dim_stale: true # dim agents whose status has not changed for one hour
+  dim_stale: true # dim agents whose activity state is older than one hour
 ```
 
 For a horizontal top bar:

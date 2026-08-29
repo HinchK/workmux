@@ -20,6 +20,7 @@ pub mod pi;
 use anyhow::{Context, Result};
 use console::style;
 use serde::{Deserialize, Serialize};
+use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeSet;
 use std::fs;
 
@@ -81,6 +82,8 @@ impl Agent {
 pub enum StatusCheck {
     /// Hooks are installed and working.
     Installed,
+    /// Hooks are installed but differ from the bundled integration.
+    UpdateAvailable,
     /// Hooks are not installed.
     NotInstalled,
     /// Could not determine status (e.g., invalid JSON in settings file).
@@ -93,6 +96,130 @@ pub struct AgentCheck {
     pub agent: Agent,
     pub reason: &'static str,
     pub status: StatusCheck,
+}
+
+pub(crate) struct UpdatePreview {
+    pub label: String,
+    pub installed: String,
+    pub bundled: String,
+}
+
+pub(crate) fn print_update_diff(agent: Agent) {
+    let preview = match agent {
+        Agent::Claude => claude::update_preview(),
+        Agent::Pi => pi::update_preview(),
+        _ => Ok(None),
+    };
+    let Ok(Some(preview)) = preview else {
+        return;
+    };
+
+    let diff = TextDiff::from_lines(&preview.installed, &preview.bundled);
+    let additions = diff
+        .iter_all_changes()
+        .filter(|change| change.tag() == ChangeTag::Insert)
+        .count();
+    let deletions = diff
+        .iter_all_changes()
+        .filter(|change| change.tag() == ChangeTag::Delete)
+        .count();
+    let line_number_width = preview
+        .installed
+        .lines()
+        .count()
+        .max(preview.bundled.lines().count())
+        .to_string()
+        .len();
+
+    let groups = diff.grouped_ops(3);
+    let first_changed_line = groups
+        .first()
+        .into_iter()
+        .flat_map(|group| group.iter())
+        .flat_map(|op| diff.iter_changes(op))
+        .find(|change| change.tag() != ChangeTag::Equal)
+        .and_then(|change| change.new_index().or_else(|| change.old_index()))
+        .map(|index| index + 1)
+        .unwrap_or(1);
+
+    println!();
+    println!(
+        "  {} {} {}",
+        style("●").yellow(),
+        style("Update").bold(),
+        style(&preview.label).cyan()
+    );
+    println!(
+        "  {} {} {} [{}{}] {}",
+        style("├─").dim(),
+        style(format!("+{additions}")).green(),
+        style(format!("-{deletions}")).red(),
+        style("━".repeat(additions.min(12))).green(),
+        style("━".repeat(deletions.min(12))).red(),
+        style(format!("at line {first_changed_line}")).dim(),
+    );
+    println!("  {}", style("│").dim());
+
+    for (group_index, group) in groups.iter().enumerate() {
+        if group_index > 0 {
+            let first_changed_line = group
+                .iter()
+                .flat_map(|op| diff.iter_changes(op))
+                .find(|change| change.tag() != ChangeTag::Equal)
+                .and_then(|change| change.new_index().or_else(|| change.old_index()))
+                .map(|index| index + 1)
+                .unwrap_or(1);
+            println!("  {}", style("│").dim());
+            println!(
+                "  {} {}",
+                style("├─").dim(),
+                style(format!("at line {first_changed_line}")).dim()
+            );
+            println!("  {}", style("│").dim());
+        }
+
+        for op in group {
+            for change in diff.iter_changes(op) {
+                let line = change.value().trim_end_matches('\n');
+                let line_number = change
+                    .new_index()
+                    .or_else(|| change.old_index())
+                    .map(|index| index + 1)
+                    .unwrap_or(0);
+                let prefix = match change.tag() {
+                    ChangeTag::Insert => format!("{line_number:>line_number_width$}+"),
+                    ChangeTag::Delete => format!("{line_number:>line_number_width$}-"),
+                    ChangeTag::Equal => format!("{line_number:>line_number_width$} "),
+                };
+                match change.tag() {
+                    ChangeTag::Insert => println!(
+                        "  {} {} {}",
+                        style("│").dim(),
+                        style(prefix).green(),
+                        style(format!(" {line}"))
+                            .color256(252)
+                            .on_true_color(0, 48, 0)
+                    ),
+                    ChangeTag::Delete => println!(
+                        "  {} {} {}",
+                        style("│").dim(),
+                        style(prefix).red(),
+                        style(format!(" {line}"))
+                            .color256(252)
+                            .on_true_color(64, 16, 16)
+                    ),
+                    ChangeTag::Equal => println!(
+                        "  {} {} {}",
+                        style("│").dim(),
+                        style(prefix).dim(),
+                        style(line).dim()
+                    ),
+                }
+            }
+        }
+    }
+    println!("  {}", style("└─").dim());
+    println!();
 }
 
 /// Detect all known agents and check their status tracking.
@@ -351,7 +478,12 @@ pub fn prompt_wizard() -> Result<()> {
     let checks = check_all();
     let needs_hooks: Vec<_> = checks
         .iter()
-        .filter(|c| matches!(c.status, StatusCheck::NotInstalled))
+        .filter(|c| {
+            matches!(
+                c.status,
+                StatusCheck::NotInstalled | StatusCheck::UpdateAvailable
+            )
+        })
         .filter(|c| !is_declined(c.agent))
         .collect();
 
@@ -369,12 +501,24 @@ pub fn prompt_wizard() -> Result<()> {
         println!("{}", dim);
 
         for check in &needs_hooks {
+            let detail = match check.status {
+                StatusCheck::UpdateAvailable => {
+                    format!("{}; status tracking update available", check.reason)
+                }
+                _ => check.reason.to_string(),
+            };
             println!(
                 "{}  Detected {} ({})",
                 dim,
                 style(check.agent.name()).bold(),
-                check.reason
+                detail
             );
+        }
+
+        for check in &needs_hooks {
+            if matches!(check.status, StatusCheck::UpdateAvailable) {
+                print_update_diff(check.agent);
+            }
         }
 
         println!("{}", dim);
@@ -382,7 +526,10 @@ pub fn prompt_wizard() -> Result<()> {
         print_description(&dim_str);
         println!("{}", dim);
 
-        if confirm::confirm("Install status tracking hooks?", ConfirmDefault::Yes)? {
+        if confirm::confirm(
+            "Install or update status tracking hooks?",
+            ConfirmDefault::Yes,
+        )? {
             install_agents(&needs_hooks);
         } else {
             let agents: Vec<_> = needs_hooks.iter().map(|c| c.agent).collect();

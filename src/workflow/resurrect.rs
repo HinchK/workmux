@@ -252,6 +252,7 @@ mod tests {
             workdir: PathBuf::from("/repo/worktree"),
             status: None,
             status_ts: None,
+            activity_ts: Some(updated_ts),
             pane_title: None,
             pane_pid: 12345,
             command: command.to_string(),

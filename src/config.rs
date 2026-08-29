@@ -304,7 +304,7 @@ pub struct SidebarConfig {
     /// Row ordering: "recency" (default) or "window".
     pub sort: Option<SidebarSort>,
 
-    /// Dim agents whose status has not changed for the stale threshold.
+    /// Dim agents whose sidebar activity state exceeds the stale threshold.
     /// Default: true.
     pub dim_stale: Option<bool>,
 }
@@ -3250,7 +3250,7 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #   # Default: "tiles". Can be toggled at runtime with 'v' key.
 #   layout: tiles
 #
-#   # Dim agents whose status has not changed for one hour. Default: true.
+#   # Dim agents whose sidebar activity state is older than one hour. Default: true.
 #   dim_stale: true
 #
 #   horizontal:

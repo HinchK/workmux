@@ -104,7 +104,7 @@ impl<'a> RowContext<'a> {
         let is_stale = should_dim_agent(
             app.dim_stale,
             is_agent_stale(
-                agent.status_ts,
+                agent.activity_ts(),
                 agent.status,
                 now_secs,
                 app.stale_threshold_secs,
@@ -426,7 +426,7 @@ fn is_hostname_title_with(title: &str, hostname: Option<&str>) -> bool {
 }
 
 fn is_agent_stale(
-    status_ts: Option<u64>,
+    activity_ts: Option<u64>,
     status: Option<AgentStatus>,
     now_secs: u64,
     stale_threshold_secs: u64,
@@ -446,7 +446,7 @@ fn is_agent_stale(
         return false;
     }
 
-    status_ts
+    activity_ts
         .map(|ts| now_secs.saturating_sub(ts) > stale_threshold_secs)
         .unwrap_or(true)
 }
@@ -480,12 +480,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_status_timestamp_is_stale() {
+    fn missing_activity_timestamp_is_stale() {
         assert!(is_agent_stale(None, None, 100, 60, false, false));
     }
 
     #[test]
-    fn active_statuses_are_not_stale_without_timestamp() {
+    fn active_statuses_are_not_stale_without_activity_timestamp() {
         assert!(!is_agent_stale(
             None,
             Some(AgentStatus::Working),
@@ -616,11 +616,32 @@ mod tests {
             pane_title: None,
             status: None,
             status_ts: None,
+            activity_ts: None,
             updated_ts: None,
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
         }
+    }
+
+    #[test]
+    fn newly_registered_agent_is_fresh_without_elapsed_status_time() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.stale_threshold_secs = 60;
+        let mut agent = test_agent();
+        agent.activity_ts = Some(100);
+        let pane_suffixes = vec![String::new()];
+
+        let fresh = RowContext::build(&app, &agent, 0, &pane_suffixes, 160, None);
+        assert!(!fresh.is_stale);
+        assert!(fresh.elapsed.is_empty());
+
+        let stale = RowContext::build(&app, &agent, 0, &pane_suffixes, 161, None);
+        assert!(stale.is_stale);
+        assert!(stale.elapsed.is_empty());
     }
 
     #[test]

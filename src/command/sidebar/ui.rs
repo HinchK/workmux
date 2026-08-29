@@ -1101,6 +1101,7 @@ mod tests {
                     _ => AgentStatus::Done,
                 }),
                 status_ts: Some(1_700_000_000),
+                activity_ts: Some(1_700_000_000),
                 updated_ts: Some(1_700_000_000),
                 window_cmd: None,
                 agent_command: Some("claude".to_string()),

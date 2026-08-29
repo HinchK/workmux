@@ -62,7 +62,7 @@ impl App {
                 .unwrap_or(0);
             self.agents.retain(|agent| {
                 agent
-                    .status_ts
+                    .activity_ts()
                     .map(|ts| now.saturating_sub(ts) <= threshold)
                     .unwrap_or(true)
             });
@@ -137,7 +137,7 @@ impl App {
         // Helper closure to get status priority (lower = higher priority)
         let get_priority = |agent: &AgentPane| -> u8 {
             let is_stale = agent
-                .status_ts
+                .activity_ts()
                 .map(|ts| now.saturating_sub(ts) > stale_threshold)
                 .unwrap_or(false);
 
@@ -153,10 +153,10 @@ impl App {
             }
         };
 
-        // Helper closure to get elapsed time (lower = more recent)
-        let get_elapsed = |agent: &AgentPane| -> u64 {
+        // Helper closure to get activity age (lower = more recent)
+        let get_activity_age = |agent: &AgentPane| -> u64 {
             agent
-                .status_ts
+                .activity_ts()
                 .map(|ts| now.saturating_sub(ts))
                 .unwrap_or(u64::MAX)
         };
@@ -170,7 +170,7 @@ impl App {
             SortMode::Priority => {
                 // Sort by priority, then by elapsed time (most recent first), then by pane_id
                 self.agents
-                    .sort_by_cached_key(|a| (get_priority(a), get_elapsed(a), pane_num(a)));
+                    .sort_by_cached_key(|a| (get_priority(a), get_activity_age(a), pane_num(a)));
             }
             SortMode::Project => {
                 // Sort by project name first, then by status priority within each project
@@ -180,7 +180,7 @@ impl App {
             }
             SortMode::Recency => {
                 self.agents
-                    .sort_by_cached_key(|a| (get_elapsed(a), pane_num(a)));
+                    .sort_by_cached_key(|a| (get_activity_age(a), pane_num(a)));
             }
             SortMode::Natural => {
                 self.agents.sort_by_cached_key(pane_num);
@@ -435,7 +435,7 @@ impl App {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        agent::is_stale(agent.status_ts, self.stale_threshold_secs, now)
+        agent::is_stale(agent.activity_ts(), self.stale_threshold_secs, now)
     }
 
     pub fn get_elapsed(&self, agent: &AgentPane) -> Option<u64> {

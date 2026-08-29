@@ -48,6 +48,10 @@ fn run_hooks_setup(checks: &[agent_setup::AgentCheck]) -> Result<()> {
     for check in checks {
         let status_str = match &check.status {
             StatusCheck::Installed => format!("{}", style("configured").green()),
+            StatusCheck::UpdateAvailable => {
+                any_needed = true;
+                format!("{}", style("update available").yellow())
+            }
             StatusCheck::NotInstalled => {
                 any_needed = true;
                 format!("{}", style("not configured").yellow())
@@ -68,6 +72,12 @@ fn run_hooks_setup(checks: &[agent_setup::AgentCheck]) -> Result<()> {
     }
     println!();
 
+    for check in checks {
+        if matches!(check.status, StatusCheck::UpdateAvailable) {
+            agent_setup::print_update_diff(check.agent);
+        }
+    }
+
     if !any_needed {
         println!(
             "  {}",
@@ -78,13 +88,21 @@ fn run_hooks_setup(checks: &[agent_setup::AgentCheck]) -> Result<()> {
 
     let needs_setup: Vec<_> = checks
         .iter()
-        .filter(|c| matches!(c.status, StatusCheck::NotInstalled | StatusCheck::Error(_)))
+        .filter(|c| {
+            matches!(
+                c.status,
+                StatusCheck::NotInstalled | StatusCheck::UpdateAvailable | StatusCheck::Error(_)
+            )
+        })
         .collect();
 
     agent_setup::print_description("");
     println!();
 
-    if confirm::confirm("Install status tracking hooks?", ConfirmDefault::Yes)? {
+    if confirm::confirm(
+        "Install or update status tracking hooks?",
+        ConfirmDefault::Yes,
+    )? {
         let mut any_failed = false;
         for check in &needs_setup {
             match agent_setup::install(check.agent) {

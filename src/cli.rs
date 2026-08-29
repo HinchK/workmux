@@ -725,6 +725,10 @@ enum Commands {
         command: command::set_window_status::SetWindowStatusCommand,
     },
 
+    /// Register the agent in the current multiplexer pane (used by hooks)
+    #[command(hide = true)]
+    RegisterAgent,
+
     /// Set the base branch for the current worktree (used after rebasing)
     #[command(hide = true, name = "set-base")]
     SetBase {
@@ -1166,6 +1170,7 @@ pub fn run() -> Result<()> {
         },
         Commands::Sandbox(args) => command::sandbox::run(args),
         Commands::SetWindowStatus { command } => command::set_window_status::run(command),
+        Commands::RegisterAgent => command::set_window_status::register_agent(),
         Commands::SetBase { base } => command::set_base::run(&base),
         Commands::LastDone => command::last_done::run(),
         Commands::LastAgent => command::last_agent::run(),

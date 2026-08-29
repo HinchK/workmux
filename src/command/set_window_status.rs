@@ -75,7 +75,7 @@ impl StatusTarget {
 }
 
 pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
-    if std::env::var_os("WORKMUX_DISABLE_SET_WINDOW_STATUS").is_some() {
+    if status_tracking_disabled() {
         return Ok(());
     }
 
@@ -85,14 +85,37 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     }
 
     let config = Config::load(None)?;
+    run_for_status_target(|mux, pane_id| apply_status_update(&cmd, &config, mux, pane_id))
+}
 
+pub fn register_agent() -> Result<()> {
+    if status_tracking_disabled() {
+        return Ok(());
+    }
+
+    if crate::sandbox::guest::is_sandbox_guest() {
+        return register_via_rpc();
+    }
+
+    run_for_status_target(|mux, pane_id| {
+        let _ = mux.clear_status(pane_id);
+        crate::state::persist_agent_registration(mux, pane_id);
+        Ok(())
+    })
+}
+
+fn status_tracking_disabled() -> bool {
+    std::env::var_os("WORKMUX_DISABLE_SET_WINDOW_STATUS").is_some()
+}
+
+fn run_for_status_target(
+    mut update: impl FnMut(&dyn Multiplexer, &str) -> Result<()>,
+) -> Result<()> {
     match StatusTarget::from_env() {
         Ok(Some(target)) => {
             let mux = create_backend_for_instance(target.backend, &target.instance);
             match mux.get_live_pane_info(&target.pane_id) {
-                Ok(Some(_)) => {
-                    return apply_status_update(&cmd, &config, &*mux, &target.pane_id);
-                }
+                Ok(Some(_)) => return update(&*mux, &target.pane_id),
                 Ok(None) => {
                     warn!(
                         backend = %target.backend,
@@ -126,7 +149,7 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
     for backend in status_backend_candidates() {
         let mux = create_backend(backend);
         if let Some(pane_id) = resolve_status_pane_id(&*mux) {
-            return apply_status_update(&cmd, &config, &*mux, &pane_id);
+            return update(&*mux, &pane_id);
         }
     }
 
@@ -285,16 +308,23 @@ fn normalized_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Send a status update via RPC when running inside a sandbox guest.
-fn run_via_rpc(cmd: SetWindowStatusCommand) -> Result<()> {
-    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
+fn register_via_rpc() -> Result<()> {
+    run_status_via_rpc("register")
+}
 
+fn run_via_rpc(cmd: SetWindowStatusCommand) -> Result<()> {
     let status = match cmd {
         SetWindowStatusCommand::Working => "working",
         SetWindowStatusCommand::Waiting => "waiting",
         SetWindowStatusCommand::Done => "done",
         SetWindowStatusCommand::Clear => "clear",
     };
+
+    run_status_via_rpc(status)
+}
+
+fn run_status_via_rpc(status: &str) -> Result<()> {
+    use crate::sandbox::rpc::{RpcClient, RpcRequest, RpcResponse};
 
     let mut client = RpcClient::from_env()?;
     let response = client.call(&RpcRequest::SetStatus {

@@ -8,7 +8,7 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use super::StatusCheck;
+use super::{StatusCheck, UpdatePreview};
 use crate::agent_setup::extension_file;
 
 /// The pi extension source, embedded at compile time.
@@ -40,6 +40,17 @@ pub fn detect() -> Option<&'static str> {
 /// Check if workmux extension is installed for pi.
 pub fn check() -> Result<StatusCheck> {
     extension_file::check_installed(extension_path().as_deref(), EXTENSION_SOURCE)
+}
+
+pub(crate) fn update_preview() -> Result<Option<UpdatePreview>> {
+    let Some(path) = extension_path().filter(|path| path.exists()) else {
+        return Ok(None);
+    };
+    Ok(Some(UpdatePreview {
+        label: path.display().to_string(),
+        installed: std::fs::read_to_string(&path)?,
+        bundled: EXTENSION_SOURCE.to_string(),
+    }))
 }
 
 /// Install workmux extension for pi.

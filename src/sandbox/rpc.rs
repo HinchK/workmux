@@ -454,6 +454,11 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
             config.status_icons.done().to_string(),
             true,
         ),
+        "register" => {
+            let _ = ctx.mux.clear_status(&ctx.pane_id);
+            crate::state::persist_agent_registration(&*ctx.mux, &ctx.pane_id);
+            return RpcResponse::Ok;
+        }
         "clear" => {
             if let Err(e) = ctx.mux.clear_status(&ctx.pane_id) {
                 return RpcResponse::Error {

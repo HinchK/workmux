@@ -12,6 +12,10 @@ export default function (pi: ExtensionAPI) {
     pi.exec("workmux", ["set-window-status", status]).catch(() => {});
   }
 
+  pi.on("session_start", async () => {
+    await pi.exec("workmux", ["register-agent"]).catch(() => {});
+  });
+
   pi.on("agent_start", async () => {
     setStatus("working");
   });

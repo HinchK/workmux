@@ -746,6 +746,7 @@ mod tests {
             workdir: PathBuf::from("/home/user/project"),
             status: Some(AgentStatus::Working),
             status_ts: Some(1234567890),
+            activity_ts: Some(1234567890),
             pane_title: Some("Implementing feature X".to_string()),
             pane_pid: 12345,
             command: "node".to_string(),
@@ -778,6 +779,7 @@ mod tests {
         assert_eq!(retrieved.pane_key, state.pane_key);
         assert_eq!(retrieved.workdir, state.workdir);
         assert_eq!(retrieved.status, state.status);
+        assert_eq!(retrieved.activity_ts, state.activity_ts);
         assert_eq!(retrieved.pane_pid, state.pane_pid);
     }
 
