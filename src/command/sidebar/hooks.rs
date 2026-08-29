@@ -43,13 +43,21 @@ pub(super) fn install_hooks() -> Result<()> {
         ("after-kill-pane[98]", &after_kill_pane_cmd),
     ];
 
-    for (hook, cmd) in hooks {
-        Cmd::new("tmux")
-            .args(&["set-hook", "-g", hook, cmd])
-            .run()?;
-    }
+    let args = hook_install_args(hooks);
+    Cmd::new("tmux").args(&args).run()?;
 
     Ok(())
+}
+
+fn hook_install_args<'a>(hooks: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    let mut args = Vec::with_capacity(hooks.len() * 5);
+    for (index, (hook, command)) in hooks.iter().enumerate() {
+        if index > 0 {
+            args.push(";");
+        }
+        args.extend_from_slice(&["set-hook", "-g", hook, command]);
+    }
+    args
 }
 
 fn run_shell_hook(command: &str) -> String {
@@ -102,5 +110,17 @@ mod tests {
 
         assert!(command.contains("_sidebar-reflow --window #{window_id}"));
         assert!(!command.contains("_sidebar-reflow-all --exclude"));
+    }
+
+    #[test]
+    fn install_args_separate_hook_commands() {
+        let args = hook_install_args(&[("first", "one"), ("second", "two")]);
+
+        assert_eq!(
+            args,
+            vec![
+                "set-hook", "-g", "first", "one", ";", "set-hook", "-g", "second", "two"
+            ]
+        );
     }
 }

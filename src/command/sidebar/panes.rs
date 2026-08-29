@@ -12,13 +12,36 @@ use super::daemon_ctrl::kill_daemon;
 use super::hooks::remove_hooks;
 use super::layout_tree::{layout_after_sidebar_remove, reflow_after_sidebar_add};
 
+fn parse_window_panes(output: &str) -> (bool, Option<&str>) {
+    let mut has_sidebar = false;
+    let mut first_pane_id = None;
+    for line in output.lines() {
+        let (pane_id, role) = line.split_once('\t').unwrap_or((line, ""));
+        let pane_id = pane_id.trim();
+        if first_pane_id.is_none() && !pane_id.is_empty() {
+            first_pane_id = Some(pane_id);
+        }
+        has_sidebar |= role.trim() == SIDEBAR_ROLE_VALUE;
+    }
+    (has_sidebar, first_pane_id)
+}
+
+fn query_window_panes(window_id: &str) -> Result<String> {
+    Cmd::new("tmux")
+        .args(&[
+            "list-panes",
+            "-t",
+            window_id,
+            "-F",
+            "#{pane_id}\t#{@workmux_role}",
+        ])
+        .run_and_capture_stdout()
+}
+
 /// Check if a window already has a sidebar pane.
 pub(super) fn find_sidebar_in_window(window_id: &str) -> Result<bool> {
-    let output = Cmd::new("tmux")
-        .args(&["list-panes", "-t", window_id, "-F", "#{@workmux_role}"])
-        .run_and_capture_stdout()?;
-
-    Ok(output.lines().any(|l| l.trim() == SIDEBAR_ROLE_VALUE))
+    let output = query_window_panes(window_id)?;
+    Ok(parse_window_panes(&output).0)
 }
 
 /// Create a sidebar pane in a specific window (idempotent).
@@ -27,11 +50,19 @@ pub(super) fn create_sidebar_in_window(
     position: SidebarPosition,
     size: u16,
 ) -> Result<()> {
-    if find_sidebar_in_window(window_id).unwrap_or(false) {
-        debug!(
-            window_id,
-            "create_sidebar_in_window: already exists, skipping"
-        );
+    let panes = query_window_panes(window_id).or_else(|_| query_window_panes(window_id))?;
+    let target_pane = match parse_window_panes(&panes) {
+        (true, _) => {
+            debug!(
+                window_id,
+                "create_sidebar_in_window: already exists, skipping"
+            );
+            return Ok(());
+        }
+        (false, Some(target_pane)) => target_pane.to_string(),
+        (false, None) => return Ok(()),
+    };
+    if target_pane.is_empty() {
         return Ok(());
     }
 
@@ -40,15 +71,6 @@ pub(super) fn create_sidebar_in_window(
     let size_str = size.to_string();
 
     debug!(window_id, position = ?position, size, "create_sidebar_in_window: creating");
-
-    // Get the first pane in the window as split target
-    let target_pane = Cmd::new("tmux")
-        .args(&["list-panes", "-t", window_id, "-F", "#{pane_id}"])
-        .run_and_capture_stdout()?;
-    let target_pane = target_pane.lines().next().map(|l| l.trim()).unwrap_or("");
-    if target_pane.is_empty() {
-        return Ok(());
-    }
 
     let split_flag = match position {
         SidebarPosition::Left => "-hbf",
@@ -62,7 +84,7 @@ pub(super) fn create_sidebar_in_window(
             "-l",
             &size_str,
             "-t",
-            target_pane,
+            &target_pane,
             "-d",
             "-P",
             "-F",
@@ -74,7 +96,7 @@ pub(super) fn create_sidebar_in_window(
         .trim()
         .to_string();
 
-    Cmd::new("tmux")
+    if let Err(error) = Cmd::new("tmux")
         .args(&[
             "set-option",
             "-p",
@@ -83,7 +105,15 @@ pub(super) fn create_sidebar_in_window(
             "@workmux_role",
             SIDEBAR_ROLE_VALUE,
         ])
-        .run()?;
+        .run()
+    {
+        let _ = Cmd::new("tmux")
+            .args(&["kill-pane", "-t", &new_pane_id])
+            .run();
+        return Err(anyhow!(
+            "failed to mark sidebar pane {new_pane_id} in window {window_id}: {error}"
+        ));
+    }
 
     reflow_after_sidebar_add(window_id, &new_pane_id, position, size);
 
@@ -154,6 +184,7 @@ fn create_sidebars_from_window_output(
     config: &crate::config::Config,
     position: SidebarPosition,
 ) -> Result<()> {
+    let mut errors = Vec::new();
     for line in output.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -162,9 +193,19 @@ fn create_sidebars_from_window_output(
         let (window_id, extent_str) = line.split_once(' ').unwrap_or((line, "0"));
         let window_extent: u16 = extent_str.parse().unwrap_or(0);
         let size = super::effective_size_for(config, position, window_extent);
-        let _ = create_sidebar_in_window(window_id, position, size);
+        if let Err(error) = create_sidebar_in_window(window_id, position, size) {
+            errors.push(format!("{window_id}: {error}"));
+        }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "failed to create sidebars in {} window(s): {}",
+            errors.len(),
+            errors.join("; ")
+        ))
+    }
 }
 
 fn compute_sidebar_layouts(
@@ -364,5 +405,18 @@ mod tests {
     fn own_sidebar_matches_captured_pane_id() {
         assert!(is_own_sidebar("%12", "%12"));
         assert!(!is_own_sidebar("%13", "%12"));
+    }
+
+    #[test]
+    fn window_pane_query_finds_sidebar_and_first_target() {
+        let output = "%7\t\n%8\tsidebar\n";
+
+        assert_eq!(parse_window_panes(output), (true, Some("%7")));
+    }
+
+    #[test]
+    fn window_pane_query_handles_missing_role_field() {
+        assert_eq!(parse_window_panes("%7\n"), (false, Some("%7")));
+        assert_eq!(parse_window_panes(""), (false, None));
     }
 }
