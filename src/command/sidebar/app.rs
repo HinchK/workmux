@@ -608,6 +608,31 @@ impl SidebarApp {
         self.spinner_frame = self.spinner_frame.wrapping_add(1) % 10;
     }
 
+    /// Conservative refresh interval for state that can produce time-dependent content.
+    pub(super) fn refresh_interval(&self) -> Option<Duration> {
+        const ANIMATION_INTERVAL: Duration = Duration::from_millis(250);
+        const ELAPSED_INTERVAL: Duration = Duration::from_secs(1);
+
+        if !self.has_loaded_snapshot
+            || (self.status_icons.working.is_none()
+                && self
+                    .agents
+                    .iter()
+                    .any(|agent| agent.status == Some(crate::multiplexer::AgentStatus::Working)))
+            || self
+                .check_statuses
+                .values()
+                .any(|summary| matches!(summary.state, crate::github::CheckState::Pending { .. }))
+        {
+            return Some(ANIMATION_INTERVAL);
+        }
+
+        self.agents
+            .iter()
+            .any(|agent| agent.status_ts.is_some())
+            .then_some(ELAPSED_INTERVAL)
+    }
+
     pub fn next(&mut self) {
         self.selection_mode = SelectionMode::Manual;
         if self.agents.is_empty() {
@@ -1552,6 +1577,74 @@ mod tests {
         });
         app.apply_snapshot(selection_snapshot(&["%host-agent"]));
         app
+    }
+
+    #[test]
+    fn static_loaded_sidebar_has_no_periodic_refresh() {
+        let app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+
+        assert_eq!(app.refresh_interval(), None);
+    }
+
+    #[test]
+    fn loading_and_animated_statuses_refresh_four_times_per_second() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.has_loaded_snapshot = false;
+        assert_eq!(app.refresh_interval(), Some(Duration::from_millis(250)));
+
+        app.has_loaded_snapshot = true;
+        let mut agent = selection_agent("%working", "@host");
+        agent.status = Some(crate::multiplexer::AgentStatus::Working);
+        app.agents.push(agent);
+        assert_eq!(app.refresh_interval(), Some(Duration::from_millis(250)));
+
+        app.agents.clear();
+        app.check_statuses.insert(
+            PathBuf::from("/tmp/pending"),
+            CheckSummary {
+                state: crate::github::CheckState::Pending {
+                    passed: 1,
+                    total: 2,
+                },
+                meta: None,
+            },
+        );
+        assert_eq!(app.refresh_interval(), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn elapsed_status_refreshes_once_per_second() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        let mut agent = selection_agent("%done", "@host");
+        agent.status = Some(crate::multiplexer::AgentStatus::Done);
+        agent.status_ts = Some(1);
+        app.agents.push(agent);
+
+        assert_eq!(app.refresh_interval(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn custom_working_icon_only_needs_elapsed_refresh() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.status_icons.working = Some("working".to_string());
+        let mut agent = selection_agent("%working", "@host");
+        agent.status = Some(crate::multiplexer::AgentStatus::Working);
+        agent.status_ts = Some(1);
+        app.agents.push(agent);
+
+        assert_eq!(app.refresh_interval(), Some(Duration::from_secs(1)));
     }
 
     #[test]

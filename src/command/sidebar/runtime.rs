@@ -108,8 +108,7 @@ pub fn run_sidebar() -> Result<()> {
     let mut needs_clear = false;
     let startup = std::time::Instant::now();
     let startup_grace = Duration::from_secs(3);
-    let tick_rate = Duration::from_millis(250);
-    let mut last_spinner_tick = std::time::Instant::now();
+    let mut last_refresh = std::time::Instant::now();
 
     loop {
         // Render before blocking (redraws only when state changed)
@@ -122,28 +121,32 @@ pub fn run_sidebar() -> Result<()> {
             needs_render = false;
         }
 
-        // Adaptive timeout: 250ms when active, block when hidden.
-        // If a resize debounce is pending, wake early to process it.
-        let timeout = if let Some(deadline) = app.resize_deadline {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            remaining.min(tick_rate)
-        } else if app.host_window_active() {
-            tick_rate.saturating_sub(last_spinner_tick.elapsed())
-        } else {
-            // Block until a snapshot or input wakes us. Use a large timeout
-            // since recv() without timeout would prevent clean shutdown if
-            // all senders drop.
-            Duration::from_secs(3600)
+        // Time-dependent content supplies its own refresh interval. Static or
+        // hidden sidebars block until a snapshot or input wakes them.
+        let refresh_interval = app
+            .host_window_active()
+            .then(|| app.refresh_interval())
+            .flatten();
+        let resize_timeout = app
+            .resize_deadline
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+        let timeout = match (resize_timeout, refresh_interval) {
+            (Some(resize), Some(refresh)) => {
+                resize.min(refresh.saturating_sub(last_refresh.elapsed()))
+            }
+            (Some(resize), None) => resize,
+            (None, Some(refresh)) => refresh.saturating_sub(last_refresh.elapsed()),
+            (None, None) => Duration::from_secs(3600),
         };
 
         let first_event = match rx.recv_timeout(timeout) {
             Ok(ev) => Some(ev),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 app.process_pending_resize(&startup, startup_grace);
-                advance_spinner_if_due(
+                advance_refresh_if_due(
                     &mut app,
-                    &mut last_spinner_tick,
-                    tick_rate,
+                    &mut last_refresh,
+                    refresh_interval,
                     &mut needs_render,
                 );
                 continue;
@@ -182,10 +185,10 @@ pub fn run_sidebar() -> Result<()> {
 
         // Process any pending resize whose debounce has elapsed
         app.process_pending_resize(&startup, startup_grace);
-        advance_spinner_if_due(
+        advance_refresh_if_due(
             &mut app,
-            &mut last_spinner_tick,
-            tick_rate,
+            &mut last_refresh,
+            refresh_interval,
             &mut needs_render,
         );
 
@@ -208,18 +211,18 @@ pub fn run_sidebar() -> Result<()> {
     Ok(())
 }
 
-fn advance_spinner_if_due(
+fn advance_refresh_if_due(
     app: &mut SidebarApp,
-    last_spinner_tick: &mut std::time::Instant,
-    tick_rate: Duration,
+    last_refresh: &mut std::time::Instant,
+    refresh_interval: Option<Duration>,
     needs_render: &mut bool,
 ) {
-    if !app.host_window_active() {
-        *last_spinner_tick = std::time::Instant::now();
+    let Some(refresh_interval) = refresh_interval else {
+        *last_refresh = std::time::Instant::now();
         return;
-    }
-    if last_spinner_tick.elapsed() >= tick_rate {
-        *last_spinner_tick = std::time::Instant::now();
+    };
+    if last_refresh.elapsed() >= refresh_interval {
+        *last_refresh = std::time::Instant::now();
         app.tick();
         *needs_render = true;
     }
