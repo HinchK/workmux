@@ -70,16 +70,24 @@ agents:
       - exec
       - -m
       - gpt-5.1-codex-mini
+  pi-luna-max:
+    type: pi
+    command: pi
+    args:
+      - --model
+      - openai-codex/gpt-5.6-luna
+      - --thinking
+      - max
 ```
 
 Use named agents anywhere you'd use an agent name:
 
 ```bash
 # CLI
-workmux add feature/auth -a cc-work -p "Implement OAuth"
+workmux add oauth -a pi-luna-max -p "Implement history/2026-08-29-oauth-plan.md"
 
 # In .workmux.yaml
-agent: cc-work
+agent: pi-luna-max
 ```
 
 workmux resolves the name to a structured command before launching panes. The agent profile controls prompt injection format, continue/resume flags, skip-permissions flags, and sandbox behavior. Set `type` when the command is a wrapper or when you omit `command` and want the built-in executable for that agent type:
