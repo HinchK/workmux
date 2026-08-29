@@ -549,6 +549,8 @@ mod tests {
             agent,
             primary: "feature-auth".to_string(),
             secondary: "myproject".to_string(),
+            template_worktree: "feature-auth".to_string(),
+            project: "myproject".to_string(),
             pane_suffix: String::new(),
             elapsed: "5:23".to_string(),
             status_icon_spans: vec![("💤".to_string(), ratatui::style::Style::default())],

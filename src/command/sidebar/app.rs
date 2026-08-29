@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::agent_display::{extract_project_name, extract_worktree_name, resolve_labels};
 use crate::cmd::Cmd;
 use crate::config::{
     AgentIcons, Config, SidebarPosition, SidebarWidth, StatusIcons, ThemeConfig, ThemeMode,
@@ -978,42 +977,6 @@ impl SidebarApp {
 
     fn query_host_window_height(&self) -> u16 {
         query_window_height_for_pane().unwrap_or(0)
-    }
-
-    /// Resolve the (primary, secondary) label pair for an agent row.
-    ///
-    /// Strips the workmux prefix from session/window names so the resolver only
-    /// considers user-authored values. The window name is never promoted for
-    /// non-tmux backends (signaled by `window_cmd: None`).
-    pub fn resolve_agent_labels(&self, agent: &AgentPane) -> (String, String) {
-        let project = extract_project_name(&agent.path);
-        let (worktree, _is_main) = extract_worktree_name(
-            &agent.session,
-            &agent.window_name,
-            &self.window_prefix,
-            &agent.path,
-        );
-
-        // Workmux-managed names start with the configured prefix; treat them as
-        // not user-authored by clearing them before the resolver sees them.
-        let session = if agent.session.starts_with(&self.window_prefix) {
-            ""
-        } else {
-            agent.session.as_str()
-        };
-        let window = if agent.window_name.starts_with(&self.window_prefix) {
-            ""
-        } else {
-            agent.window_name.as_str()
-        };
-
-        resolve_labels(
-            &project,
-            session,
-            &worktree,
-            window,
-            agent.window_cmd.as_deref(),
-        )
     }
 }
 

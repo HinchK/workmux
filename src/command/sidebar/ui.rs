@@ -1066,6 +1066,86 @@ mod tests {
     use crate::command::sidebar::app::TemplateError;
 
     #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmark_sidebar_render_refresh_workload() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        use crate::command::sidebar::template::parser::parse_line;
+
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.template_error = None;
+        app.filter_mode = SidebarFilterMode::None;
+        app.templates.compact = parse_line(
+            "{status_icon} {primary}{pane_suffix} {fill} {git_stats} {pr_checks} {elapsed}",
+        )
+        .unwrap();
+        let worktree_path = std::env::var_os("WMPERF_RENDER_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap());
+        app.agents = (0..64)
+            .map(|idx| AgentPane {
+                session: format!("session-{}", idx % 4),
+                window_name: format!("wm-feature-{idx}"),
+                pane_id: format!("%{idx}"),
+                window_id: format!("@{}", idx / 2),
+                window_index: Some(idx),
+                path: worktree_path.clone(),
+                pane_title: Some(format!("Implementing sidebar performance work {idx}")),
+                status: Some(match idx % 3 {
+                    0 => AgentStatus::Working,
+                    1 => AgentStatus::Waiting,
+                    _ => AgentStatus::Done,
+                }),
+                status_ts: Some(1_700_000_000),
+                updated_ts: Some(1_700_000_000),
+                window_cmd: None,
+                agent_command: Some("claude".to_string()),
+                agent_kind: Some("claude".to_string()),
+            })
+            .collect();
+        for agent in &app.agents {
+            app.git_statuses.insert(
+                agent.path.clone(),
+                GitStatus {
+                    branch: Some("perf-sidebar-render".to_string()),
+                    lines_added: 123,
+                    lines_removed: 45,
+                    uncommitted_added: 12,
+                    uncommitted_removed: 3,
+                    is_dirty: true,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let backend = TestBackend::new(48, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        const WARMUP: usize = 200;
+        const SAMPLES: usize = 2_000;
+        for _ in 0..WARMUP {
+            terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+            app.spinner_frame = app.spinner_frame.wrapping_add(1);
+        }
+
+        let started = Instant::now();
+        for _ in 0..SAMPLES {
+            terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+            app.spinner_frame = app.spinner_frame.wrapping_add(1);
+        }
+        let elapsed = started.elapsed();
+        black_box(terminal.backend().buffer());
+        println!(
+            "sidebar_render_refresh: samples={SAMPLES} elapsed_ns={} ns_per_frame={}",
+            elapsed.as_nanos(),
+            elapsed.as_nanos() / SAMPLES as u128
+        );
+    }
+
+    #[test]
     fn render_sidebar_shows_exit_confirmation() {
         let backend = TestBackend::new(34, 5);
         let mut terminal = Terminal::new(backend).unwrap();

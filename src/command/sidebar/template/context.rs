@@ -2,7 +2,9 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::agent_display::{extract_project_name, extract_worktree_name, sanitize_pane_title};
+use crate::agent_display::{
+    extract_project_name, extract_worktree_name, resolve_labels, sanitize_pane_title,
+};
 use crate::agent_identity::AgentKind;
 use crate::git::GitStatus;
 use crate::github::{CheckSummary, PrSummary};
@@ -20,6 +22,10 @@ pub struct RowContext<'a> {
     pub primary: String,
     /// Resolved secondary label.
     pub secondary: String,
+    /// Raw window-derived value preserved for the `{worktree}` token.
+    pub(crate) template_worktree: String,
+    /// Project name shared by label, title, and token rendering.
+    pub(crate) project: String,
     /// Pane suffix like " (1)" when multiple agents share a window.
     pub pane_suffix: String,
     /// Compact elapsed string (e.g. "5:23", "2h", "1d").
@@ -65,7 +71,32 @@ impl<'a> RowContext<'a> {
         now_secs: u64,
         selected_idx: Option<usize>,
     ) -> Self {
-        let (primary, secondary) = app.resolve_agent_labels(agent);
+        let project = extract_project_name(&agent.path);
+        let (label_worktree, _) = extract_worktree_name(
+            &agent.session,
+            &agent.window_name,
+            app.window_prefix(),
+            &agent.path,
+        );
+        let (template_worktree, _) =
+            extract_worktree_name(&agent.session, &agent.window_name, "", &agent.path);
+        let session = if agent.session.starts_with(app.window_prefix()) {
+            ""
+        } else {
+            agent.session.as_str()
+        };
+        let window = if agent.window_name.starts_with(app.window_prefix()) {
+            ""
+        } else {
+            agent.window_name.as_str()
+        };
+        let (primary, secondary) = resolve_labels(
+            &project,
+            session,
+            &label_worktree,
+            window,
+            agent.window_cmd.as_deref(),
+        );
         let pane_suffix = pane_suffixes[idx].clone();
 
         let is_sleeping = app.sleeping_pane_ids.contains(&agent.pane_id);
@@ -93,7 +124,7 @@ impl<'a> RowContext<'a> {
             .map(|ts| format_compact_elapsed(now_secs.saturating_sub(ts)))
             .unwrap_or_default();
 
-        let pane_title = build_pane_title(agent, &primary, &secondary, app.window_prefix());
+        let pane_title = build_pane_title(agent, &primary, &secondary, &label_worktree, &project);
         let git_status = app.git_statuses.get(&agent.path);
         let pr_summary = app.pr_statuses.get(&agent.path);
         let check_summary = app.check_statuses.get(&agent.path);
@@ -107,6 +138,8 @@ impl<'a> RowContext<'a> {
             agent,
             primary,
             secondary,
+            template_worktree,
+            project,
             pane_suffix,
             elapsed,
             status_icon_spans,
@@ -132,8 +165,8 @@ impl<'a> RowContext<'a> {
         match token {
             TokenId::Primary => self.primary.clone(),
             TokenId::Secondary => self.secondary.clone(),
-            TokenId::Worktree => self.worktree_name(),
-            TokenId::Project => self.project_name(),
+            TokenId::Worktree => self.template_worktree.clone(),
+            TokenId::Project => self.project.clone(),
             TokenId::Session => self.agent.session.clone(),
             TokenId::Window => self.agent.window_name.clone(),
             TokenId::WindowIndex => self
@@ -328,20 +361,6 @@ impl<'a> RowContext<'a> {
             _ => Style::default().fg(self.palette.text),
         }
     }
-
-    fn worktree_name(&self) -> String {
-        let (wt, _) = extract_worktree_name(
-            &self.agent.session,
-            &self.agent.window_name,
-            "",
-            &self.agent.path,
-        );
-        wt
-    }
-
-    fn project_name(&self) -> String {
-        extract_project_name(&self.agent.path)
-    }
 }
 
 fn resolve_agent_label(kind: Option<AgentKind>) -> String {
@@ -389,17 +408,10 @@ fn build_pane_title(
     agent: &AgentPane,
     primary: &str,
     secondary: &str,
-    window_prefix: &str,
+    worktree: &str,
+    project: &str,
 ) -> Option<String> {
-    let title_worktree = extract_worktree_name(
-        &agent.session,
-        &agent.window_name,
-        window_prefix,
-        &agent.path,
-    )
-    .0;
-    let title_project = extract_project_name(&agent.path);
-    sanitize_pane_title(agent.pane_title.as_deref(), &title_worktree, &title_project)
+    sanitize_pane_title(agent.pane_title.as_deref(), worktree, project)
         .filter(|t| *t != primary && *t != secondary)
         .filter(|t| !is_hostname_title(t))
         .map(|s| s.to_string())
@@ -612,6 +624,70 @@ mod tests {
     }
 
     #[test]
+    fn row_context_reuses_names_without_changing_label_or_token_semantics() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: String::new(),
+            message: String::new(),
+        });
+        app.dim_stale = false;
+
+        let cases = [
+            (
+                "session",
+                "wm-feature-auth",
+                None,
+                "/tmp/project__worktrees/feature-auth",
+                ("feature-auth", "project"),
+            ),
+            (
+                "wm-session-branch",
+                "zsh",
+                Some("zsh"),
+                "/tmp/project__worktrees/session-branch",
+                ("session-branch", "project"),
+            ),
+            (
+                "team-session",
+                "review",
+                Some("claude"),
+                "/tmp/project__worktrees/main",
+                ("review", "team-session · main"),
+            ),
+            (
+                "default",
+                "bash",
+                Some("bash"),
+                "/tmp/project",
+                ("project", "main"),
+            ),
+        ];
+        for (session, window, window_cmd, path, expected_labels) in cases {
+            let mut agent = test_agent();
+            agent.session = session.to_string();
+            agent.window_name = window.to_string();
+            agent.window_cmd = window_cmd.map(str::to_string);
+            agent.path = PathBuf::from(path);
+            let pane_suffixes = vec![String::new()];
+            let ctx = RowContext::build(&app, &agent, 0, &pane_suffixes, 100, None);
+
+            assert_eq!(
+                (ctx.primary.as_str(), ctx.secondary.as_str()),
+                expected_labels,
+                "session={session} window={window}"
+            );
+            assert_eq!(ctx.resolve(TokenId::Worktree), window);
+        }
+
+        let mut agent = test_agent();
+        agent.window_name = "wm-feature-auth".to_string();
+        agent.pane_title = Some("feature-auth".to_string());
+        let pane_suffixes = vec![String::new()];
+        let ctx = RowContext::build(&app, &agent, 0, &pane_suffixes, 100, None);
+        assert_eq!(ctx.resolve(TokenId::Project), "x");
+        assert_eq!(ctx.pane_title, None);
+    }
+
+    #[test]
     fn row_context_keeps_stale_done_agent_colored_when_dimming_is_disabled() {
         let mut app = SidebarApp::test_with_template_error(TemplateError {
             location: String::new(),
@@ -648,6 +724,8 @@ mod tests {
             agent,
             primary: String::new(),
             secondary: String::new(),
+            template_worktree: String::new(),
+            project: String::new(),
             pane_suffix: String::new(),
             elapsed: String::new(),
             status_icon_spans: vec![],
