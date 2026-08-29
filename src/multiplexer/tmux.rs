@@ -29,6 +29,24 @@ const LIVE_PANE_ESCAPED_RECORD_SEPARATOR: &str = "\\036";
 const LIVE_PANE_ESCAPED_FIELD_SEPARATOR: &str = "\\037";
 const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}";
 const WINDOW_OWNERSHIP_FORMAT: &str = "\x1e#{window_id}\x1f#{window_name}\x1f#{session_name}\x1f#{@workmux_token}\x1f#{pane_current_path}";
+const SIDEBAR_STATE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}\x1f#{@workmux_pane_status}\x1f#{window_active}\x1f#{session_attached}\x1f#{pane_active}\x1f#{window_index}\x1f#{start_time}\x1f#{@workmux_sidebar_position}\x1f#{@workmux_sidebar_layout}\x1f#{@workmux_sidebar_filter}\x1f#{@workmux_sleeping_panes}";
+
+/// One tmux server observation containing every input needed by a daemon tick.
+#[derive(Debug)]
+pub(crate) struct TmuxSidebarSnapshot {
+    pub live_panes: HashMap<String, LivePaneInfo>,
+    pub window_statuses: HashMap<String, Option<String>>,
+    pub active_windows: HashSet<(String, String)>,
+    pub pane_window_ids: HashMap<String, String>,
+    pub pane_window_indexes: HashMap<String, u32>,
+    pub active_pane_ids: HashSet<String>,
+    pub window_pane_counts: HashMap<String, usize>,
+    pub server_boot_id: Option<String>,
+    pub position: Option<String>,
+    pub layout: Option<String>,
+    pub filter: Option<String>,
+    pub sleeping_panes: Option<String>,
+}
 
 fn live_pane_fields(line: &str) -> Vec<&str> {
     if line.contains(LIVE_PANE_FIELD_SEPARATOR) {
@@ -98,6 +116,84 @@ fn parse_live_pane_snapshot_lossy(output: &str) -> HashMap<String, LivePaneInfo>
         .into_iter()
         .filter_map(parse_live_pane_line)
         .collect()
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
+    let mut snapshot = TmuxSidebarSnapshot {
+        live_panes: HashMap::new(),
+        window_statuses: HashMap::new(),
+        active_windows: HashSet::new(),
+        pane_window_ids: HashMap::new(),
+        pane_window_indexes: HashMap::new(),
+        active_pane_ids: HashSet::new(),
+        window_pane_counts: HashMap::new(),
+        server_boot_id: None,
+        position: None,
+        layout: None,
+        filter: None,
+        sleeping_panes: None,
+    };
+
+    for record in live_pane_records(output) {
+        let fields = live_pane_fields(
+            record
+                .strip_prefix(LIVE_PANE_RECORD_SEPARATOR)
+                .or_else(|| record.strip_prefix(LIVE_PANE_ESCAPED_RECORD_SEPARATOR))
+                .unwrap_or(record),
+        );
+        if fields.len() != 19 || fields[0].is_empty() {
+            return Err(anyhow!("tmux returned malformed sidebar state: {record:?}"));
+        }
+
+        let pane_id = fields[0].to_string();
+        let session = fields[5].to_string();
+        let window_id = fields[8].to_string();
+        let status = nonempty(fields[9]);
+        snapshot.live_panes.insert(
+            pane_id.clone(),
+            LivePaneInfo {
+                pid: fields[1].parse().ok(),
+                current_command: Some(fields[2].to_string()),
+                working_dir: PathBuf::from(fields[3]),
+                title: nonempty(fields[4]),
+                session: Some(session.clone()),
+                window: Some(fields[6].to_string()),
+                session_id: nonempty(fields[7]),
+                window_id: nonempty(fields[8]),
+            },
+        );
+        snapshot.window_statuses.insert(pane_id.clone(), status);
+        snapshot
+            .pane_window_ids
+            .insert(pane_id.clone(), window_id.clone());
+        if let Ok(index) = fields[13].parse() {
+            snapshot.pane_window_indexes.insert(pane_id.clone(), index);
+        }
+        *snapshot
+            .window_pane_counts
+            .entry(window_id.clone())
+            .or_default() += 1;
+        if fields[10] == "1" && fields[11] == "1" {
+            snapshot.active_windows.insert((session, window_id));
+        }
+        if fields[12] == "1" {
+            snapshot.active_pane_ids.insert(pane_id);
+        }
+
+        if snapshot.server_boot_id.is_none() {
+            snapshot.server_boot_id = nonempty(fields[14]);
+            snapshot.position = nonempty(fields[15]);
+            snapshot.layout = nonempty(fields[16]);
+            snapshot.filter = nonempty(fields[17]);
+            snapshot.sleeping_panes = nonempty(fields[18]);
+        }
+    }
+
+    Ok(snapshot)
 }
 
 fn parse_window_ownership_record(line: &str) -> Option<WindowOwnershipRecord> {
@@ -245,6 +341,12 @@ impl TmuxBackend {
     /// Create a new TmuxBackend instance.
     pub fn new() -> Self {
         Self
+    }
+
+    /// Query all tmux state consumed by one sidebar daemon refresh.
+    pub(crate) fn sidebar_snapshot(&self) -> Result<TmuxSidebarSnapshot> {
+        let output = self.tmux_query(&["list-panes", "-a", "-F", SIDEBAR_STATE_FORMAT])?;
+        parse_sidebar_snapshot(&output)
     }
 
     /// Run a tmux command, returning an error with context on failure.
@@ -1276,6 +1378,39 @@ mod tests {
     fn live_pane(path: &str, session_id: &str) -> LivePaneInfo {
         let line = format!("%7\t12345\tnode\t{path}\tWorking\tmain\twork\t{session_id}\t@2");
         parse_live_pane_line(&line).unwrap().1
+    }
+
+    #[test]
+    fn sidebar_snapshot_parses_one_server_observation() {
+        let output = "\x1e%7\x1f12345\x1fnode\x1f/repo\x1fAgent\x1fmain\x1fwork\x1f$1\x1f@2\x1f✓\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n\x1e%8\x1f12346\x1fbash\x1f/repo\x1fShell\x1fmain\x1fwork\x1f$1\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n";
+
+        let snapshot = parse_sidebar_snapshot(output).unwrap();
+
+        assert_eq!(snapshot.live_panes.len(), 2);
+        assert_eq!(snapshot.live_panes["%7"].pid, Some(12345));
+        assert_eq!(snapshot.window_statuses["%7"].as_deref(), Some("✓"));
+        assert_eq!(snapshot.window_statuses["%8"], None);
+        assert_eq!(snapshot.window_pane_counts["@2"], 2);
+        assert_eq!(snapshot.pane_window_indexes["%7"], 4);
+        assert!(
+            snapshot
+                .active_windows
+                .contains(&("main".into(), "@2".into()))
+        );
+        assert!(snapshot.active_pane_ids.contains("%7"));
+        assert!(!snapshot.active_pane_ids.contains("%8"));
+        assert_eq!(snapshot.server_boot_id.as_deref(), Some("1700000000"));
+        assert_eq!(snapshot.position.as_deref(), Some("top"));
+        assert_eq!(snapshot.layout.as_deref(), Some("compact"));
+        assert_eq!(snapshot.filter.as_deref(), Some("session"));
+        assert_eq!(snapshot.sleeping_panes.as_deref(), Some("%7 %8"));
+    }
+
+    #[test]
+    fn sidebar_snapshot_rejects_malformed_records() {
+        let error = parse_sidebar_snapshot("\x1e%7\x1f12345\n").unwrap_err();
+
+        assert!(error.to_string().contains("malformed sidebar state"));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::cmd::Cmd;
 use crate::config::{Config, SidebarPosition};
 use crate::git::GitStatus;
 use crate::github::{CheckSummary, PrSummary};
-use crate::multiplexer::{Multiplexer, create_backend, detect_backend};
+use crate::multiplexer::{LivePaneInfo, Multiplexer, TmuxBackend, create_backend, detect_backend};
 use crate::state::StateStore;
 
 use super::app::{SidebarFilterMode, SidebarLayoutMode};
@@ -33,85 +33,37 @@ pub fn socket_path(instance_id: &str) -> PathBuf {
 
 /// Result of a batched tmux query.
 struct TmuxState {
+    live_panes: HashMap<String, LivePaneInfo>,
     window_statuses: HashMap<String, Option<String>>,
     active_windows: HashSet<(String, String)>,
     pane_window_ids: HashMap<String, String>,
     pane_window_indexes: HashMap<String, u32>,
     active_pane_ids: HashSet<String>,
     window_pane_counts: HashMap<String, usize>,
+    server_boot_id: Option<String>,
+    position: Option<String>,
+    layout: Option<String>,
+    filter: Option<String>,
+    sleeping_panes: Option<String>,
 }
 
-/// Query all sidebar-relevant tmux state in a single command.
-fn query_tmux_state() -> TmuxState {
-    let format = "#{pane_id}\t#{session_name}\t#{window_id}\t#{@workmux_pane_status}\t#{window_active}\t#{session_attached}\t#{pane_active}\t#{window_index}";
-    let output = Cmd::new("tmux")
-        .args(&["list-panes", "-a", "-F", format])
-        .run_and_capture_stdout()
-        .unwrap_or_default();
-
-    let mut window_statuses = HashMap::new();
-    let mut active_windows = HashSet::new();
-    let mut pane_window_ids = HashMap::new();
-    let mut pane_window_indexes = HashMap::new();
-    let mut active_pane_ids = HashSet::new();
-    let mut window_pane_counts: HashMap<String, usize> = HashMap::new();
-
-    for line in output.lines() {
-        let mut parts = line.split('\t');
-        let (
-            Some(pane_id),
-            Some(session),
-            Some(window_id),
-            Some(status),
-            Some(win_active),
-            Some(sess_attached),
-            Some(pane_active),
-        ) = (
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-        )
-        else {
-            continue;
-        };
-        let win_active = win_active == "1";
-        let sess_attached = sess_attached == "1";
-        let pane_active = pane_active == "1";
-
-        let status_val = if status.is_empty() {
-            None
-        } else {
-            Some(status.to_string())
-        };
-        window_statuses.insert(pane_id.to_string(), status_val);
-        pane_window_ids.insert(pane_id.to_string(), window_id.to_string());
-        // Trailing field so older/newer daemons tolerate each other's lines;
-        // absent or non-numeric values simply leave the index unset.
-        if let Some(index) = parts.next().and_then(|value| value.parse().ok()) {
-            pane_window_indexes.insert(pane_id.to_string(), index);
-        }
-        *window_pane_counts.entry(window_id.to_string()).or_default() += 1;
-
-        if win_active && sess_attached {
-            active_windows.insert((session.to_string(), window_id.to_string()));
-        }
-        if pane_active {
-            active_pane_ids.insert(pane_id.to_string());
-        }
-    }
-
-    TmuxState {
-        window_statuses,
-        active_windows,
-        pane_window_ids,
-        pane_window_indexes,
-        active_pane_ids,
-        window_pane_counts,
-    }
+/// Query all sidebar-relevant tmux state in a single server observation.
+fn query_tmux_state() -> Result<TmuxState> {
+    let snapshot = TmuxBackend::new().sidebar_snapshot()?;
+    Ok(TmuxState {
+        live_panes: snapshot.live_panes,
+        window_statuses: snapshot.window_statuses,
+        active_windows: snapshot.active_windows,
+        pane_window_ids: snapshot.pane_window_ids,
+        pane_window_indexes: snapshot.pane_window_indexes,
+        active_pane_ids: snapshot.active_pane_ids,
+        window_pane_counts: snapshot.window_pane_counts,
+        server_boot_id: snapshot.server_boot_id,
+        position: snapshot.position,
+        layout: snapshot.layout,
+        filter: snapshot.filter,
+        sleeping_panes: snapshot.sleeping_panes,
+    })
 }
 
 /// Unix socket server for broadcasting snapshots to clients.
@@ -206,17 +158,14 @@ impl SocketServer {
 }
 
 /// Read the sidebar layout mode from tmux global, falling back to settings.json, then config.
-fn read_sidebar_layout_mode(config: &Config) -> Option<SidebarLayoutMode> {
-    // Check tmux global first (set by toggle_layout_mode during this session)
-    if let Ok(output) = Cmd::new("tmux")
-        .args(&["show-option", "-gqv", "@workmux_sidebar_layout"])
-        .run_and_capture_stdout()
-    {
-        match output.trim() {
-            "tiles" => return Some(SidebarLayoutMode::Tiles),
-            "compact" => return Some(SidebarLayoutMode::Compact),
-            _ => {}
-        }
+fn read_sidebar_layout_mode(
+    config: &Config,
+    tmux_value: Option<&str>,
+) -> Option<SidebarLayoutMode> {
+    match tmux_value.map(str::trim) {
+        Some("tiles") => return Some(SidebarLayoutMode::Tiles),
+        Some("compact") => return Some(SidebarLayoutMode::Compact),
+        _ => {}
     }
 
     // Fall back to persisted setting (user toggled layout in a previous tmux session)
@@ -241,15 +190,9 @@ fn read_sidebar_layout_mode(config: &Config) -> Option<SidebarLayoutMode> {
 }
 
 /// Read the sidebar filter mode from tmux global, falling back to settings.json.
-fn read_sidebar_filter_mode() -> SidebarFilterMode {
-    if let Ok(output) = Cmd::new("tmux")
-        .args(&["show-option", "-gqv", "@workmux_sidebar_filter"])
-        .run_and_capture_stdout()
-    {
-        let trimmed = output.trim();
-        if !trimmed.is_empty() {
-            return SidebarFilterMode::from_str(trimmed);
-        }
+fn read_sidebar_filter_mode(tmux_value: Option<&str>) -> SidebarFilterMode {
+    if let Some(value) = tmux_value {
+        return SidebarFilterMode::from_str(value);
     }
 
     // Fall back to persisted setting
@@ -264,13 +207,18 @@ fn read_sidebar_filter_mode() -> SidebarFilterMode {
 }
 
 /// Read pane IDs manually marked as sleeping from the tmux global option.
-fn read_sleeping_panes() -> HashSet<String> {
-    Cmd::new("tmux")
-        .args(&["show-option", "-gqv", "@workmux_sleeping_panes"])
-        .run_and_capture_stdout()
-        .ok()
-        .map(|s| s.split_whitespace().map(String::from).collect())
+fn read_sleeping_panes(tmux_value: Option<&str>) -> HashSet<String> {
+    tmux_value
+        .map(|value| value.split_whitespace().map(String::from).collect())
         .unwrap_or_default()
+}
+
+fn read_sidebar_position(config: &Config, tmux_value: Option<&str>) -> SidebarPosition {
+    match tmux_value.map(str::trim) {
+        Some("top") => SidebarPosition::Top,
+        Some("left") => SidebarPosition::Left,
+        _ => config.sidebar.position.unwrap_or_default(),
+    }
 }
 
 /// Shared git status cache, updated by a background worker thread.
@@ -1645,22 +1593,35 @@ pub fn run() -> Result<()> {
             last_refresh = Instant::now();
 
             // ── Gather inputs ──
-            let tmux_state = query_tmux_state();
+            let tmux_state = match query_tmux_state() {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to query sidebar tmux state");
+                    continue;
+                }
+            };
             let agents = StateStore::new()
-                .and_then(|store| store.load_reconciled_agents(mux.as_ref()))
+                .and_then(|store| {
+                    store.load_reconciled_agents_from_snapshot(
+                        mux.as_ref(),
+                        &tmux_state.live_panes,
+                        tmux_state.server_boot_id.as_deref(),
+                    )
+                })
                 .ok();
             let Some(agents) = agents else { continue };
 
             let (position, layout_mode, sort) = {
                 let cfg = config.lock().unwrap();
                 (
-                    super::read_sidebar_position(&cfg),
-                    read_sidebar_layout_mode(&cfg).unwrap_or_default(),
+                    read_sidebar_position(&cfg, tmux_state.position.as_deref()),
+                    read_sidebar_layout_mode(&cfg, tmux_state.layout.as_deref())
+                        .unwrap_or_default(),
                     cfg.sidebar.sort.unwrap_or_default(),
                 )
             };
-            let filter_mode = read_sidebar_filter_mode();
-            let sleeping_pane_ids = read_sleeping_panes();
+            let filter_mode = read_sidebar_filter_mode(tmux_state.filter.as_deref());
+            let sleeping_pane_ids = read_sleeping_panes(tmux_state.sleeping_panes.as_deref());
             let git_statuses = git_cache.lock().ok().map(|c| c.clone()).unwrap_or_default();
             let pr_statuses = pr_cache.lock().ok().map(|c| c.clone()).unwrap_or_default();
             let check_statuses = check_cache
@@ -2564,12 +2525,18 @@ mod tests {
                 TickInput {
                     agents,
                     tmux_state: TmuxState {
+                        live_panes: HashMap::new(),
                         window_statuses: HashMap::new(),
                         active_windows: HashSet::new(),
                         pane_window_ids: HashMap::new(),
                         pane_window_indexes: HashMap::new(),
                         active_pane_ids: HashSet::new(),
                         window_pane_counts: HashMap::new(),
+                        server_boot_id: None,
+                        position: None,
+                        layout: None,
+                        filter: None,
+                        sleeping_panes: None,
                     },
                     captured_panes: captures,
                     sort: crate::config::SidebarSort::default(),

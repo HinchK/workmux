@@ -1,7 +1,7 @@
 //! Filesystem-based state persistence for agent state.
 
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -446,9 +446,8 @@ impl StateStore {
         mux: &dyn crate::multiplexer::Multiplexer,
     ) -> Result<Vec<crate::multiplexer::AgentPane>> {
         let all_agents = self.list_all_agents()?;
-        let backend = mux.name();
         let instance = mux.instance_id();
-        self.reconcile_agents_for_context(all_agents, mux, backend, &instance, false, true)
+        self.reconcile_agents_for_context(all_agents, mux, &instance, false, true)
     }
 
     /// Observe reconciled agents together with the complete state-file census.
@@ -475,14 +474,8 @@ impl StateStore {
             .filter_map(Option::as_ref)
             .filter(|key| key.backend == backend && key.instance == instance)
             .count();
-        let agents = self.reconcile_agents_for_context(
-            inventory.states,
-            mux,
-            backend,
-            &instance,
-            true,
-            false,
-        )?;
+        let agents =
+            self.reconcile_agents_for_context(inventory.states, mux, &instance, true, false)?;
 
         Ok(ReconciledAgentReport {
             backend: backend.to_string(),
@@ -500,28 +493,63 @@ impl StateStore {
         &self,
         all_agents: Vec<AgentState>,
         mux: &dyn crate::multiplexer::Multiplexer,
-        backend: &str,
         instance: &str,
         strict_server_identity: bool,
         prune_stale: bool,
     ) -> Result<Vec<crate::multiplexer::AgentPane>> {
-        // Fetch all live pane info in a single batched query
         let live_panes = if strict_server_identity {
             mux.get_all_live_pane_info_strict()?
         } else {
             mux.get_all_live_pane_info()?
         };
-        let auto_renamed_tmux_windows = if mux.name() == "tmux" {
-            tmux_auto_renamed_windows(&live_panes)
-        } else {
-            HashSet::new()
-        };
-
-        // Get current server boot ID for crash detection
         let current_boot_id = if strict_server_identity {
             mux.server_boot_id()?
         } else {
             mux.server_boot_id().unwrap_or(None)
+        };
+        self.reconcile_agents_from_snapshot(
+            all_agents,
+            mux,
+            instance,
+            &live_panes,
+            current_boot_id.as_deref(),
+            prune_stale,
+        )
+    }
+
+    /// Reconcile agents against a live snapshot supplied by a shared caller query.
+    pub(crate) fn load_reconciled_agents_from_snapshot(
+        &self,
+        mux: &dyn crate::multiplexer::Multiplexer,
+        live_panes: &HashMap<String, crate::multiplexer::LivePaneInfo>,
+        current_boot_id: Option<&str>,
+    ) -> Result<Vec<crate::multiplexer::AgentPane>> {
+        let all_agents = self.list_all_agents()?;
+        let instance = mux.instance_id();
+        self.reconcile_agents_from_snapshot(
+            all_agents,
+            mux,
+            &instance,
+            live_panes,
+            current_boot_id,
+            true,
+        )
+    }
+
+    fn reconcile_agents_from_snapshot(
+        &self,
+        all_agents: Vec<AgentState>,
+        mux: &dyn crate::multiplexer::Multiplexer,
+        instance: &str,
+        live_panes: &HashMap<String, crate::multiplexer::LivePaneInfo>,
+        current_boot_id: Option<&str>,
+        prune_stale: bool,
+    ) -> Result<Vec<crate::multiplexer::AgentPane>> {
+        let backend = mux.name();
+        let auto_renamed_tmux_windows = if backend == "tmux" {
+            tmux_auto_renamed_windows(live_panes)
+        } else {
+            HashSet::new()
         };
 
         let mut valid_agents = Vec::new();
@@ -537,7 +565,7 @@ impl StateStore {
 
             let pane_id = &state.pane_key.pane_id;
             let previous_server =
-                server_lifecycle_changed(state.boot_id.as_deref(), current_boot_id.as_deref());
+                server_lifecycle_changed(state.boot_id.as_deref(), current_boot_id);
             match live_pane {
                 None if previous_server => {
                     trace!(
