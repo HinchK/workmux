@@ -21,6 +21,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.250 (2026-08-30)
+
+- Fix: Keep pane-less agent status updates tied to the correct tmux pane, preventing
+  unrelated shells and editors from being marked as active.
+  ([#252](https://github.com/raine/workmux/issues/252))
+
 ## v0.1.249 (2026-08-30)
 
 - Improve sidebar performance by reducing startup latency, idle wakeups, tmux
