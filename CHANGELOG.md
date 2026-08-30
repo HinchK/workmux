@@ -23,8 +23,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## Unreleased
 
+- Improve sidebar performance by reducing startup latency, idle wakeups, tmux
+  polling, and rendering overhead.
 - Register agent panes on startup so they appear immediately in the sidebar and
-  dashboard.
+  dashboard. (Agent harness support varies.)
 
 ## v0.1.248 (2026-08-26)
 
