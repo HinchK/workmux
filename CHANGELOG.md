@@ -21,6 +21,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Register agent panes on startup so they appear immediately in the sidebar and
+  dashboard.
+
 ## v0.1.248 (2026-08-26)
 
 - Set `dashboard.close_on_jump: false` to keep the dashboard open when jumping
