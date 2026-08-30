@@ -456,7 +456,8 @@ impl TmuxBackend {
 
     /// Execute a shell script via tmux run-shell.
     fn run_shell(&self, script: &str) -> Result<()> {
-        self.tmux_cmd(&["run-shell", script])
+        let escaped_script = script.replace('#', "##");
+        self.tmux_cmd(&["run-shell", &escaped_script])
     }
 
     fn window_target_arg(target: &WindowTarget) -> String {
@@ -1427,6 +1428,47 @@ mod tests {
     use super::*;
 
     const LIVE_PANE_LINE: &str = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2";
+
+    #[test]
+    fn run_shell_preserves_literal_tmux_formats() {
+        if which::which("tmux").is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("tmux socket ' quoted");
+        let marker = temp.path().join("format-job-marker");
+        let output = temp.path().join("format-output");
+        let socket_text = socket.to_string_lossy();
+        Cmd::new("tmux")
+            .args(&[
+                "-S",
+                &socket_text,
+                "new-session",
+                "-d",
+                "-s",
+                "literal-session",
+            ])
+            .run()
+            .unwrap();
+        let backend = TmuxBackend::for_socket(&socket_text);
+        let literal = format!("#{{session_name}} #(touch {})", marker.display());
+        let script = format!(
+            "printf %s {} > {}",
+            crate::shell::shell_quote(&literal),
+            crate::shell::shell_quote(&output.to_string_lossy())
+        );
+
+        let run_result = backend.run_shell(&script);
+        let output_result = std::fs::read_to_string(&output);
+        let marker_exists = marker.exists();
+        let _ = Cmd::new("tmux")
+            .args(&["-S", &socket_text, "kill-server"])
+            .run();
+
+        run_result.unwrap();
+        assert_eq!(output_result.unwrap(), literal);
+        assert!(!marker_exists);
+    }
 
     fn live_pane(path: &str, session_id: &str) -> LivePaneInfo {
         let line = format!("%7\t12345\tnode\t{path}\tWorking\tmain\twork\t{session_id}\t@2");
