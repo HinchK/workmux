@@ -38,8 +38,10 @@ use tracing::{error, info};
 fn main() -> Result<()> {
     logger::init()?;
     let context = LogContext::current();
+    let args = std::env::args().collect::<Vec<_>>();
+    let deferred_cleanup_worker = args.get(1).is_some_and(|arg| arg == "_deferred-cleanup");
     info!(
-        args = ?std::env::args().collect::<Vec<_>>(),
+        args = ?args,
         cwd = ?context.cwd,
         tmux_pane = ?context.tmux_pane,
         "workmux start"
@@ -55,7 +57,9 @@ fn main() -> Result<()> {
             Ok(result)
         }
         Err(err) => {
-            error!(error = ?err, "workmux failed");
+            if !deferred_cleanup_worker {
+                error!(error = ?err, "workmux failed");
+            }
             Err(err)
         }
     }

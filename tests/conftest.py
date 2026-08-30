@@ -1939,10 +1939,14 @@ def run_workmux_merge(
     branch_arg = branch_name if branch_name else ""
     flags_str = " ".join(flags)
 
+    started_file: Optional[Path] = None
     if from_window:
         from_branch = from_window.replace(DEFAULT_WINDOW_PREFIX, "")
         worktree_path = get_worktree_path(repo_path, from_branch)
         workdir = worktree_path
+        started_file = scripts_dir / "workmux_merge_started.txt"
+        if started_file.exists():
+            started_file.unlink()
     else:
         workdir = repo_path
 
@@ -1951,15 +1955,26 @@ def run_workmux_merge(
     editor_script.write_text('#!/bin/sh\necho "Auto commit from test" > "$1"\n')
     editor_script.chmod(0o755)
 
+    started_command = (
+        f"echo started > {shlex.quote(str(started_file))}; " if started_file else ""
+    )
     merge_script = (
+        f"{started_command}"
         f"export GIT_EDITOR={shlex.quote(str(editor_script))} && "
-        f"cd {workdir} && "
-        f"{workmux_exe_path} merge {flags_str} {branch_arg} "
-        f"> {stdout_file} 2> {stderr_file}; "
-        f"echo $? > {exit_code_file}"
+        f"cd {shlex.quote(str(workdir))} && "
+        f"{shlex.quote(str(workmux_exe_path))} merge {flags_str} {branch_arg} "
+        f"> {shlex.quote(str(stdout_file))} 2> {shlex.quote(str(stderr_file))}; "
+        f"echo $? > {shlex.quote(str(exit_code_file))}"
     )
 
-    env.run_shell_background(merge_script)
+    if from_window:
+        env.send_keys(from_window, merge_script)
+        assert started_file is not None
+        assert poll_until_file_has_content(started_file, timeout=5.0), (
+            "workmux merge did not start in target window"
+        )
+    else:
+        env.run_shell_background(merge_script)
 
     assert poll_until_file_has_content(exit_code_file, timeout=10.0), (
         "workmux merge did not complete in time"

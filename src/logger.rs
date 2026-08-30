@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -56,6 +57,33 @@ fn init_inner() -> Result<()> {
         .try_init()
         .context("Failed to initialize tracing subscriber")?;
 
+    Ok(())
+}
+
+pub fn record_deferred_cleanup_failure(
+    handle: &str,
+    worktree_path: &Path,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let log_path = determine_log_path()?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create log directory at {}", parent.display()))?;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let cause = format!("{error:#}").replace(['\r', '\n'], " ");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("Failed to open log file at {}", log_path.display()))?;
+    writeln!(
+        file,
+        "{timestamp} ERROR deferred cleanup worker failed handle={handle:?} worktree={worktree_path:?} cause={cause}"
+    )?;
+    file.sync_data()?;
     Ok(())
 }
 

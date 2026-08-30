@@ -1,7 +1,17 @@
 //! Event dispatching for background events.
 
 use super::App;
-use super::types::{AppEvent, PrListState};
+use super::types::{AppEvent, PrListState, SweepOutcome};
+
+fn sweep_complete_message(outcome: SweepOutcome) -> String {
+    match (outcome.completed, outcome.scheduled) {
+        (_, 0) => "Sweep complete".to_string(),
+        (0, scheduled) => format!("Sweep cleanup scheduled for {scheduled} worktree(s)"),
+        (completed, scheduled) => {
+            format!("Sweep complete: {completed} removed, {scheduled} scheduled")
+        }
+    }
+}
 
 impl App {
     /// Apply a background event to app state.
@@ -76,9 +86,9 @@ impl App {
             AppEvent::SweepComplete(result) => {
                 self.sweep_progress = None;
                 match result {
-                    Ok(()) => {
+                    Ok(outcome) => {
                         self.status_message =
-                            Some(("Sweep complete".to_string(), std::time::Instant::now()));
+                            Some((sweep_complete_message(outcome), std::time::Instant::now()));
                     }
                     Err(e) => {
                         self.status_message =
@@ -88,5 +98,39 @@ impl App {
                 self.trigger_worktree_refetch();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{AppEvent, SweepOutcome};
+    use super::sweep_complete_message;
+
+    #[test]
+    fn sweep_event_preserves_scheduled_cleanup_count() {
+        let event = AppEvent::SweepComplete(Ok(SweepOutcome {
+            completed: 1,
+            scheduled: 2,
+        }));
+        let AppEvent::SweepComplete(Ok(outcome)) = event else {
+            panic!("expected successful sweep event");
+        };
+        assert_eq!(outcome.completed, 1);
+        assert_eq!(outcome.scheduled, 2);
+        assert_eq!(
+            sweep_complete_message(outcome),
+            "Sweep complete: 1 removed, 2 scheduled"
+        );
+    }
+
+    #[test]
+    fn scheduled_only_sweep_is_not_reported_as_complete() {
+        assert_eq!(
+            sweep_complete_message(SweepOutcome {
+                completed: 0,
+                scheduled: 2,
+            }),
+            "Sweep cleanup scheduled for 2 worktree(s)"
+        );
     }
 }

@@ -30,7 +30,13 @@ pub enum AppEvent {
     /// Progress update during background sweep (current, total, handle)
     SweepProgressUpdate(usize, usize, String),
     /// Sweep operation completed
-    SweepComplete(Result<(), String>),
+    SweepComplete(Result<SweepOutcome, String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepOutcome {
+    pub completed: usize,
+    pub scheduled: usize,
 }
 
 use clap::ValueEnum;

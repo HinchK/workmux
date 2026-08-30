@@ -22,6 +22,8 @@ session can't be detected when running from inside the source session.
 """
 
 import shlex
+import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -282,3 +284,69 @@ class TestCreateAndSwitch:
         assert worktree_path.is_dir(), (
             f"Worktree at {worktree_path} should exist after 'add --session'"
         )
+
+
+class TestStableSessionCleanupIdentity:
+    def test_session_rename_does_not_release_deferred_cleanup(
+        self, mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+    ):
+        env = mux_server
+        branch_name = "stable-session-id"
+        session_name = get_session_name(branch_name)
+        renamed_session = f"{session_name}-renamed"
+        write_workmux_config(repo_path)
+        worktree_path = add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            repo_path,
+            branch_name,
+            extra_args="--session --background",
+        )
+        session_id = env.tmux(
+            ["display-message", "-p", "-t", f"={session_name}:", "#{session_id}"]
+        ).stdout.strip()
+        assert session_id.startswith("$")
+
+        real_tmux = shutil.which("tmux")
+        assert real_tmux is not None
+        fake_tmux = env.fake_bin_dir / "tmux"
+        fake_tmux.write_text(
+            "#!/bin/sh\n"
+            'for arg in "$@"; do\n'
+            '  if [ "$arg" = kill-session ]; then exit 0; fi\n'
+            "done\n"
+            f'exec {shlex.quote(real_tmux)} "$@"\n'
+        )
+        fake_tmux.chmod(0o755)
+
+        scripts_dir = get_scripts_dir(env)
+        output = scripts_dir / "stable-session-output"
+        script = scripts_dir / "stable-session-remove.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"export PATH={shlex.quote(env.env['PATH'])}\n"
+            f"export HOME={shlex.quote(env.env['HOME'])}\n"
+            f"export XDG_STATE_HOME={shlex.quote(env.env['XDG_STATE_HOME'])}\n"
+            f"cd {shlex.quote(str(worktree_path))}\n"
+            f"exec {shlex.quote(str(workmux_exe_path))} remove --force "
+            f">{shlex.quote(str(output))} 2>&1\n"
+        )
+        script.chmod(0o755)
+        env.send_keys(f"={session_name}:", str(script))
+        assert poll_until(
+            lambda: output.exists() and "Scheduled removal" in output.read_text()
+        )
+        env.tmux(["rename-session", "-t", session_id, renamed_session])
+
+        time.sleep(0.8)
+        live_ids = env.tmux(
+            ["list-sessions", "-F", "#{session_id}"]
+        ).stdout.splitlines()
+        assert session_id in live_ids
+        assert worktree_path.is_dir()
+
+        env.run_command(
+            [real_tmux, "-S", str(env.socket_path), "kill-session", "-t", session_id]
+        )
+        assert poll_until(lambda: not worktree_path.exists(), timeout=10.0)
+        fake_tmux.unlink()

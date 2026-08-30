@@ -457,7 +457,7 @@ impl TmuxBackend {
     /// Execute a shell script via tmux run-shell.
     fn run_shell(&self, script: &str) -> Result<()> {
         let escaped_script = script.replace('#', "##");
-        self.tmux_cmd(&["run-shell", &escaped_script])
+        self.tmux_cmd(&["run-shell", "-b", &escaped_script])
     }
 
     fn window_target_arg(target: &WindowTarget) -> String {
@@ -1459,6 +1459,12 @@ mod tests {
         );
 
         let run_result = backend.run_shell(&script);
+        for _ in 0..100 {
+            if output.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let output_result = std::fs::read_to_string(&output);
         let marker_exists = marker.exists();
         let _ = Cmd::new("tmux")

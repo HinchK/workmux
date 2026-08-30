@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::MuxMode;
+use crate::git::RepositoryIdentity;
 use crate::github::PrSummary;
 use crate::multiplexer::conversation::{ConversationForker, SessionInfo};
 use crate::multiplexer::types::ResumeMode;
@@ -50,11 +51,14 @@ pub struct MergeResult {
     pub branch_merged: String,
     pub main_branch: String,
     pub had_staged_changes: bool,
+    pub cleanup_scheduled: bool,
+    pub cleanup_error: Option<anyhow::Error>,
 }
 
 /// Result of removing a worktree
 pub struct RemoveResult {
     pub branch_removed: String,
+    pub cleanup_scheduled: bool,
 }
 
 /// Result of renaming a worktree
@@ -72,34 +76,33 @@ pub struct RenameResult {
     pub agents_migrated: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct WorktreeCleanupIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub repository: RepositoryIdentity,
+}
+
 /// Deferred cleanup operations to run after window close.
 /// Used when running inside the target window to avoid invalidating the agent's CWD.
 pub struct DeferredCleanup {
     pub worktree_path: PathBuf,
-    pub trash_path: PathBuf,
     pub branch_name: String,
     pub handle: String,
     pub keep_branch: bool,
     pub force: bool,
-    pub git_common_dir: PathBuf,
-    /// Path to the git worktree admin directory (e.g., $GIT_COMMON_DIR/worktrees/<name>/).
-    /// Used to remove lock files before pruning, since `git worktree prune` skips locked entries.
-    pub worktree_admin_dir: Option<PathBuf>,
+    pub expected_identity: WorktreeCleanupIdentity,
 }
 
 /// Result of cleanup operations
 pub struct CleanupResult {
     pub tmux_window_killed: bool,
-    pub worktree_removed: bool,
-    pub local_branch_deleted: bool,
     /// True when the source target is focused by the active client.
     pub source_target_is_active: bool,
     /// The actual window name to close later (when running inside a duplicate window)
     pub window_to_close_later: Option<String>,
     pub window_target_to_close_later: Option<WindowTarget>,
     pub target_id_to_close_later: Option<String>,
-    /// Trash directory path to delete after window close (deferred to avoid race condition)
-    pub trash_path_to_delete: Option<PathBuf>,
     /// Full cleanup deferred until after window close (rename + prune + branch delete).
     /// Used when running inside the target window to keep CWD valid for agent hooks.
     pub deferred_cleanup: Option<DeferredCleanup>,

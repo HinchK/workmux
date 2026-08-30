@@ -324,12 +324,14 @@ pub fn merge(
             branch_merged: branch_to_merge,
             main_branch: target_branch.to_string(),
             had_staged_changes,
+            cleanup_scheduled: false,
+            cleanup_error: None,
         });
     }
 
     // Always force cleanup after a successful merge
     info!(branch = %branch_to_merge, "merge:cleanup start");
-    let cleanup_result = cleanup::cleanup(
+    let cleanup_result = match cleanup::cleanup(
         context,
         &branch_to_merge,
         handle,
@@ -340,22 +342,36 @@ pub fn merge(
             no_hooks,
             show_hook_output: true,
         },
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            return Ok(MergeResult {
+                branch_merged: branch_to_merge,
+                main_branch: target_branch.to_string(),
+                had_staged_changes,
+                cleanup_scheduled: false,
+                cleanup_error: Some(error),
+            });
+        }
+    };
 
-    // Navigate to the target branch window/session and close the source
-    cleanup::navigate_to_target_and_close(
+    let cleanup_scheduled = cleanup_result.deferred_cleanup.is_some();
+    let cleanup_error = cleanup::navigate_to_target_and_close(
         context.mux.as_ref(),
         &context.prefix,
         &target_window_name,
         handle,
         &cleanup_result,
         mode,
-    )?;
+    )
+    .err();
 
     Ok(MergeResult {
         branch_merged: branch_to_merge,
         main_branch: target_branch.to_string(),
         had_staged_changes,
+        cleanup_scheduled,
+        cleanup_error,
     })
 }
 

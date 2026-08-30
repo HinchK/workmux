@@ -100,8 +100,19 @@ pub fn run(
     );
     println!("✓ Merged '{}'", result.branch_merged);
 
+    if let Some(error) = result.cleanup_error {
+        return Err(anyhow::anyhow!(
+            "Merge completed, but cleanup failed: {error:#}"
+        ));
+    }
+
     if effective_keep {
         println!("Worktree, window, and branch kept");
+    } else if result.cleanup_scheduled {
+        println!(
+            "✓ Successfully merged '{}'; cleanup scheduled",
+            result.branch_merged
+        );
     } else {
         println!(
             "✓ Successfully merged and cleaned up '{}'",

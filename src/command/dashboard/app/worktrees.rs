@@ -437,17 +437,32 @@ impl App {
         };
 
         // force=true because user confirmed via modal
-        if workflow::remove_quiet(&handle, true, keep_branch, &ctx).is_ok() {
-            self.worktrees.retain(|w| w.path != *path);
+        match workflow::remove_quiet(&handle, true, keep_branch, &ctx) {
+            Ok(result) if result.cleanup_scheduled => {
+                self.status_message = Some((
+                    format!("Removal scheduled for '{handle}'"),
+                    std::time::Instant::now(),
+                ));
+            }
+            Ok(_) => {
+                self.worktrees.retain(|w| w.path != *path);
 
-            if self.worktrees.is_empty() {
-                self.worktree_table_state.select(None);
-                self.selected_worktree_path = None;
-            } else {
-                let idx = self.worktree_table_state.selected().unwrap_or(0);
-                let new_idx = idx.min(self.worktrees.len() - 1);
-                self.worktree_table_state.select(Some(new_idx));
-                self.selected_worktree_path = self.worktrees.get(new_idx).map(|w| w.path.clone());
+                if self.worktrees.is_empty() {
+                    self.worktree_table_state.select(None);
+                    self.selected_worktree_path = None;
+                } else {
+                    let idx = self.worktree_table_state.selected().unwrap_or(0);
+                    let new_idx = idx.min(self.worktrees.len() - 1);
+                    self.worktree_table_state.select(Some(new_idx));
+                    self.selected_worktree_path =
+                        self.worktrees.get(new_idx).map(|w| w.path.clone());
+                }
+            }
+            Err(error) => {
+                self.status_message = Some((
+                    format!("Failed to remove '{handle}': {error:#}"),
+                    std::time::Instant::now(),
+                ));
             }
         }
     }
@@ -635,23 +650,28 @@ impl App {
                 return;
             };
 
+            let mut outcome = SweepOutcome {
+                completed: 0,
+                scheduled: 0,
+            };
             let mut failures = 0;
             for (i, (handle, _path)) in paths_to_remove.iter().enumerate() {
                 let _ = tx.send(AppEvent::SweepProgressUpdate(i + 1, total, handle.clone()));
 
-                if workflow::remove_quiet(handle, true, false, &ctx).is_err() {
-                    failures += 1;
+                match workflow::remove_quiet(handle, true, false, &ctx) {
+                    Ok(result) if result.cleanup_scheduled => outcome.scheduled += 1,
+                    Ok(_) => outcome.completed += 1,
+                    Err(_) => failures += 1,
                 }
             }
 
             if failures > 0 {
                 let _ = tx.send(AppEvent::SweepComplete(Err(format!(
-                    "Removed {}/{} worktrees",
-                    total - failures,
-                    total
+                    "Completed {}, scheduled {}, failed {} of {} worktrees",
+                    outcome.completed, outcome.scheduled, failures, total
                 ))));
             } else {
-                let _ = tx.send(AppEvent::SweepComplete(Ok(())));
+                let _ = tx.send(AppEvent::SweepComplete(Ok(outcome)));
             }
         });
     }

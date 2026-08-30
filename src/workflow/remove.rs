@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::git;
@@ -166,7 +167,24 @@ fn remove_with_hook_output(
         mode,
     )?;
 
+    let cleanup_scheduled = cleanup_result.deferred_cleanup.is_some();
+    if cleanup_scheduled && show_hook_output {
+        if keep_branch {
+            println!(
+                "✓ Scheduled removal of worktree '{}' (branch '{}' will be kept)",
+                actual_handle, branch_name
+            );
+        } else {
+            println!(
+                "✓ Scheduled removal of worktree '{}' and branch '{}'",
+                actual_handle, branch_name
+            );
+        }
+        io::stdout().flush()?;
+    }
+
     Ok(RemoveResult {
         branch_removed: branch_name.to_string(),
+        cleanup_scheduled,
     })
 }

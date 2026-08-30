@@ -139,6 +139,72 @@ pub fn migrate_worktree_meta(old_handle: &str, new_handle: &str) -> Result<()> {
     Ok(())
 }
 
+/// Locate a linked-worktree registration for an exact registered path.
+pub fn linked_worktree_registration_in(
+    worktree_path: &Path,
+    git_common_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let registered = list_worktrees_in(Some(git_common_dir))?
+        .into_iter()
+        .any(|(path, _)| path == worktree_path);
+    if !registered {
+        return Ok(None);
+    }
+
+    let registrations_dir = git_common_dir.join("worktrees");
+    let registrations_dir = registrations_dir
+        .canonicalize()
+        .context("Failed to resolve linked-worktree registrations directory")?;
+    let expected_gitdir = worktree_path.join(".git");
+    let mut matching = Vec::new();
+    for entry in std::fs::read_dir(&registrations_dir)
+        .context("Failed to inspect linked-worktree registrations")?
+    {
+        let entry = entry.context("Failed to inspect linked-worktree registration")?;
+        let metadata = entry
+            .file_type()
+            .context("Failed to inspect linked-worktree registration type")?;
+        if !metadata.is_dir() || metadata.is_symlink() {
+            continue;
+        }
+        let admin_dir = entry
+            .path()
+            .canonicalize()
+            .context("Failed to resolve linked-worktree registration")?;
+        if admin_dir.parent() != Some(registrations_dir.as_path()) {
+            continue;
+        }
+        let backlink = match std::fs::read_to_string(admin_dir.join("gitdir")) {
+            Ok(backlink) => PathBuf::from(backlink.trim()),
+            Err(_) => continue,
+        };
+        if backlink == expected_gitdir {
+            matching.push(admin_dir);
+        }
+    }
+
+    match matching.len() {
+        1 => Ok(matching.pop()),
+        0 => Err(anyhow!(
+            "Registered worktree '{}' has no matching admin directory",
+            worktree_path.display()
+        )),
+        _ => Err(anyhow!(
+            "Registered worktree '{}' has multiple admin directories",
+            worktree_path.display()
+        )),
+    }
+}
+
+pub fn worktree_registration_exists_in(
+    worktree_path: &Path,
+    git_common_dir: &Path,
+) -> Result<bool> {
+    Ok(list_worktrees_in(Some(git_common_dir))?
+        .into_iter()
+        .any(|(path, _)| path == worktree_path))
+}
+
 /// Prune stale worktree metadata.
 pub fn prune_worktrees_in(git_common_dir: &Path) -> Result<()> {
     Cmd::new("git")
@@ -414,17 +480,42 @@ pub fn get_all_worktree_modes_in(
     modes
 }
 
-/// Remove all metadata for a worktree handle.
-pub fn remove_worktree_meta(handle: &str) -> Result<()> {
-    // Use --remove-section to remove all keys under the handle's section
-    let _ = Cmd::new("git")
-        .args(&[
+/// Remove worktree metadata using an explicitly identified repository.
+pub fn remove_worktree_meta_at(handle: &str, git_common_dir: &Path) -> Result<()> {
+    let section = format!("workmux.worktree.{handle}");
+    let key_pattern = format!(r"^{}\.", regex::escape(&section));
+    let mut probe = super::unattended_git(Some(git_common_dir))?;
+    let probe_output = probe
+        .args([
             "config",
             "--local",
-            "--remove-section",
-            &format!("workmux.worktree.{}", handle),
+            "--name-only",
+            "--get-regexp",
+            &key_pattern,
         ])
-        .run();
+        .output()
+        .context("Failed to inspect Workmux metadata")?;
+    if !probe_output.status.success() {
+        if probe_output.status.code() == Some(1) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "Failed to inspect Workmux metadata: {}",
+            String::from_utf8_lossy(&probe_output.stderr).trim()
+        ));
+    }
+
+    let mut remove = super::unattended_git(Some(git_common_dir))?;
+    let remove_output = remove
+        .args(["config", "--local", "--remove-section", &section])
+        .output()
+        .context("Failed to remove Workmux metadata")?;
+    if !remove_output.status.success() {
+        return Err(anyhow!(
+            "Failed to remove Workmux metadata: {}",
+            String::from_utf8_lossy(&remove_output.stderr).trim()
+        ));
+    }
     Ok(())
 }
 

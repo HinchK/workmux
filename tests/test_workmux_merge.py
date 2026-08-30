@@ -1,11 +1,17 @@
+import shlex
+import shutil
 from pathlib import Path
+
+import pytest
 
 from .conftest import (
     MuxEnvironment,
     create_commit,
     create_dirty_file,
+    get_scripts_dir,
     get_window_name,
     get_worktree_path,
+    poll_until,
     run_workmux_add,
     run_workmux_merge,
     write_global_workmux_config,
@@ -77,11 +83,122 @@ def test_merge_from_within_worktree_succeeds(
         from_window=window_name,
     )
 
-    assert not worktree_path.exists()
+    stdout = (get_scripts_dir(env) / "workmux_merge_stdout.txt").read_text()
+    assert f"Successfully merged '{branch_name}'; cleanup scheduled" in stdout
+    assert f"Successfully merged and cleaned up '{branch_name}'" not in stdout
+    assert poll_until(lambda: not worktree_path.exists(), timeout=15.0)
     windows = env.list_windows()
     assert window_name not in windows
-    branch_list_result = env.run_command(["git", "branch", "--list", branch_name])
-    assert branch_name not in branch_list_result.stdout
+    assert poll_until(
+        lambda: branch_name
+        not in env.run_command(["git", "branch", "--list", branch_name]).stdout,
+        timeout=10.0,
+    )
+
+
+def test_merge_reports_synchronous_metadata_cleanup_failure_separately(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    env = mux_server
+    branch_name = "merge-metadata-lock"
+    write_workmux_config(repo_path, env=env)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+    worktree_path = get_worktree_path(repo_path, branch_name)
+    create_commit(env, worktree_path, "feat: metadata lock")
+    commit_hash = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    lock_path = repo_path / ".git" / "config.lock"
+    lock_path.write_text("locked")
+
+    run_workmux_merge(
+        env,
+        workmux_exe_path,
+        repo_path,
+        branch_name=branch_name,
+        expect_fail=True,
+    )
+
+    stdout = (get_scripts_dir(env) / "workmux_merge_stdout.txt").read_text()
+    stderr = (get_scripts_dir(env) / "workmux_merge_stderr.txt").read_text()
+    assert f"✓ Merged '{branch_name}'" in stdout
+    assert "Merge completed, but cleanup failed:" in stderr
+    assert "Failed to remove Workmux metadata after Git cleanup" in stderr
+    assert "Failed to merge worktree" not in stderr
+    env.run_command(
+        ["git", "merge-base", "--is-ancestor", commit_hash, "main"], cwd=repo_path
+    )
+
+    lock_path.unlink()
+    env.run_command(
+        [
+            "git",
+            "config",
+            "--local",
+            "--remove-section",
+            f"workmux.worktree.{branch_name}",
+        ],
+        cwd=repo_path,
+    )
+    for trash_path in worktree_path.parent.glob(
+        f".workmux_trash_{worktree_path.name}_*"
+    ):
+        shutil.rmtree(trash_path)
+
+
+@pytest.mark.tmux_only
+def test_merge_reports_close_scheduling_failure_after_success(
+    mux_server: MuxEnvironment, workmux_exe_path: Path, repo_path: Path
+):
+    env = mux_server
+    branch_name = "merge-close-failure"
+    window_name = get_window_name(branch_name)
+    write_workmux_config(repo_path, env=env)
+    run_workmux_add(env, workmux_exe_path, repo_path, branch_name)
+    worktree_path = get_worktree_path(repo_path, branch_name)
+    create_commit(env, worktree_path, "feat: close failure")
+    commit_hash = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=worktree_path
+    ).stdout.strip()
+
+    real_tmux = shutil.which("tmux")
+    assert real_tmux is not None
+    fake_tmux = env.fake_bin_dir / "tmux"
+    fake_tmux.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = run-shell ]; then exit 42; fi\n'
+        "done\n"
+        f'exec {shlex.quote(real_tmux)} "$@"\n'
+    )
+    fake_tmux.chmod(0o755)
+
+    run_workmux_merge(
+        env,
+        workmux_exe_path,
+        repo_path,
+        branch_name=None,
+        from_window=window_name,
+        expect_fail=True,
+    )
+
+    stdout = (get_scripts_dir(env) / "workmux_merge_stdout.txt").read_text()
+    stderr = (get_scripts_dir(env) / "workmux_merge_stderr.txt").read_text()
+    assert f"✓ Merged '{branch_name}'" in stdout
+    assert "Merge completed, but cleanup failed:" in stderr
+    assert "Failed to schedule source target close" in stderr
+    assert "Failed to merge worktree" not in stderr
+    env.run_command(
+        ["git", "merge-base", "--is-ancestor", commit_hash, "main"], cwd=repo_path
+    )
+    assert worktree_path.is_dir()
+    assert window_name in env.list_windows()
+
+    env.run_command(
+        [str(workmux_exe_path), "remove", "--force", branch_name], cwd=repo_path
+    )
+    assert poll_until(lambda: not worktree_path.exists(), timeout=10.0)
+    fake_tmux.unlink()
 
 
 def test_merge_refuses_main_worktree_as_source(

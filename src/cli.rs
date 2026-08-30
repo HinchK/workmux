@@ -257,6 +257,40 @@ impl From<CliMuxMode> for MuxMode {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(name = "_deferred-cleanup", hide = true)]
+    DeferredCleanup {
+        #[arg(long, allow_hyphen_values = true)]
+        worktree_path: PathBuf,
+        #[arg(long, allow_hyphen_values = true)]
+        branch_name: String,
+        #[arg(long, allow_hyphen_values = true)]
+        handle: String,
+        #[arg(long)]
+        keep_branch: bool,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        device: u64,
+        #[arg(long)]
+        inode: u64,
+        #[arg(long, allow_hyphen_values = true)]
+        expected_worktree: PathBuf,
+        #[arg(long, allow_hyphen_values = true)]
+        admin_dir: PathBuf,
+        #[arg(long, allow_hyphen_values = true)]
+        common_dir: PathBuf,
+        #[arg(long, allow_hyphen_values = true)]
+        dot_git: PathBuf,
+        #[arg(long, value_parser = ["window", "session"])]
+        source_mode: String,
+        #[arg(long, allow_hyphen_values = true)]
+        source_name: String,
+        #[arg(long, allow_hyphen_values = true)]
+        parent_session: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        source_id: Option<String>,
+    },
+
     /// Create a new worktree and tmux window
     Add {
         /// Name of the branch (creates if it doesn't exist) or remote ref (e.g., origin/feature).
@@ -947,6 +981,53 @@ pub fn run() -> Result<()> {
     }
 
     match cli.command {
+        Commands::DeferredCleanup {
+            worktree_path,
+            branch_name,
+            handle,
+            keep_branch,
+            force,
+            device,
+            inode,
+            expected_worktree,
+            admin_dir,
+            common_dir,
+            dot_git,
+            source_mode,
+            source_name,
+            parent_session,
+            source_id,
+        } => {
+            let mode = if source_mode == "session" {
+                MuxMode::Session
+            } else {
+                MuxMode::Window
+            };
+            crate::workflow::run_deferred_cleanup_worker(
+                crate::workflow::types::DeferredCleanup {
+                    worktree_path,
+                    branch_name,
+                    handle,
+                    keep_branch,
+                    force,
+                    expected_identity: crate::workflow::types::WorktreeCleanupIdentity {
+                        device,
+                        inode,
+                        repository: git::RepositoryIdentity {
+                            worktree: expected_worktree,
+                            admin_dir,
+                            common_dir,
+                            dot_git,
+                            is_bare: false,
+                        },
+                    },
+                },
+                mode,
+                source_name,
+                parent_session,
+                source_id,
+            )
+        }
         Commands::Add {
             branch_name,
             pr,

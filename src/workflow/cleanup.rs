@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, anyhow};
 use regex::Regex;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::time::SystemTime;
 use std::{thread, time::Duration};
 
 use crate::config::MuxMode;
 use crate::multiplexer::{Multiplexer, WindowTarget, util::prefixed};
-use crate::shell::shell_quote;
 use crate::{cmd, git};
 use tracing::{debug, info, warn};
 
@@ -14,77 +14,10 @@ use tracing::{debug, info, warn};
 pub use git::get_worktree_mode;
 
 use super::context::WorkflowContext;
-use super::types::{CleanupResult, DeferredCleanup};
+use super::types::{CleanupResult, DeferredCleanup, WorktreeCleanupIdentity};
 
 const WINDOW_CLOSE_DELAY_MS: u64 = 300;
-
-/// Read the worktree's `.git` file to find the admin directory path.
-///
-/// Linked worktrees have a `.git` file (not directory) containing `gitdir: <path>`.
-/// The path may be absolute or relative to the worktree directory.
-/// Falls back to `$GIT_COMMON_DIR/worktrees/<dir_name>` if the `.git` file is missing
-/// (e.g., the worktree directory was already deleted).
-fn resolve_worktree_admin_dir(
-    worktree_path: &Path,
-    git_common_dir: &Path,
-) -> Option<std::path::PathBuf> {
-    let git_file = worktree_path.join(".git");
-    if git_file.is_file() {
-        match std::fs::read_to_string(&git_file) {
-            Ok(content) => {
-                if let Some(raw) = content.trim().strip_prefix("gitdir: ") {
-                    let p = Path::new(raw.trim());
-                    let abs = if p.is_absolute() {
-                        p.to_path_buf()
-                    } else {
-                        worktree_path.join(p)
-                    };
-                    return Some(abs);
-                }
-                warn!(
-                    path = %git_file.display(),
-                    "cleanup:worktree .git file missing 'gitdir:' prefix"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    path = %git_file.display(),
-                    error = %e,
-                    "cleanup:failed to read worktree .git file"
-                );
-            }
-        }
-    }
-
-    // Fallback: construct expected admin dir from the worktree directory name.
-    // Git uses the basename of the worktree path as the admin directory name.
-    worktree_path
-        .file_name()
-        .map(|name| git_common_dir.join("worktrees").join(name))
-}
-
-/// Best-effort recursive deletion of directory contents.
-/// Used to ensure files are removed even if the directory itself is locked (e.g., CWD).
-fn remove_dir_contents(path: &Path) {
-    if !path.exists() {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-        if is_dir {
-            let _ = std::fs::remove_dir_all(&entry_path);
-        } else {
-            let _ = std::fs::remove_file(&entry_path);
-        }
-    }
-}
+const DEFERRED_TARGET_CLOSE_TIMEOUT_MS: u64 = 5_000;
 
 /// Find all windows matching the base handle pattern (including duplicates).
 /// Matches: {prefix}{handle} and {prefix}{handle}-{N}
@@ -256,6 +189,191 @@ pub struct CleanupOptions {
     pub show_hook_output: bool,
 }
 
+fn capture_worktree_identity(
+    worktree_path: &Path,
+    expected_common_dir: &Path,
+) -> Result<Option<WorktreeCleanupIdentity>> {
+    let metadata = match std::fs::symlink_metadata(worktree_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "Worktree path must be a real directory: {}",
+            worktree_path.display()
+        );
+    }
+    let repository = git::RepositoryIdentity::discover(worktree_path)
+        .context("Failed to capture worktree repository identity")?;
+    let expected_common_dir = expected_common_dir.canonicalize()?;
+    if repository.common_dir != expected_common_dir {
+        anyhow::bail!("Worktree repository identity does not match the expected repository");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(Some(WorktreeCleanupIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            repository,
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        anyhow::bail!("Worktree cleanup identity requires Unix filesystem identity");
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DirectoryIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Clone, Copy)]
+enum QuarantineIdentity<'a> {
+    Repository(&'a WorktreeCleanupIdentity),
+    Directory(DirectoryIdentity),
+}
+
+fn directory_identity(metadata: &std::fs::Metadata) -> Result<DirectoryIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(DirectoryIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        anyhow::bail!("Worktree cleanup identity requires Unix filesystem identity");
+    }
+}
+
+fn metadata_matches(metadata: &std::fs::Metadata, expected: DirectoryIdentity) -> bool {
+    directory_identity(metadata)
+        .map(|actual| actual.device == expected.device && actual.inode == expected.inode)
+        .unwrap_or(false)
+}
+
+fn quarantine_worktree(
+    worktree_path: &Path,
+    expected: DirectoryIdentity,
+    repository: Option<&git::RepositoryIdentity>,
+) -> Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(worktree_path)
+        .context("Failed to inspect worktree before quarantine")?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || !metadata_matches(&metadata, expected)
+    {
+        anyhow::bail!("Worktree identity changed before quarantine");
+    }
+    if let Some(expected_repository) = repository {
+        let repository = git::RepositoryIdentity::discover(worktree_path)
+            .context("Failed to verify worktree before quarantine")?;
+        if repository != *expected_repository {
+            anyhow::bail!("Worktree repository identity changed before quarantine");
+        }
+    }
+
+    let parent = worktree_path.parent().unwrap_or_else(|| Path::new("."));
+    let dir_name = worktree_path
+        .file_name()
+        .context("Invalid worktree path: no directory name")?;
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_nanos();
+    let trash_path = parent.join(format!(
+        ".workmux_trash_{}_{}_{}",
+        dir_name.to_string_lossy(),
+        std::process::id(),
+        nonce
+    ));
+    std::fs::rename(worktree_path, &trash_path).with_context(|| {
+        format!(
+            "Failed to rename worktree to quarantine path {}",
+            trash_path.display()
+        )
+    })?;
+    Ok(trash_path)
+}
+
+fn perform_destructive_cleanup(
+    worktree_path: &Path,
+    expected: Option<QuarantineIdentity<'_>>,
+    branch_name: &str,
+    handle: &str,
+    keep_branch: bool,
+    force: bool,
+    git_common_dir: &Path,
+) -> Result<()> {
+    let linked_admin_dir = match expected {
+        Some(QuarantineIdentity::Repository(expected)) => {
+            Some(expected.repository.admin_dir.clone())
+        }
+        Some(QuarantineIdentity::Directory(_)) => None,
+        None => git::linked_worktree_registration_in(worktree_path, git_common_dir)?,
+    };
+    if let Some(admin_dir) = linked_admin_dir {
+        let locked_file = admin_dir.join("locked");
+        match std::fs::remove_file(&locked_file) {
+            Ok(()) => debug!(path = %locked_file.display(), "cleanup:removed worktree lock"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Failed to remove linked-worktree lock {}",
+                        locked_file.display()
+                    )
+                });
+            }
+        }
+    }
+
+    let quarantine = match expected {
+        Some(QuarantineIdentity::Repository(expected)) => Some(quarantine_worktree(
+            worktree_path,
+            DirectoryIdentity {
+                device: expected.device,
+                inode: expected.inode,
+            },
+            Some(&expected.repository),
+        )?),
+        Some(QuarantineIdentity::Directory(identity)) => {
+            Some(quarantine_worktree(worktree_path, identity, None)?)
+        }
+        None => None,
+    };
+
+    git::prune_worktrees_in(git_common_dir).context("Failed to prune worktrees")?;
+    if expected.is_none() && git::worktree_registration_exists_in(worktree_path, git_common_dir)? {
+        anyhow::bail!(
+            "Linked-worktree registration remains after pruning: {}",
+            worktree_path.display()
+        );
+    }
+    if !keep_branch {
+        git::delete_branch_in(branch_name, force, git_common_dir)
+            .context("Failed to delete local branch")?;
+    }
+    git::remove_worktree_meta_at(handle, git_common_dir)
+        .context("Failed to remove Workmux metadata after Git cleanup")?;
+    if let Some(trash_path) = quarantine {
+        std::fs::remove_dir_all(&trash_path).with_context(|| {
+            format!(
+                "Failed to remove quarantined worktree {}",
+                trash_path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Centralized function to clean up tmux and git resources.
 /// `branch_name` is used for git operations (branch deletion).
 /// `handle` is used for tmux operations (window/session lookup/kill).
@@ -279,6 +397,23 @@ pub fn cleanup(
             context.main_worktree_root.display()
         ));
     }
+    let (expected_identity, missing_admin_identity) =
+        match capture_worktree_identity(worktree_path, &context.git_common_dir) {
+            Ok(identity) => (identity, None),
+            Err(error) if keep_branch => {
+                let metadata = std::fs::symlink_metadata(worktree_path)
+                    .context("Failed to inspect worktree with missing Git admin state")?;
+                let dot_git = std::fs::symlink_metadata(worktree_path.join(".git"));
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_dir()
+                    || !dot_git.is_ok_and(|metadata| metadata.is_file())
+                {
+                    return Err(error);
+                }
+                (None, Some(directory_identity(&metadata)?))
+            }
+            Err(error) => return Err(error),
+        };
 
     // Determine if this worktree was created as a session or window
     let mode = get_worktree_mode(handle);
@@ -378,25 +513,14 @@ pub fn cleanup(
 
     let mut result = CleanupResult {
         tmux_window_killed: false,
-        worktree_removed: false,
-        local_branch_deleted: false,
         source_target_is_active,
         window_to_close_later: None,
         window_target_to_close_later: None,
         target_id_to_close_later: None,
-        trash_path_to_delete: None,
         deferred_cleanup: None,
     };
 
-    // Helper closure to perform the actual filesystem and git cleanup.
-    // This avoids code duplication while enforcing the correct operational order.
-    let perform_fs_git_cleanup = |result: &mut CleanupResult| -> Result<()> {
-        // Resolve the admin dir before the rename so we can unlock it later.
-        let worktree_admin_dir = resolve_worktree_admin_dir(worktree_path, &context.git_common_dir);
-
-        // Run pre-remove hooks before removing the worktree directory.
-        // Skip if the worktree directory doesn't exist (e.g., user manually deleted it).
-        // Skip if --no-hooks is set (e.g., RPC-triggered merge).
+    let perform_fs_git_cleanup = || -> Result<()> {
         if worktree_path.exists() && !no_hooks {
             run_pre_remove_hooks(
                 context,
@@ -405,117 +529,21 @@ pub fn cleanup(
                 branch_name,
                 show_hook_output,
             )?;
-        } else {
-            debug!(
-                path = %worktree_path.display(),
-                "cleanup:skipping pre-remove hooks, worktree directory does not exist"
-            );
         }
-
-        // Track the trash path for best-effort deletion at the end
-        let mut trash_path: Option<std::path::PathBuf> = None;
-
-        // 1. Rename the worktree directory to a trash location.
-        // This immediately frees the original path for reuse, even if a shell process
-        // still has it as CWD (the shell's CWD moves with the rename).
-        // This fixes a race condition where running `workmux remove` from inside the
-        // target tmux window could leave the directory behind.
-        if worktree_path.exists() {
-            let parent = worktree_path.parent().unwrap_or_else(|| Path::new("."));
-            let dir_name = worktree_path
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("Invalid worktree path: no directory name"))?;
-
-            // Generate unique trash name: .workmux_trash_<name>_<timestamp>
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let trash_name = format!(
-                ".workmux_trash_{}_{}",
-                dir_name.to_string_lossy(),
-                timestamp
-            );
-            let target_trash_path = parent.join(&trash_name);
-
-            debug!(
-                from = %worktree_path.display(),
-                to = %target_trash_path.display(),
-                "cleanup:renaming worktree to trash"
-            );
-
-            std::fs::rename(worktree_path, &target_trash_path).with_context(|| {
-                format!(
-                    "Failed to rename worktree directory to trash location '{}'. \
-                    Please close any terminals or editors using this directory and try again.",
-                    target_trash_path.display()
-                )
-            })?;
-
-            trash_path = Some(target_trash_path);
-            result.worktree_removed = true;
-            info!(branch = branch_name, path = %worktree_path.display(), "cleanup:worktree directory removed");
-        }
-
-        // Clean up prompt files immediately (harmless, doesn't affect CWD)
         cleanup_prompt_files(branch_name);
-
-        // 2. Remove any worktree lock before pruning.
-        // Git creates a "locked" file during `git worktree add` (with content "initializing")
-        // and removes it on completion. If creation was interrupted, this file persists and
-        // prevents `git worktree prune` from cleaning up the metadata.
-        if let Some(ref admin_dir) = worktree_admin_dir {
-            let locked_file = admin_dir.join("locked");
-            match std::fs::remove_file(&locked_file) {
-                Ok(()) => debug!(path = %locked_file.display(), "cleanup:removed worktree lock"),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    warn!(path = %locked_file.display(), error = %e, "cleanup:failed to remove worktree lock")
-                }
-            }
-        }
-
-        // 3. Prune worktrees to clean up git's metadata.
-        // Git will see the original path as missing since we renamed it.
-        git::prune_worktrees_in(&context.git_common_dir).context("Failed to prune worktrees")?;
-        debug!("cleanup:git worktrees pruned");
-
-        // 4. Delete the local branch (unless keeping it).
-        if !keep_branch {
-            git::delete_branch_in(branch_name, force, &context.git_common_dir)
-                .context("Failed to delete local branch")?;
-            result.local_branch_deleted = true;
-            info!(branch = branch_name, "cleanup:local branch deleted");
-        }
-
-        // 5. Best-effort deletion of the trash directory.
-        // If the shell is inside this directory, remove_dir_all on the root might fail
-        // immediately. Clearing children first ensures we reclaim the space.
-        if let Some(tp) = trash_path {
-            // If we're deferring window close, also defer trash deletion.
-            // This prevents a race condition where processes in the window (e.g., Claude Code)
-            // fail to run their stop hooks because their CWD was deleted.
-            if result.window_to_close_later.is_some() {
-                debug!(path = %tp.display(), "cleanup:deferring trash deletion until window close");
-                result.trash_path_to_delete = Some(tp);
-            } else {
-                // First, aggressively clear contents to reclaim disk space
-                remove_dir_contents(&tp);
-
-                // Then try to remove the (now empty) directory
-                if let Err(e) = std::fs::remove_dir(&tp) {
-                    warn!(
-                        path = %tp.display(),
-                        error = %e,
-                        "cleanup:failed to remove trash directory (likely held by active shell). \
-                        The directory is empty and harmless."
-                    );
-                } else {
-                    debug!(path = %tp.display(), "cleanup:trash directory removed");
-                }
-            }
-        }
-
+        let quarantine_identity = expected_identity
+            .as_ref()
+            .map(QuarantineIdentity::Repository)
+            .or_else(|| missing_admin_identity.map(QuarantineIdentity::Directory));
+        perform_destructive_cleanup(
+            worktree_path,
+            quarantine_identity,
+            branch_name,
+            handle,
+            keep_branch,
+            force,
+            &context.git_common_dir,
+        )?;
         Ok(())
     };
 
@@ -589,43 +617,27 @@ pub fn cleanup(
         // Clean up prompt files immediately (harmless, doesn't affect CWD)
         cleanup_prompt_files(branch_name);
 
-        // Defer destructive operations (rename, prune, branch delete) until after window/session close.
-        // This keeps the worktree path valid so agents can run their hooks.
-        if worktree_path.exists() {
-            let parent = worktree_path.parent().unwrap_or_else(|| Path::new("."));
-            let dir_name = worktree_path
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("Invalid worktree path: no directory name"))?;
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let trash_name = format!(
-                ".workmux_trash_{}_{}",
-                dir_name.to_string_lossy(),
-                timestamp
+        if missing_admin_identity.is_some() {
+            anyhow::bail!(
+                "Removal from inside the target requires intact linked-worktree admin state"
             );
-            let trash_path = parent.join(&trash_name);
-
-            // Resolve the admin dir before the worktree is renamed.
-            let worktree_admin_dir =
-                resolve_worktree_admin_dir(worktree_path, &context.git_common_dir);
-
+        }
+        if let Some(expected_identity) = expected_identity.clone() {
             result.deferred_cleanup = Some(DeferredCleanup {
                 worktree_path: worktree_path.to_path_buf(),
-                trash_path,
                 branch_name: branch_name.to_string(),
                 handle: handle.to_string(),
                 keep_branch,
                 force,
-                git_common_dir: context.git_common_dir.clone(),
-                worktree_admin_dir,
+                expected_identity,
             });
             debug!(
                 worktree = %worktree_path.display(),
                 kind,
                 "cleanup:deferred destructive cleanup until target close",
             );
+        } else {
+            perform_fs_git_cleanup()?;
         }
     } else {
         // Not running inside any matching target, so kill it first
@@ -699,96 +711,162 @@ pub fn cleanup(
             }
         }
         // Now that windows/sessions are gone, clean up filesystem and git state.
-        perform_fs_git_cleanup(&mut result)?;
-    }
-
-    // Clean up worktree metadata from git config.
-    // Only remove immediately when not deferring -- deferred cleanup includes this
-    // in the shell script so metadata survives if the deferred script fails.
-    if result.deferred_cleanup.is_none()
-        && let Err(e) = git::remove_worktree_meta(handle)
-    {
-        warn!(handle = handle, error = %e, "cleanup:failed to remove worktree metadata");
+        perform_fs_git_cleanup()?;
     }
 
     Ok(result)
 }
 
-/// Build the deferred cleanup script for rename, prune, branch delete, and trash removal.
-///
-/// Generates a semicolon-separated sequence of shell commands that:
-/// 1. Renames the worktree directory to a trash path (frees the original path)
-/// 2. Removes any worktree lock (so prune can clean up the metadata)
-/// 3. Prunes git worktree metadata
-/// 4. Deletes the local branch (unless `keep_branch` is set)
-/// 5. Removes workmux worktree metadata from git config
-/// 6. Deletes the trash directory
-///
-/// The returned string starts with "; " so it can be appended to other commands.
-fn build_deferred_cleanup_script(dc: &DeferredCleanup) -> String {
-    let wt = shell_quote(&dc.worktree_path.to_string_lossy());
-    let trash = shell_quote(&dc.trash_path.to_string_lossy());
-    let git_dir = shell_quote(&dc.git_common_dir.to_string_lossy());
-
-    let mut cmds = Vec::new();
-    // 1. Rename worktree to trash
-    cmds.push(format!("mv {} {} >/dev/null 2>&1", wt, trash));
-    // 2. Remove worktree lock if present (git worktree prune skips locked entries)
-    if let Some(ref admin_dir) = dc.worktree_admin_dir
-        && admin_dir.is_absolute()
-    {
-        let locked = shell_quote(&admin_dir.join("locked").to_string_lossy());
-        cmds.push(format!("rm -f {} >/dev/null 2>&1", locked));
-    }
-    // 3. Prune git worktrees
-    cmds.push(format!("git -C {} worktree prune >/dev/null 2>&1", git_dir));
-    // 4. Delete branch (if not keeping)
-    if !dc.keep_branch {
-        let branch = shell_quote(&dc.branch_name);
-        let force_flag = if dc.force { "-D" } else { "-d" };
-        cmds.push(format!(
-            "git -C {} branch {} {} >/dev/null 2>&1",
-            git_dir, force_flag, branch
-        ));
-    }
-    // 5. Remove worktree metadata from git config
-    let handle = shell_quote(&dc.handle);
-    cmds.push(format!(
-        "git -C {} config --local --remove-section workmux.worktree.{} >/dev/null 2>&1",
-        git_dir, handle
-    ));
-    // 6. Delete trash
-    cmds.push(format!("rm -rf {} >/dev/null 2>&1", trash));
-
-    format!("; {}", cmds.join("; "))
-}
-
-fn cleanup_body_for(cleanup_result: &CleanupResult) -> String {
-    let cleanup_script = if let Some(ref dc) = cleanup_result.deferred_cleanup {
-        build_deferred_cleanup_script(dc)
-    } else {
-        cleanup_result
-            .trash_path_to_delete
-            .as_ref()
-            .map(|tp| format!("; rm -rf {}", shell_quote(&tp.to_string_lossy())))
-            .unwrap_or_default()
-    };
-    cleanup_script
-        .strip_prefix("; ")
-        .unwrap_or(&cleanup_script)
-        .to_string()
-}
-
-fn close_and_cleanup_command(kill_cmd: Option<&str>, cleanup_body: &str) -> String {
-    kill_cmd
-        .map(|cmd| {
-            if cleanup_body.is_empty() {
-                cmd.to_string()
-            } else {
-                format!("{} && {}", cmd, cleanup_body)
-            }
+fn spawn_deferred_cleanup_worker(
+    cleanup: &DeferredCleanup,
+    mode: MuxMode,
+    source_name: &str,
+    source_target: Option<&WindowTarget>,
+    source_id: Option<&str>,
+) -> Result<Child> {
+    let executable = std::env::current_exe().context("Failed to locate Workmux executable")?;
+    let repository = &cleanup.expected_identity.repository;
+    let mut command = Command::new(&executable);
+    command
+        .arg("_deferred-cleanup")
+        .arg("--worktree-path")
+        .arg(&cleanup.worktree_path)
+        .arg("--branch-name")
+        .arg(&cleanup.branch_name)
+        .arg("--handle")
+        .arg(&cleanup.handle)
+        .arg("--device")
+        .arg(cleanup.expected_identity.device.to_string())
+        .arg("--inode")
+        .arg(cleanup.expected_identity.inode.to_string())
+        .arg("--expected-worktree")
+        .arg(&repository.worktree)
+        .arg("--admin-dir")
+        .arg(&repository.admin_dir)
+        .arg("--common-dir")
+        .arg(&repository.common_dir)
+        .arg("--dot-git")
+        .arg(&repository.dot_git)
+        .arg("--source-mode")
+        .arg(match mode {
+            MuxMode::Window => "window",
+            MuxMode::Session => "session",
         })
-        .unwrap_or_else(|| cleanup_body.to_string())
+        .arg("--source-name")
+        .arg(source_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if cleanup.keep_branch {
+        command.arg("--keep-branch");
+    }
+    if cleanup.force {
+        command.arg("--force");
+    }
+    if let Some(target) = source_target
+        && let Some(parent) = target.parent_session.as_deref()
+    {
+        command.arg("--parent-session").arg(parent);
+    }
+    if let Some(id) = source_id {
+        command.arg("--source-id").arg(id);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // The worker must survive closure of the terminal target that started it.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    command.spawn().with_context(|| {
+        format!(
+            "Failed to start deferred cleanup worker from {}",
+            executable.display()
+        )
+    })
+}
+
+/// Wait for the source target to close, then perform deferred destructive cleanup.
+pub fn run_deferred_cleanup_worker(
+    cleanup: DeferredCleanup,
+    mode: MuxMode,
+    source_name: String,
+    parent_session: Option<String>,
+    source_id: Option<String>,
+) -> Result<()> {
+    let handle = cleanup.handle.clone();
+    let worktree_path = cleanup.worktree_path.clone();
+    let result =
+        run_deferred_cleanup_worker_inner(cleanup, mode, source_name, parent_session, source_id);
+    if let Err(error) = &result
+        && let Err(log_error) =
+            crate::logger::record_deferred_cleanup_failure(&handle, &worktree_path, error)
+    {
+        return Err(anyhow!(error.to_string()).context(format!(
+            "Failed to record deferred cleanup failure: {log_error:#}"
+        )));
+    }
+    result
+}
+
+fn run_deferred_cleanup_worker_inner(
+    cleanup: DeferredCleanup,
+    mode: MuxMode,
+    source_name: String,
+    parent_session: Option<String>,
+    source_id: Option<String>,
+) -> Result<()> {
+    let mux = crate::multiplexer::create_backend(crate::multiplexer::detect_backend());
+    let source_target = WindowTarget {
+        full_name: source_name.clone(),
+        parent_session,
+        window_id: source_id.clone(),
+    };
+    let deadline =
+        std::time::Instant::now() + Duration::from_millis(DEFERRED_TARGET_CLOSE_TIMEOUT_MS);
+    loop {
+        let target_query = match mode {
+            MuxMode::Window => mux.window_target_exists(&source_target),
+            MuxMode::Session => {
+                let source_id = source_id
+                    .as_deref()
+                    .context("Deferred session cleanup requires a stable source session ID")?;
+                mux.session_exists(source_id)
+            }
+        };
+        let exists = match target_query {
+            Ok(exists) => exists,
+            Err(error) => match mux.is_running() {
+                Ok(true) => return Err(error),
+                Ok(false) | Err(_) => false,
+            },
+        };
+        if !exists {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Timed out waiting for source target '{}' to close; close it and retry removal",
+                source_name
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    perform_destructive_cleanup(
+        &cleanup.worktree_path,
+        Some(QuarantineIdentity::Repository(&cleanup.expected_identity)),
+        &cleanup.branch_name,
+        &cleanup.handle,
+        cleanup.keep_branch,
+        cleanup.force,
+        &cleanup.expected_identity.repository.common_dir,
+    )
 }
 
 /// Navigate to the target branch window and close the source window.
@@ -805,8 +883,6 @@ pub fn navigate_to_target_and_close(
 ) -> Result<()> {
     use crate::multiplexer::MuxHandle;
 
-    // Check if target window/session exists (probe both modes since target
-    // may be a different mode than source, e.g. session worktree -> window main)
     let mux_running = mux.is_running()?;
     let target_full = prefixed(prefix, target_window_name);
     let (target_exists, target_mode) = if mux_running {
@@ -819,23 +895,16 @@ pub fn navigate_to_target_and_close(
         } else if is_window {
             (true, MuxMode::Window)
         } else {
-            (false, mode) // doesn't matter, target doesn't exist
+            (false, mode)
         }
     } else {
         (false, mode)
     };
     let kind = crate::multiplexer::handle::mode_label(mode);
-
-    // Prepare window names for shell commands
-    // Use the actual window name from window_to_close_later when available (includes -N suffix),
-    // otherwise fall back to the base prefixed name
     let source_full = cleanup_result
         .window_to_close_later
         .clone()
         .unwrap_or_else(|| prefixed(prefix, source_handle));
-
-    // Generate backend-specific shell commands for deferred scripts.
-    // Kill uses source mode, select uses target's detected mode.
     let kill_source_cmd = cleanup_result
         .target_id_to_close_later
         .as_deref()
@@ -860,14 +929,14 @@ pub fn navigate_to_target_and_close(
     let select_target_cmd = MuxHandle::shell_select_cmd_full(mux, target_mode, &target_full).ok();
 
     info!(
-        prefix = prefix,
-        target_window_name = target_window_name,
-        mux_running = mux_running,
-        target_exists = target_exists,
+        prefix,
+        target_window_name,
+        mux_running,
+        target_exists,
         target_mode = crate::multiplexer::handle::mode_label(target_mode),
-        target_full = target_full,
-        source_handle = source_handle,
-        source_full = source_full,
+        target_full,
+        source_handle,
+        source_full,
         source_mode = kind,
         tmux_window_killed = cleanup_result.tmux_window_killed,
         source_target_is_active = cleanup_result.source_target_is_active,
@@ -875,375 +944,71 @@ pub fn navigate_to_target_and_close(
         window_target_to_close = ?cleanup_result.window_target_to_close_later,
         target_id_to_close = ?cleanup_result.target_id_to_close_later,
         deferred_cleanup = cleanup_result.deferred_cleanup.is_some(),
-        current_pane_id = ?mux.current_pane_id(),
-        active_pane_id = ?mux.active_pane_id(),
         "navigate_to_target_and_close:entry"
     );
 
-    if !mux_running || !target_exists {
-        // If target window doesn't exist, still need to close source window if running inside it
-        if let Some(ref window_to_close) = cleanup_result.window_to_close_later {
-            let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
-            let delay_secs = format!("{:.3}", delay.as_secs_f64());
-
-            // For session mode, switch to the last session before killing so
-            // the client returns to where the user was previously instead of
-            // tmux picking an arbitrary session.
-            let switch_last_part = if mode == MuxMode::Session {
-                mux.shell_switch_to_last_session_cmd()
-                    .ok()
-                    .map(|cmd| format!("{}; ", cmd))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-
-            let cleanup_body = cleanup_body_for(cleanup_result);
-            let close_and_cleanup =
-                close_and_cleanup_command(kill_source_cmd.as_deref(), &cleanup_body);
-
-            let script = format!(
-                "sleep {delay}; {switch}{close_and_cleanup}",
-                delay = delay_secs,
-                switch = switch_last_part,
-                close_and_cleanup = close_and_cleanup,
+    if cleanup_result.window_to_close_later.is_none() {
+        if !cleanup_result.tmux_window_killed {
+            info!(
+                handle = source_handle,
+                target = target_window_name,
+                kind,
+                "cleanup:skipped target selection because source target was not deferred"
             );
-            debug!(
-                script = script,
-                kind, "navigate_to_target_and_close:kill_only_script"
-            );
-            match mux.run_deferred_script(&script) {
-                Ok(_) => info!(
-                    target = window_to_close,
-                    script = script,
-                    kind,
-                    "cleanup:scheduled target close",
-                ),
-                Err(e) => warn!(
-                    target = window_to_close,
-                    error = ?e,
-                    kind,
-                    "cleanup:failed to schedule target close",
-                ),
-            }
         }
         return Ok(());
     }
 
-    if cleanup_result.window_to_close_later.is_some() {
-        // Running inside a matching window: schedule navigation and kill together
-        let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
-        let delay_secs = format!("{:.3}", delay.as_secs_f64());
+    let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
+    let delay_secs = format!("{:.3}", delay.as_secs_f64());
+    let switch_or_select = if !target_exists && mode == MuxMode::Session {
+        mux.shell_switch_to_last_session_cmd()
+            .ok()
+            .map(|cmd| format!("{}; ", cmd))
+            .unwrap_or_default()
+    } else if target_exists && cleanup_result.source_target_is_active {
+        select_target_cmd
+            .as_ref()
+            .map(|cmd| format!("{}; ", cmd))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let close_source = kill_source_cmd
+        .as_deref()
+        .context("Multiplexer did not provide a source target close command")?;
+    let script = format!("sleep {delay_secs}; {switch_or_select}{close_source}");
+    debug!(
+        script,
+        kind, "navigate_to_target_and_close:nav_and_kill_script"
+    );
 
-        // Select the target before closing the source target the active client is using.
-        let select_part = if cleanup_result.source_target_is_active {
-            select_target_cmd
-                .as_ref()
-                .map(|cmd| format!("{}; ", cmd))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+    let mut worker = cleanup_result
+        .deferred_cleanup
+        .as_ref()
+        .map(|cleanup| {
+            spawn_deferred_cleanup_worker(
+                cleanup,
+                mode,
+                &source_full,
+                cleanup_result.window_target_to_close_later.as_ref(),
+                cleanup_result.target_id_to_close_later.as_deref(),
+            )
+        })
+        .transpose()?;
 
-        let cleanup_body = cleanup_body_for(cleanup_result);
-        let close_and_cleanup =
-            close_and_cleanup_command(kill_source_cmd.as_deref(), &cleanup_body);
-
-        let script = format!(
-            "sleep {delay}; {select}{close_and_cleanup}",
-            delay = delay_secs,
-            select = select_part,
-            close_and_cleanup = close_and_cleanup,
-        );
-        info!(
-            script = script,
-            kind,
-            source_target_is_active = cleanup_result.source_target_is_active,
-            "navigate_to_target_and_close:nav_and_kill_script"
-        );
-
-        match mux.run_deferred_script(&script) {
-            Ok(_) => info!(
-                source = source_handle,
-                target = target_window_name,
-                kind,
-                "cleanup:scheduled navigation to target and source close",
-            ),
-            Err(e) => warn!(
-                source = source_handle,
-                error = ?e,
-                kind,
-                "cleanup:failed to schedule navigation and source close",
-            ),
+    if let Err(error) = mux.run_deferred_script(&script) {
+        if let Some(worker) = worker.as_mut() {
+            let _ = worker.kill();
+            let _ = worker.wait();
         }
-    } else if !cleanup_result.tmux_window_killed {
-        info!(
-            handle = source_handle,
-            target = target_window_name,
-            kind,
-            current_pane_id = ?mux.current_pane_id(),
-            active_pane_id = ?mux.active_pane_id(),
-            "cleanup:skipped target selection because source target was not deferred"
-        );
+        return Err(error).context("Failed to schedule source target close");
     }
-
+    info!(
+        source = source_handle,
+        target = target_window_name,
+        kind,
+        "cleanup:scheduled navigation and source close"
+    );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    fn make_deferred_cleanup(
-        worktree: &str,
-        trash: &str,
-        branch: &str,
-        handle: &str,
-        git_dir: &str,
-        keep_branch: bool,
-        force: bool,
-    ) -> DeferredCleanup {
-        DeferredCleanup {
-            worktree_path: PathBuf::from(worktree),
-            trash_path: PathBuf::from(trash),
-            branch_name: branch.to_string(),
-            handle: handle.to_string(),
-            keep_branch,
-            force,
-            git_common_dir: PathBuf::from(git_dir),
-            worktree_admin_dir: None,
-        }
-    }
-
-    #[test]
-    fn deferred_cleanup_script_includes_all_steps() {
-        let dc = make_deferred_cleanup(
-            "/repo/worktrees/feature",
-            "/repo/worktrees/.workmux_trash_feature_123",
-            "feature",
-            "feature",
-            "/repo/.git",
-            false,
-            false,
-        );
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        assert!(script.contains(
-            "mv /repo/worktrees/feature /repo/worktrees/.workmux_trash_feature_123 >/dev/null 2>&1"
-        ));
-        assert!(script.contains("git -C /repo/.git worktree prune >/dev/null 2>&1"));
-        assert!(script.contains("git -C /repo/.git branch -d feature >/dev/null 2>&1"));
-        assert!(script.contains("git -C /repo/.git config --local --remove-section workmux.worktree.feature >/dev/null 2>&1"));
-        assert!(
-            script.contains("rm -rf /repo/worktrees/.workmux_trash_feature_123 >/dev/null 2>&1")
-        );
-    }
-
-    #[test]
-    fn deferred_cleanup_script_keep_branch_skips_branch_delete() {
-        let dc = make_deferred_cleanup(
-            "/repo/worktrees/feature",
-            "/repo/worktrees/.trash",
-            "feature",
-            "feature",
-            "/repo/.git",
-            true, // keep_branch
-            false,
-        );
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        assert!(
-            !script.contains("branch -d"),
-            "Should not delete branch when keep_branch is set"
-        );
-        assert!(
-            !script.contains("branch -D"),
-            "Should not delete branch when keep_branch is set"
-        );
-        // Other steps should still be present
-        assert!(script.contains("mv "));
-        assert!(script.contains("worktree prune"));
-        assert!(script.contains("config --local --remove-section"));
-        assert!(script.contains("rm -rf"));
-    }
-
-    #[test]
-    fn deferred_cleanup_script_force_uses_capital_d() {
-        let dc = make_deferred_cleanup(
-            "/repo/worktrees/feature",
-            "/repo/worktrees/.trash",
-            "feature",
-            "feature",
-            "/repo/.git",
-            false,
-            true, // force
-        );
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        assert!(
-            script.contains("branch -D feature"),
-            "Force delete should use -D flag"
-        );
-        assert!(
-            !script.contains("branch -d feature"),
-            "Force delete should not use -d flag"
-        );
-    }
-
-    #[test]
-    fn deferred_cleanup_script_quotes_paths_with_spaces() {
-        let dc = make_deferred_cleanup(
-            "/my repo/worktrees/my feature",
-            "/my repo/worktrees/.trash_123",
-            "my-feature",
-            "my-feature",
-            "/my repo/.git",
-            false,
-            false,
-        );
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        assert!(
-            script.contains("'/my repo/worktrees/my feature'"),
-            "Worktree path with spaces should be quoted: {script}"
-        );
-        assert!(
-            script.contains("'/my repo/worktrees/.trash_123'"),
-            "Trash path with spaces should be quoted: {script}"
-        );
-        assert!(
-            script.contains("'/my repo/.git'"),
-            "Git dir with spaces should be quoted: {script}"
-        );
-    }
-
-    #[test]
-    fn deferred_cleanup_script_preserves_command_order() {
-        let dc = make_deferred_cleanup(
-            "/repo/wt/feat",
-            "/repo/wt/.trash",
-            "feat",
-            "feat",
-            "/repo/.git",
-            false,
-            false,
-        );
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        // Commands must execute in this order for correctness:
-        // mv (free original path) -> prune (update git metadata) ->
-        // branch delete -> config remove -> rm (delete trash)
-        let mv_pos = script.find("mv ").expect("should contain mv");
-        let prune_pos = script.find("worktree prune").expect("should contain prune");
-        let branch_pos = script.find("branch -d").expect("should contain branch -d");
-        let config_pos = script
-            .find("config --local --remove-section")
-            .expect("should contain config remove");
-        let rm_pos = script.find("rm -rf").expect("should contain rm -rf");
-
-        assert!(mv_pos < prune_pos, "mv should precede prune");
-        assert!(prune_pos < branch_pos, "prune should precede branch delete");
-        assert!(
-            branch_pos < config_pos,
-            "branch delete should precede config remove"
-        );
-        assert!(config_pos < rm_pos, "config remove should precede rm");
-    }
-
-    #[test]
-    fn deferred_cleanup_script_starts_with_separator() {
-        let dc = make_deferred_cleanup(
-            "/repo/wt/feat",
-            "/repo/wt/.trash",
-            "feat",
-            "feat",
-            "/repo/.git",
-            false,
-            false,
-        );
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        assert!(
-            script.starts_with("; "),
-            "Script should start with '; ' so it can be appended to other commands: {script}"
-        );
-    }
-
-    #[test]
-    fn deferred_cleanup_script_simple_paths_not_quoted() {
-        let dc = make_deferred_cleanup(
-            "/repo/worktrees/feature-branch",
-            "/repo/worktrees/.trash_feature",
-            "feature-branch",
-            "feature-branch",
-            "/repo/.git",
-            false,
-            false,
-        );
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        // Simple paths (alphanumeric, dash, underscore, dot, slash) should not be quoted
-        assert!(
-            script.contains("mv /repo/worktrees/feature-branch /repo/worktrees/.trash_feature"),
-            "Simple paths should not be quoted: {script}"
-        );
-    }
-
-    #[test]
-    fn deferred_cleanup_script_removes_lock_when_admin_dir_set() {
-        let mut dc = make_deferred_cleanup(
-            "/repo/worktrees/feature",
-            "/repo/worktrees/.trash",
-            "feature",
-            "feature",
-            "/repo/.git",
-            false,
-            false,
-        );
-        dc.worktree_admin_dir = Some(PathBuf::from("/repo/.git/worktrees/feature"));
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        assert!(
-            script.contains("rm -f /repo/.git/worktrees/feature/locked"),
-            "Should remove lock file when admin dir is set: {script}"
-        );
-
-        // Lock removal should happen after mv but before prune
-        let mv_pos = script.find("mv ").unwrap();
-        let lock_pos = script
-            .find("rm -f /repo/.git/worktrees/feature/locked")
-            .unwrap();
-        let prune_pos = script.find("worktree prune").unwrap();
-        assert!(mv_pos < lock_pos, "lock removal should follow mv");
-        assert!(lock_pos < prune_pos, "lock removal should precede prune");
-    }
-
-    #[test]
-    fn deferred_cleanup_script_no_lock_step_without_admin_dir() {
-        let dc = make_deferred_cleanup(
-            "/repo/worktrees/feature",
-            "/repo/worktrees/.trash",
-            "feature",
-            "feature",
-            "/repo/.git",
-            false,
-            false,
-        );
-
-        let script = build_deferred_cleanup_script(&dc);
-
-        assert!(
-            !script.contains("/locked"),
-            "Should not have lock removal without admin dir: {script}"
-        );
-    }
 }

@@ -77,7 +77,7 @@ fn run_specified(names: Vec<String>, force: bool, keep_branch: bool) -> Result<(
 
         for (handle, _, _) in candidates {
             if let Err(e) = remove_worktree(&handle, true, keep_branch) {
-                failed.push((handle, e.to_string()));
+                failed.push((handle, format!("{e:#}")));
             }
         }
 
@@ -263,17 +263,28 @@ fn prompt_removal_confirmation(
 }
 
 /// Report removal results: successful and failed removals.
-fn report_removal_results(success_count: usize, failed: &[(String, String)]) {
-    if success_count > 0 {
-        println!("\n✓ Successfully removed {} worktree(s)", success_count);
+fn report_removal_results(summary: &BulkRemovalSummary) {
+    if summary.removed > 0 {
+        println!("\n✓ Successfully removed {} worktree(s)", summary.removed);
     }
 
-    if !failed.is_empty() {
-        eprintln!("\nFailed to remove {} worktree(s):", failed.len());
-        for (branch, error) in failed {
+    if summary.scheduled > 0 {
+        println!("\n✓ Scheduled removal of {} worktree(s)", summary.scheduled);
+    }
+
+    if !summary.failed.is_empty() {
+        eprintln!("\nFailed to remove {} worktree(s):", summary.failed.len());
+        for (branch, error) in &summary.failed {
             eprintln!("  - {}: {}", branch, error);
         }
     }
+}
+
+#[derive(Default)]
+struct BulkRemovalSummary {
+    removed: usize,
+    scheduled: usize,
+    failed: Vec<(String, String)>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -418,18 +429,20 @@ fn split_skipped_worktrees(skipped: &[BulkSkippedWorktree], reason: BulkSkipReas
 fn execute_bulk_removals(
     to_remove: &[BulkRemovableWorktree],
     keep_branch: bool,
-) -> (usize, Vec<(String, String)>) {
-    let mut success_count = 0;
-    let mut failed: Vec<(String, String)> = Vec::new();
+) -> BulkRemovalSummary {
+    let mut summary = BulkRemovalSummary::default();
 
     for worktree in to_remove {
         match remove_worktree(&worktree.handle, true, keep_branch) {
-            Ok(()) => success_count += 1,
-            Err(e) => failed.push((worktree.branch.clone(), e.to_string())),
+            Ok(result) if result.cleanup_scheduled => summary.scheduled += 1,
+            Ok(_) => summary.removed += 1,
+            Err(error) => summary
+                .failed
+                .push((worktree.branch.clone(), format!("{error:#}"))),
         }
     }
 
-    (success_count, failed)
+    summary
 }
 
 fn run_bulk_removal(mode: BulkRemovalMode, force: bool, keep_branch: bool) -> Result<()> {
@@ -461,8 +474,8 @@ fn run_bulk_removal(mode: BulkRemovalMode, force: bool, keep_branch: bool) -> Re
         return Ok(());
     }
 
-    let (success_count, failed) = execute_bulk_removals(&plan.to_remove, keep_branch);
-    report_removal_results(success_count, &failed);
+    let summary = execute_bulk_removals(&plan.to_remove, keep_branch);
+    report_removal_results(&summary);
     Ok(())
 }
 
@@ -480,7 +493,11 @@ fn run_gone(force: bool, keep_branch: bool) -> Result<()> {
 }
 
 /// Execute the actual worktree removal
-fn remove_worktree(handle: &str, force: bool, keep_branch: bool) -> Result<()> {
+fn remove_worktree(
+    handle: &str,
+    force: bool,
+    keep_branch: bool,
+) -> Result<workflow::types::RemoveResult> {
     let config = config::Config::load(None)?;
     let mux = create_backend(detect_backend());
     let context = WorkflowContext::new(config, mux, None)?;
@@ -490,19 +507,22 @@ fn remove_worktree(handle: &str, force: bool, keep_branch: bool) -> Result<()> {
     let result = workflow::remove(handle, force, keep_branch, &context)
         .context("Failed to remove worktree")?;
 
-    if keep_branch {
-        println!(
-            "✓ Removed worktree '{}' (branch '{}' kept)",
-            handle, result.branch_removed
-        );
-    } else {
-        println!(
-            "✓ Removed worktree '{}' and branch '{}'",
-            handle, result.branch_removed
-        );
+    if !result.cleanup_scheduled {
+        if keep_branch {
+            println!(
+                "✓ Removed worktree '{}' (branch '{}' kept)",
+                handle, result.branch_removed
+            );
+        } else {
+            println!(
+                "✓ Removed worktree '{}' and branch '{}'",
+                handle, result.branch_removed
+            );
+        }
+        io::stdout().flush()?;
     }
 
     super::sidebar::request_refresh();
 
-    Ok(())
+    Ok(result)
 }
