@@ -21,7 +21,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.249 (2026-08-30)
 
 - Improve sidebar performance by reducing startup latency, idle wakeups, tmux
   polling, and rendering overhead.
