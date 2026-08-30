@@ -4,13 +4,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::Result;
 
 use super::agent::SelectedAgent;
 use crate::config::Config;
-
-use crate::cmd::Cmd;
 
 use super::PaneHandshake;
 use super::handshake::UnixPipeHandshake;
@@ -116,8 +115,16 @@ pub fn unix_pipe_handshake() -> Result<Box<dyn PaneHandshake>> {
 
 /// Run a shell script detached via `nohup sh -c`.
 pub fn run_detached_sh_c(script: &str) -> Result<()> {
-    let bg_script = format!("nohup sh -c '{}' >/dev/null 2>&1 &", script);
-    Cmd::new("sh").args(&["-c", &bg_script]).run().map(|_| ())
+    Command::new("nohup")
+        .arg("sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 /// Resolve a pane's command: handle `<agent>` placeholder, auto-detect known
@@ -334,6 +341,34 @@ pub fn wrap_for_non_posix_shell(command: &str) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn detached_runner_preserves_hostile_shell_literals() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("output ' ; $(quoted)");
+        let marker = temp.path().join("injection-marker");
+        let hostile = format!(
+            "evil';touch${{IFS}}{};# $(touch {}) #{{session_name}}",
+            marker.display(),
+            marker.display()
+        );
+        let script = format!(
+            "printf %s {} > {}",
+            crate::shell::shell_quote(&hostile),
+            crate::shell::shell_quote(&output.to_string_lossy())
+        );
+
+        run_detached_sh_c(&script).unwrap();
+        for _ in 0..100 {
+            if output.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert_eq!(std::fs::read_to_string(output).unwrap(), hostile);
+        assert!(!marker.exists());
+    }
 
     // --- prefixed tests ---
 
