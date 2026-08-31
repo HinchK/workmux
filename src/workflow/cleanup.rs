@@ -294,6 +294,9 @@ fn quarantine_worktree(
         std::process::id(),
         nonce
     ));
+
+    // Renaming frees the original path for reuse while processes holding the
+    // worktree as their CWD continue to refer to the quarantined directory.
     std::fs::rename(worktree_path, &trash_path).with_context(|| {
         format!(
             "Failed to rename worktree to quarantine path {}",
@@ -320,6 +323,8 @@ fn perform_destructive_cleanup(
         None => git::linked_worktree_registration_in(worktree_path, git_common_dir)?,
     };
     if let Some(admin_dir) = linked_admin_dir {
+        // A linked-worktree lock prevents pruning. Removing it before quarantine
+        // leaves the original worktree path available if the operation fails.
         let locked_file = admin_dir.join("locked");
         match std::fs::remove_file(&locked_file) {
             Ok(()) => debug!(path = %locked_file.display(), "cleanup:removed worktree lock"),
@@ -350,6 +355,8 @@ fn perform_destructive_cleanup(
         None => None,
     };
 
+    // The original worktree path is absent after quarantine, allowing Git to
+    // discard its linked-worktree registration.
     git::prune_worktrees_in(git_common_dir).context("Failed to prune worktrees")?;
     if expected.is_none() && git::worktree_registration_exists_in(worktree_path, git_common_dir)? {
         anyhow::bail!(
@@ -521,6 +528,7 @@ pub fn cleanup(
     };
 
     let perform_fs_git_cleanup = || -> Result<()> {
+        // Hooks run while the worktree path and its contents remain available.
         if worktree_path.exists() && !no_hooks {
             run_pre_remove_hooks(
                 context,
@@ -962,11 +970,14 @@ pub fn navigate_to_target_and_close(
     let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
     let delay_secs = format!("{:.3}", delay.as_secs_f64());
     let switch_or_select = if !target_exists && mode == MuxMode::Session {
+        // Return the client to its previous session instead of letting the
+        // multiplexer choose an arbitrary destination when the source closes.
         mux.shell_switch_to_last_session_cmd()
             .ok()
             .map(|cmd| format!("{}; ", cmd))
             .unwrap_or_default()
     } else if target_exists && cleanup_result.source_target_is_active {
+        // Move the active client before closing the source target it displays.
         select_target_cmd
             .as_ref()
             .map(|cmd| format!("{}; ", cmd))
@@ -983,6 +994,8 @@ pub fn navigate_to_target_and_close(
         kind, "navigate_to_target_and_close:nav_and_kill_script"
     );
 
+    // Start the worker before scheduling source closure so it retains the
+    // trusted executable image and observes the complete target lifecycle.
     let mut worker = cleanup_result
         .deferred_cleanup
         .as_ref()
