@@ -2,8 +2,8 @@ use anyhow::{Context, Result, anyhow};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::SystemTime;
-use std::{thread, time::Duration};
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 use crate::config::MuxMode;
 use crate::multiplexer::{Multiplexer, WindowTarget, util::prefixed};
@@ -14,10 +14,12 @@ use tracing::{debug, info, warn};
 pub use git::get_worktree_mode;
 
 use super::context::WorkflowContext;
-use super::types::{CleanupResult, DeferredCleanup, WorktreeCleanupIdentity};
+use super::types::{CleanupResult, DeferredCleanup, SourceTarget, WorktreeCleanupIdentity};
 
 const WINDOW_CLOSE_DELAY_MS: u64 = 300;
-const DEFERRED_TARGET_CLOSE_TIMEOUT_MS: u64 = 5_000;
+const TARGET_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const TARGET_CLOSE_RETRIES: u32 = 20;
+const DEFERRED_TARGET_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Find all windows matching the base handle pattern (including duplicates).
 /// Matches: {prefix}{handle} and {prefix}{handle}-{N}
@@ -83,6 +85,44 @@ fn cleanup_prompt_files(branch_name: &str) {
     }
 }
 
+fn prepare_destructive_cleanup(
+    context: &WorkflowContext,
+    handle: &str,
+    worktree_path: &Path,
+    branch_name: &str,
+    no_hooks: bool,
+    show_hook_output: bool,
+) -> Result<()> {
+    // Hooks observe the live worktree before prompt files or repository state disappear.
+    if worktree_path.exists() && !no_hooks {
+        run_pre_remove_hooks(
+            context,
+            handle,
+            worktree_path,
+            branch_name,
+            show_hook_output,
+        )?;
+    }
+    cleanup_prompt_files(branch_name);
+    Ok(())
+}
+
+fn matching_target_regex(prefix: &str, target_name: &str) -> Regex {
+    let base_name = prefixed(prefix, target_name);
+    Regex::new(&format!(r"^{}(-\d+)?$", regex::escape(&base_name)))
+        .expect("invalid matching-target regex")
+}
+
+fn poll_bounded(mut condition: impl FnMut() -> Result<bool>) -> Result<()> {
+    for _ in 0..TARGET_CLOSE_RETRIES {
+        if condition()? {
+            break;
+        }
+        thread::sleep(TARGET_POLL_INTERVAL);
+    }
+    Ok(())
+}
+
 fn find_matching_window_targets(
     mux: &dyn Multiplexer,
     prefix: &str,
@@ -109,10 +149,7 @@ fn find_matching_window_targets(
         Some(session) => mux.get_window_names_in_session(session)?,
         None => mux.get_all_window_names()?,
     };
-    let base_name = prefixed(prefix, target_name);
-    let escaped_base = regex::escape(&base_name);
-    let pattern = format!(r"^{}(-\d+)?$", escaped_base);
-    let re = Regex::new(&pattern).expect("Invalid regex pattern");
+    let re = matching_target_regex(prefix, target_name);
 
     Ok(all_windows
         .into_iter()
@@ -169,12 +206,7 @@ fn is_inside_matching_target(
         None => return Ok(None),
     };
 
-    let base_name = prefixed(prefix, target_name);
-    let escaped_base = regex::escape(&base_name);
-    let pattern = format!(r"^{}(-\d+)?$", escaped_base);
-    let re = Regex::new(&pattern).expect("Invalid regex pattern");
-
-    if re.is_match(&current_name) {
+    if matching_target_regex(prefix, target_name).is_match(&current_name) {
         Ok(Some((current_name, current_id)))
     } else {
         Ok(None)
@@ -233,9 +265,31 @@ struct DirectoryIdentity {
 }
 
 #[derive(Clone, Copy)]
-enum QuarantineIdentity<'a> {
-    Repository(&'a WorktreeCleanupIdentity),
-    Directory(DirectoryIdentity),
+struct QuarantineIdentity<'a> {
+    directory: DirectoryIdentity,
+    repository: Option<&'a git::RepositoryIdentity>,
+    admin_dir: Option<&'a Path>,
+}
+
+impl<'a> QuarantineIdentity<'a> {
+    fn repository(expected: &'a WorktreeCleanupIdentity) -> Self {
+        Self {
+            directory: DirectoryIdentity {
+                device: expected.device,
+                inode: expected.inode,
+            },
+            repository: Some(&expected.repository),
+            admin_dir: Some(&expected.repository.admin_dir),
+        }
+    }
+
+    fn directory(directory: DirectoryIdentity) -> Self {
+        Self {
+            directory,
+            repository: None,
+            admin_dir: None,
+        }
+    }
 }
 
 fn directory_identity(metadata: &std::fs::Metadata) -> Result<DirectoryIdentity> {
@@ -265,6 +319,8 @@ fn quarantine_worktree(
     expected: DirectoryIdentity,
     repository: Option<&git::RepositoryIdentity>,
 ) -> Result<PathBuf> {
+    // Identity is revalidated immediately before rename so path reuse cannot
+    // redirect destructive cleanup to a different worktree.
     let metadata = std::fs::symlink_metadata(worktree_path)
         .context("Failed to inspect worktree before quarantine")?;
     if metadata.file_type().is_symlink()
@@ -316,10 +372,7 @@ fn perform_destructive_cleanup(
     git_common_dir: &Path,
 ) -> Result<()> {
     let linked_admin_dir = match expected {
-        Some(QuarantineIdentity::Repository(expected)) => {
-            Some(expected.repository.admin_dir.clone())
-        }
-        Some(QuarantineIdentity::Directory(_)) => None,
+        Some(expected) => expected.admin_dir.map(Path::to_path_buf),
         None => git::linked_worktree_registration_in(worktree_path, git_common_dir)?,
     };
     if let Some(admin_dir) = linked_admin_dir {
@@ -340,23 +393,14 @@ fn perform_destructive_cleanup(
         }
     }
 
-    let quarantine = match expected {
-        Some(QuarantineIdentity::Repository(expected)) => Some(quarantine_worktree(
-            worktree_path,
-            DirectoryIdentity {
-                device: expected.device,
-                inode: expected.inode,
-            },
-            Some(&expected.repository),
-        )?),
-        Some(QuarantineIdentity::Directory(identity)) => {
-            Some(quarantine_worktree(worktree_path, identity, None)?)
-        }
-        None => None,
-    };
+    let quarantine = expected
+        .map(|expected| quarantine_worktree(worktree_path, expected.directory, expected.repository))
+        .transpose()?;
 
     // The original worktree path is absent after quarantine, allowing Git to
-    // discard its linked-worktree registration.
+    // discard its linked-worktree registration. These Git operations use the
+    // protected execution path that pins repository identity and clears
+    // ambient Git overrides.
     git::prune_worktrees_in(git_common_dir).context("Failed to prune worktrees")?;
     if expected.is_none() && git::worktree_registration_exists_in(worktree_path, git_common_dir)? {
         anyhow::bail!(
@@ -521,28 +565,15 @@ pub fn cleanup(
     let mut result = CleanupResult {
         tmux_window_killed: false,
         source_target_is_active,
-        window_to_close_later: None,
-        window_target_to_close_later: None,
-        target_id_to_close_later: None,
+        source_target_to_close: None,
         deferred_cleanup: None,
     };
 
     let perform_fs_git_cleanup = || -> Result<()> {
-        // Hooks run while the worktree path and its contents remain available.
-        if worktree_path.exists() && !no_hooks {
-            run_pre_remove_hooks(
-                context,
-                handle,
-                worktree_path,
-                branch_name,
-                show_hook_output,
-            )?;
-        }
-        cleanup_prompt_files(branch_name);
         let quarantine_identity = expected_identity
             .as_ref()
-            .map(QuarantineIdentity::Repository)
-            .or_else(|| missing_admin_identity.map(QuarantineIdentity::Directory));
+            .map(QuarantineIdentity::repository)
+            .or_else(|| missing_admin_identity.map(QuarantineIdentity::directory));
         perform_destructive_cleanup(
             worktree_path,
             quarantine_identity,
@@ -598,32 +629,28 @@ pub fn cleanup(
             }
         }
 
-        // Store the current window/session name for deferred close
-        result.window_to_close_later = Some(current_target.clone());
-        result.target_id_to_close_later = current_target_id.clone();
-        if !is_session_mode {
-            result.window_target_to_close_later = Some(match current_target_id {
+        result.source_target_to_close = Some(if is_session_mode {
+            SourceTarget::Session {
+                name: current_target,
+                id: current_target_id,
+            }
+        } else {
+            SourceTarget::Window(match current_target_id {
                 Some(window_id) => {
                     WindowTarget::with_id(current_target, parent_session.clone(), window_id)
                 }
                 None => WindowTarget::new(current_target, parent_session.clone()),
-            });
-        }
+            })
+        });
 
-        // Run pre-remove hooks synchronously (they need the worktree intact)
-        // Skip if --no-hooks is set (e.g., RPC-triggered merge).
-        if worktree_path.exists() && !no_hooks {
-            run_pre_remove_hooks(
-                context,
-                handle,
-                worktree_path,
-                branch_name,
-                show_hook_output,
-            )?;
-        }
-
-        // Clean up prompt files immediately (harmless, doesn't affect CWD)
-        cleanup_prompt_files(branch_name);
+        prepare_destructive_cleanup(
+            context,
+            handle,
+            worktree_path,
+            branch_name,
+            no_hooks,
+            show_hook_output,
+        )?;
 
         if missing_admin_identity.is_some() {
             anyhow::bail!(
@@ -660,15 +687,7 @@ pub fn cleanup(
                         result.tmux_window_killed = true;
                         info!(session = session_name, "cleanup:killed session");
 
-                        // Poll to confirm session is gone before proceeding
-                        const MAX_RETRIES: u32 = 20;
-                        const RETRY_DELAY: Duration = Duration::from_millis(50);
-                        for _ in 0..MAX_RETRIES {
-                            if !context.mux.session_exists(&session_name)? {
-                                break;
-                            }
-                            thread::sleep(RETRY_DELAY);
-                        }
+                        poll_bounded(|| Ok(!context.mux.session_exists(&session_name)?))?;
                     }
                 }
             } else {
@@ -698,27 +717,29 @@ pub fn cleanup(
                         "cleanup:killed all matching windows"
                     );
 
-                    // Poll to confirm windows are gone before proceeding
-                    const MAX_RETRIES: u32 = 20;
-                    const RETRY_DELAY: Duration = Duration::from_millis(50);
-                    for _ in 0..MAX_RETRIES {
-                        let remaining = find_matching_window_targets(
+                    poll_bounded(|| {
+                        Ok(find_matching_window_targets(
                             context.mux.as_ref(),
                             &context.prefix,
                             &target_name,
                             parent_session.as_deref(),
                             window_token.as_deref(),
                             worktree_path,
-                        )?;
-                        if remaining.is_empty() {
-                            break;
-                        }
-                        thread::sleep(RETRY_DELAY);
-                    }
+                        )?
+                        .is_empty())
+                    })?;
                 }
             }
         }
-        // Now that windows/sessions are gone, clean up filesystem and git state.
+        // Targets close before hooks so hook subprocesses cannot keep them alive.
+        prepare_destructive_cleanup(
+            context,
+            handle,
+            worktree_path,
+            branch_name,
+            no_hooks,
+            show_hook_output,
+        )?;
         perform_fs_git_cleanup()?;
     }
 
@@ -728,12 +749,18 @@ pub fn cleanup(
 fn spawn_deferred_cleanup_worker(
     cleanup: &DeferredCleanup,
     mode: MuxMode,
-    source_name: &str,
-    source_target: Option<&WindowTarget>,
-    source_id: Option<&str>,
+    source: &SourceTarget,
 ) -> Result<Child> {
     let executable = std::env::current_exe().context("Failed to locate Workmux executable")?;
     let repository = &cleanup.expected_identity.repository;
+    let (source_name, parent_session, source_id) = match source {
+        SourceTarget::Window(target) => (
+            target.full_name.as_str(),
+            target.parent_session.as_deref(),
+            target.window_id.as_deref(),
+        ),
+        SourceTarget::Session { name, id } => (name.as_str(), None, id.as_deref()),
+    };
     let mut command = Command::new(&executable);
     command
         .arg("_deferred-cleanup")
@@ -771,9 +798,7 @@ fn spawn_deferred_cleanup_worker(
     if cleanup.force {
         command.arg("--force");
     }
-    if let Some(target) = source_target
-        && let Some(parent) = target.parent_session.as_deref()
-    {
+    if let Some(parent) = parent_session {
         command.arg("--parent-session").arg(parent);
     }
     if let Some(id) = source_id {
@@ -836,8 +861,7 @@ fn run_deferred_cleanup_worker_inner(
         parent_session,
         window_id: source_id.clone(),
     };
-    let deadline =
-        std::time::Instant::now() + Duration::from_millis(DEFERRED_TARGET_CLOSE_TIMEOUT_MS);
+    let deadline = std::time::Instant::now() + DEFERRED_TARGET_CLOSE_TIMEOUT;
     loop {
         let target_query = match mode {
             MuxMode::Window => mux.window_target_exists(&source_target),
@@ -864,11 +888,11 @@ fn run_deferred_cleanup_worker_inner(
                 source_name
             );
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(TARGET_POLL_INTERVAL);
     }
     perform_destructive_cleanup(
         &cleanup.worktree_path,
-        Some(QuarantineIdentity::Repository(&cleanup.expected_identity)),
+        Some(QuarantineIdentity::repository(&cleanup.expected_identity)),
         &cleanup.branch_name,
         &cleanup.handle,
         cleanup.keep_branch,
@@ -909,31 +933,25 @@ pub fn navigate_to_target_and_close(
         (false, mode)
     };
     let kind = crate::multiplexer::handle::mode_label(mode);
-    let source_full = cleanup_result
-        .window_to_close_later
-        .clone()
-        .unwrap_or_else(|| prefixed(prefix, source_handle));
-    let kill_source_cmd = cleanup_result
-        .target_id_to_close_later
-        .as_deref()
-        .and_then(|id| {
-            if mode == MuxMode::Window {
-                mux.shell_close_window_by_id_guard_cmd(id).ok()
-            } else {
-                mux.shell_close_session_by_id_guard_cmd(id).ok()
-            }
+    let source = cleanup_result.source_target_to_close.as_ref();
+    let source_full = source
+        .map(|source| match source {
+            SourceTarget::Window(target) => target.full_name.clone(),
+            SourceTarget::Session { name, .. } => name.clone(),
         })
-        .or_else(|| {
-            if mode == MuxMode::Window {
-                cleanup_result
-                    .window_target_to_close_later
-                    .as_ref()
-                    .and_then(|target| MuxHandle::shell_kill_window_target_cmd(mux, target).ok())
-                    .or_else(|| MuxHandle::shell_kill_cmd_full(mux, mode, &source_full).ok())
-            } else {
-                MuxHandle::shell_kill_cmd_full(mux, mode, &source_full).ok()
-            }
-        });
+        .unwrap_or_else(|| prefixed(prefix, source_handle));
+    let kill_source_cmd = source
+        .and_then(|source| match source {
+            SourceTarget::Window(target) => target
+                .window_id
+                .as_deref()
+                .and_then(|id| mux.shell_close_window_by_id_guard_cmd(id).ok())
+                .or_else(|| MuxHandle::shell_kill_window_target_cmd(mux, target).ok()),
+            SourceTarget::Session { id, .. } => id
+                .as_deref()
+                .and_then(|id| mux.shell_close_session_by_id_guard_cmd(id).ok()),
+        })
+        .or_else(|| MuxHandle::shell_kill_cmd_full(mux, mode, &source_full).ok());
     let select_target_cmd = MuxHandle::shell_select_cmd_full(mux, target_mode, &target_full).ok();
 
     info!(
@@ -948,14 +966,12 @@ pub fn navigate_to_target_and_close(
         source_mode = kind,
         tmux_window_killed = cleanup_result.tmux_window_killed,
         source_target_is_active = cleanup_result.source_target_is_active,
-        window_to_close = ?cleanup_result.window_to_close_later,
-        window_target_to_close = ?cleanup_result.window_target_to_close_later,
-        target_id_to_close = ?cleanup_result.target_id_to_close_later,
+        source_target_to_close = ?cleanup_result.source_target_to_close,
         deferred_cleanup = cleanup_result.deferred_cleanup.is_some(),
         "navigate_to_target_and_close:entry"
     );
 
-    if cleanup_result.window_to_close_later.is_none() {
+    let Some(source) = source else {
         if !cleanup_result.tmux_window_killed {
             info!(
                 handle = source_handle,
@@ -965,7 +981,7 @@ pub fn navigate_to_target_and_close(
             );
         }
         return Ok(());
-    }
+    };
 
     let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
     let delay_secs = format!("{:.3}", delay.as_secs_f64());
@@ -999,15 +1015,7 @@ pub fn navigate_to_target_and_close(
     let mut worker = cleanup_result
         .deferred_cleanup
         .as_ref()
-        .map(|cleanup| {
-            spawn_deferred_cleanup_worker(
-                cleanup,
-                mode,
-                &source_full,
-                cleanup_result.window_target_to_close_later.as_ref(),
-                cleanup_result.target_id_to_close_later.as_deref(),
-            )
-        })
+        .map(|cleanup| spawn_deferred_cleanup_worker(cleanup, mode, source))
         .transpose()?;
 
     if let Err(error) = mux.run_deferred_script(&script) {

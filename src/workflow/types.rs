@@ -83,8 +83,8 @@ pub struct WorktreeCleanupIdentity {
     pub repository: RepositoryIdentity,
 }
 
-/// Deferred cleanup operations to run after window close.
-/// Used when running inside the target window to avoid invalidating the agent's CWD.
+/// Deferred cleanup operations to run after target close.
+/// Destructive cleanup waits so processes in the target retain a valid CWD.
 pub struct DeferredCleanup {
     pub worktree_path: PathBuf,
     pub branch_name: String,
@@ -94,17 +94,22 @@ pub struct DeferredCleanup {
     pub expected_identity: WorktreeCleanupIdentity,
 }
 
+/// A source target that must close before destructive cleanup can run.
+/// Captured multiplexer IDs bind closure and waiting to stable target identity.
+#[derive(Clone, Debug)]
+pub enum SourceTarget {
+    Window(WindowTarget),
+    Session { name: String, id: Option<String> },
+}
+
 /// Result of cleanup operations
 pub struct CleanupResult {
     pub tmux_window_killed: bool,
     /// True when the source target is focused by the active client.
     pub source_target_is_active: bool,
-    /// The actual window name to close later (when running inside a duplicate window)
-    pub window_to_close_later: Option<String>,
-    pub window_target_to_close_later: Option<WindowTarget>,
-    pub target_id_to_close_later: Option<String>,
-    /// Full cleanup deferred until after window close (rename + prune + branch delete).
-    /// Used when running inside the target window to keep CWD valid for agent hooks.
+    pub source_target_to_close: Option<SourceTarget>,
+    /// Full cleanup deferred until after target close (rename + prune + branch delete).
+    /// Scheduled results retain this payload until the detached worker starts.
     pub deferred_cleanup: Option<DeferredCleanup>,
 }
 
