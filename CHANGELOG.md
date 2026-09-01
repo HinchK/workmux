@@ -21,6 +21,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Fix: Kitty worktree creation and status tracking tolerate unavailable foreground
+  process metadata. ([#265](https://github.com/raine/workmux/issues/265))
+
 ## v0.1.251 (2026-09-01)
 
 - Fix: Generate concise branch names for question-style `--auto-name` prompts, and

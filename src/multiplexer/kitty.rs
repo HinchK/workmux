@@ -24,9 +24,7 @@ use super::util;
 #[derive(Debug, Deserialize)]
 struct KittyProcess {
     pid: u32,
-    #[allow(dead_code)]
-    cwd: String,
-    cmdline: Vec<String>,
+    cmdline: Option<Vec<String>>,
 }
 
 /// Kitty window (= workmux pane) from `kitten @ ls`
@@ -111,8 +109,12 @@ impl KittyBackend {
             .run_and_capture_stdout()
             .context("Failed to list kitty panes")?;
 
+        Self::parse_panes(&output)
+    }
+
+    fn parse_panes(output: &str) -> Result<Vec<FlatPane>> {
         let os_windows: Vec<KittyOsWindow> =
-            serde_json::from_str(&output).context("Failed to parse kitty ls output")?;
+            serde_json::from_str(output).context("Failed to parse kitty ls output")?;
 
         let mut panes = Vec::new();
         for os_win in os_windows {
@@ -127,7 +129,7 @@ impl KittyBackend {
                     // agent on the next check.
                     let fg = win.foreground_processes.iter().min_by_key(|p| p.pid);
                     let foreground_command = fg.and_then(|p| {
-                        p.cmdline.first().map(|c| {
+                        p.cmdline.as_ref()?.first().map(|c| {
                             Path::new(c)
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
@@ -755,6 +757,42 @@ mod tests {
     fn test_kitty_backend_name() {
         let backend = KittyBackend::new();
         assert_eq!(backend.name(), "kitty");
+    }
+
+    #[test]
+    fn parse_panes_accepts_null_foreground_process_metadata() {
+        let output = r#"[{
+            "id": 1,
+            "is_focused": true,
+            "tabs": [{
+                "id": 2,
+                "title": "workmux:test",
+                "is_active": true,
+                "is_focused": true,
+                "windows": [{
+                    "id": 42,
+                    "title": "shell",
+                    "cwd": "/tmp/worktree",
+                    "pid": 100,
+                    "is_focused": true,
+                    "is_active": true,
+                    "foreground_processes": [{
+                        "pid": 123,
+                        "cwd": null,
+                        "cmdline": null
+                    }]
+                }]
+            }]
+        }]"#;
+
+        let panes = KittyBackend::parse_panes(output).unwrap();
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].foreground_pid, Some(123));
+        assert_eq!(panes[0].foreground_command, None);
+
+        let snapshot = KittyBackend::live_pane_snapshot(panes.into_iter().next().unwrap());
+        assert_eq!(snapshot.pid, Some(123));
+        assert_eq!(snapshot.current_command.as_deref(), Some("unknown"));
     }
 
     #[test]
