@@ -21,6 +21,12 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Fix: Generate concise branch names for question-style `--auto-name` prompts,
+  and reject invalid model responses before creating a worktree.
+  ([#264](https://github.com/raine/workmux/issues/264))
+
 ## v0.1.250 (2026-08-30)
 
 - Fix: Keep pane-less agent status updates tied to the correct tmux pane, preventing

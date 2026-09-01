@@ -90,6 +90,34 @@ class TestDryRun:
         assert f"Worktree: {worktree_path}" in result.stdout
         assert not worktree_path.exists()
 
+    def test_auto_name_rejects_repeated_prose_output(
+        self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
+    ):
+        env = mux_server
+        generated_name = (
+            "this-output-contains-far-too-many-words-to-be-a-concise-branch-name"
+        )
+        worktree_path = get_worktree_path(mux_repo_path, generated_name)
+        windows_before = env.list_windows()
+        write_global_workmux_config(
+            env,
+            auto_name={
+                "command": f"sh -c 'printf \"{generated_name}\\n\"'",
+            },
+        )
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            mux_repo_path,
+            'add --auto-name --prompt "Investigate related issues" --dry-run',
+            expect_fail=True,
+        )
+
+        assert "after 2 attempts" in result.stderr
+        assert not worktree_path.exists()
+        assert env.list_windows() == windows_before
+
     def test_auto_name_treats_remote_prefix_as_local_branch(
         self, mux_server: MuxEnvironment, workmux_exe_path, mux_repo_path
     ):
