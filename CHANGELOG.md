@@ -21,11 +21,15 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.251 (2026-09-01)
 
-- Fix: Generate concise branch names for question-style `--auto-name` prompts,
-  and reject invalid model responses before creating a worktree.
+- Fix: Generate concise branch names for question-style `--auto-name` prompts, and
+  reject invalid model responses before creating a worktree.
   ([#264](https://github.com/raine/workmux/issues/264))
+- Harden multiplexer command execution and worktree cleanup against untrusted
+  shell text, repository-controlled Git hooks, and filesystem target replacement.
+- Clear completed or waiting status immediately when the agent pane is already
+  focused.
 
 ## v0.1.250 (2026-08-30)
 
