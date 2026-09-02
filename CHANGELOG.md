@@ -21,6 +21,13 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.253 (2026-09-02)
+
+- Configure the shell and arguments used for lifecycle hooks with `hook_shell`,
+  including machine-specific shell paths and flags.
+- Fix Pi panes being marked done during interrupted compaction or retry turns;
+  they remain working until a successful continuation finishes.
+
 ## v0.1.252 (2026-09-01)
 
 - Fix: Kitty worktree creation and status tracking tolerate unavailable foreground
