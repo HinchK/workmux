@@ -269,6 +269,14 @@ To re-apply file operations to existing worktrees (e.g., after updating the conf
 
 Run commands at specific points in the worktree lifecycle, such as installing dependencies or running database migrations. All hooks run with the **worktree directory** as the working directory (or the nested config directory for [nested configs](/guide/monorepos/#nested-configuration)) and receive environment variables: `WM_HANDLE`, `WM_WORKTREE_PATH`, `WM_PROJECT_ROOT`, `WM_CONFIG_DIR`.
 
+`hook_shell` is an argv list containing the executable followed by its arguments. Workmux appends each hook command as the final argument. It defaults to `["bash", "-c"]` for compatibility. To select a specific Bash installation on macOS, set the machine-specific path in your global configuration:
+
+```yaml
+hook_shell: ["/opt/homebrew/bin/bash", "-c"]
+```
+
+A project can override the complete `hook_shell` argv in `.workmux.yaml`; when omitted, it inherits the global value. The argv must contain a non-empty executable. Workmux reports the configured executable when it cannot be launched. Shell flags such as error handling or login behavior are applied only when included explicitly in `hook_shell` or the hook command.
+
 | Hook          | When it runs                                      | Additional env vars                  |
 | ------------- | ------------------------------------------------- | ------------------------------------ |
 | `post_create` | After worktree creation, before tmux window opens | -                                    |

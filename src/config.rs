@@ -555,6 +555,11 @@ pub struct Config {
     #[serde(default)]
     pub windows: Option<Vec<WindowConfig>>,
 
+    /// Executable and arguments used to run lifecycle hook commands.
+    /// The hook command is appended as the final argument.
+    #[serde(default)]
+    pub hook_shell: Option<Vec<String>>,
+
     /// Commands to run after creating the worktree
     #[serde(default)]
     pub post_create: Option<Vec<String>>,
@@ -2179,6 +2184,17 @@ impl WorktreeNaming {
     }
 }
 
+fn validate_hook_shell(hook_shell: Option<&[String]>) -> anyhow::Result<()> {
+    let hook_shell = hook_shell.expect("hook_shell default is applied before validation");
+    if hook_shell.is_empty() {
+        anyhow::bail!("'hook_shell' must contain an executable");
+    }
+    if hook_shell[0].trim().is_empty() {
+        anyhow::bail!("'hook_shell' executable must not be empty");
+    }
+    Ok(())
+}
+
 /// Validate windows configuration
 pub fn validate_windows_config(windows: &[WindowConfig]) -> anyhow::Result<()> {
     if windows.is_empty() {
@@ -2518,6 +2534,11 @@ impl Config {
             }
         }
 
+        if config.hook_shell.is_none() {
+            config.hook_shell = Some(vec!["bash".to_string(), "-c".to_string()]);
+        }
+        validate_hook_shell(config.hook_shell.as_deref())?;
+
         config
             .sandbox
             .network
@@ -2610,6 +2631,7 @@ impl Config {
             base_branch,
             worktree_dir,
             window_prefix,
+            hook_shell,
             agent,
             merge_strategy,
             merge_keep,
@@ -3156,6 +3178,12 @@ pub const EXAMPLE_PROJECT_CONFIG: &str = r#"# workmux project configuration
 #-------------------------------------------------------------------------------
 # Hooks
 #-------------------------------------------------------------------------------
+
+# Executable and arguments used to run lifecycle hooks. The hook command is
+# appended as the final argument. Configure machine-specific paths globally;
+# project configuration may override the complete argv.
+# Default: ["bash", "-c"]
+# hook_shell: ["/opt/homebrew/bin/bash", "-c"]
 
 # Commands to run in new worktree before tmux window opens.
 # These block window creation - use for short tasks only.
@@ -3748,6 +3776,65 @@ mod tests {
 
         let disabled: Config = serde_yaml::from_str("merge_keep: false").unwrap();
         assert_eq!(disabled.merge_keep, Some(false));
+    }
+
+    #[test]
+    fn hook_shell_defaults_to_bash_c() {
+        let config = Config::merge_and_apply_defaults(
+            Config::default(),
+            Config::default(),
+            None,
+            std::path::Path::new(""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.hook_shell,
+            Some(vec!["bash".to_string(), "-c".to_string()])
+        );
+    }
+
+    #[test]
+    fn project_hook_shell_overrides_or_inherits_global_value() {
+        let global = Config {
+            hook_shell: Some(vec!["/global/bash".to_string(), "-c".to_string()]),
+            ..Default::default()
+        };
+        let inherited = global.clone().merge(Config::default());
+        assert_eq!(inherited.hook_shell, global.hook_shell);
+
+        let project_shell = vec!["/project/sh".to_string(), "-c".to_string()];
+        let project = Config {
+            hook_shell: Some(project_shell.clone()),
+            ..Default::default()
+        };
+        let overridden = global.merge(project);
+        assert_eq!(overridden.hook_shell, Some(project_shell));
+    }
+
+    #[test]
+    fn hook_shell_rejects_missing_or_empty_executable() {
+        let empty: Config = serde_yaml::from_str("hook_shell: []").unwrap();
+        let empty_error = Config::merge_and_apply_defaults(
+            Config::default(),
+            empty,
+            None,
+            std::path::Path::new(""),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(empty_error.contains("must contain an executable"));
+
+        let blank: Config = serde_yaml::from_str("hook_shell: ['  ', '-c']").unwrap();
+        let blank_error = Config::merge_and_apply_defaults(
+            Config::default(),
+            blank,
+            None,
+            std::path::Path::new(""),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(blank_error.contains("executable must not be empty"));
     }
 
     #[test]

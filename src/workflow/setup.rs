@@ -110,8 +110,13 @@ pub fn setup_environment(
         for (idx, command) in post_create.iter().enumerate() {
             info!(branch = branch_name, step = idx + 1, total = hooks_run, command = %command, "setup_environment:hook start");
             info!(command = %command, "Running post-create hook {}/{}", idx + 1, hooks_run);
-            cmd::shell_command_with_env(command, effective_working_dir, &hook_env)
-                .with_context(|| format!("Failed to run post-create command: '{}'", command))?;
+            cmd::shell_command_with_env(
+                config.hook_shell.as_deref(),
+                command,
+                effective_working_dir,
+                &hook_env,
+            )
+            .with_context(|| format!("Failed to run post-create command: '{}'", command))?;
             info!(branch = branch_name, step = idx + 1, total = hooks_run, command = %command, "setup_environment:hook complete");
         }
         info!(

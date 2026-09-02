@@ -235,8 +235,13 @@ pub fn merge(
         ];
 
         for command in hooks {
-            cmd::shell_command_with_env(command, &worktree_path, &hook_env)
-                .with_context(|| format!("Pre-merge hook failed: '{}'", command))?;
+            cmd::shell_command_with_env(
+                context.config.hook_shell.as_deref(),
+                command,
+                &worktree_path,
+                &hook_env,
+            )
+            .with_context(|| format!("Pre-merge hook failed: '{}'", command))?;
         }
     }
 

@@ -55,8 +55,14 @@ fn run_pre_remove_hooks(
         for command in pre_remove_hooks {
             // Run the hook with the worktree path as the working directory.
             // This allows for relative paths like `node_modules` in the command.
-            cmd::shell_command_with_env_output(command, worktree_path, &hook_env, show_hook_output)
-                .with_context(|| format!("Failed to run pre-remove command: '{}'", command))?;
+            cmd::shell_command_with_env_output(
+                context.config.hook_shell.as_deref(),
+                command,
+                worktree_path,
+                &hook_env,
+                show_hook_output,
+            )
+            .with_context(|| format!("Failed to run pre-remove command: '{}'", command))?;
         }
     }
     Ok(())

@@ -415,6 +415,19 @@ directory** as the working directory (or the nested config directory for
 and receive environment variables: `WM_HANDLE`, `WM_WORKTREE_PATH`,
 `WM_PROJECT_ROOT`, `WM_CONFIG_DIR`.
 
+`hook_shell` is an argv list containing the executable followed by its
+arguments. Workmux appends each hook command as the final argument. It defaults
+to `["bash", "-c"]` for compatibility. Machine-specific paths belong in global
+configuration:
+
+```yaml
+hook_shell: ["/opt/homebrew/bin/bash", "-c"]
+```
+
+A project can override the complete argv, or inherit the global value by
+omitting `hook_shell`. The argv must contain a non-empty executable. Shell flags
+and error handling apply only when included explicitly.
+
 `WM_CONFIG_DIR` points to the directory containing the `.workmux.yaml` that was
 used, which may differ from `WM_WORKTREE_PATH` when using nested configs.
 
