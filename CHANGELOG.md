@@ -21,6 +21,13 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.254 (2026-09-03)
+
+- Fix `workmux send` leaving prompts unsubmitted in active Codex panes.
+  ([#261](https://github.com/raine/workmux/issues/261))
+- Speed up sandbox startup for repositories with large local Git configurations.
+  ([#266](https://github.com/raine/workmux/pull/266))
+
 ## v0.1.253 (2026-09-02)
 
 - Configure the shell and arguments used for lifecycle hooks with `hook_shell`,
