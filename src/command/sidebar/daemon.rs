@@ -6,6 +6,7 @@ use notify::{EventKindMask, RecursiveMode, Watcher};
 use signal_hook::iterator::{Handle as SignalHandle, Signals};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -66,11 +67,91 @@ fn query_tmux_state() -> Result<TmuxState> {
     })
 }
 
+struct BroadcastCache {
+    snapshot: Option<super::snapshot::SidebarSnapshot>,
+    payload: Vec<u8>,
+    generation: u64,
+}
+
+struct SocketState {
+    clients: Vec<UnixStream>,
+    cached: BroadcastCache,
+}
+
+fn git_status_maps_equal(
+    left: &HashMap<PathBuf, GitStatus>,
+    right: &HashMap<PathBuf, GitStatus>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(path, status)| {
+            right
+                .get(path)
+                .is_some_and(|other| git_status_semantically_equal(status, other))
+        })
+}
+
+fn snapshots_equal(
+    left: &super::snapshot::SidebarSnapshot,
+    right: &super::snapshot::SidebarSnapshot,
+) -> bool {
+    let super::snapshot::SidebarSnapshot {
+        position: _,
+        layout_mode: _,
+        filter_mode: _,
+        active_windows: _,
+        active_pane_ids: _,
+        window_pane_counts: _,
+        git_statuses: _,
+        pr_statuses: _,
+        check_statuses: _,
+        interrupted_pane_ids: _,
+        sleeping_pane_ids: _,
+        agents: _,
+        config_version: _,
+    } = left;
+
+    left.position == right.position
+        && left.layout_mode == right.layout_mode
+        && left.filter_mode == right.filter_mode
+        && left.active_windows == right.active_windows
+        && left.active_pane_ids == right.active_pane_ids
+        && left.window_pane_counts == right.window_pane_counts
+        && git_status_maps_equal(&left.git_statuses, &right.git_statuses)
+        && left.pr_statuses == right.pr_statuses
+        && left.check_statuses == right.check_statuses
+        && left.interrupted_pane_ids == right.interrupted_pane_ids
+        && left.sleeping_pane_ids == right.sleeping_pane_ids
+        && left.agents == right.agents
+        && left.config_version == right.config_version
+}
+
+fn stream_is_connected(stream: &UnixStream) -> bool {
+    let mut byte = 0u8;
+    // SAFETY: recv receives a valid stream fd and a writable one-byte buffer.
+    let result = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            (&mut byte as *mut u8).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    if result >= 0 {
+        if result > 0 {
+            tracing::warn!("sidebar client sent unexpected data");
+        }
+        return false;
+    }
+
+    matches!(
+        std::io::Error::last_os_error().kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+    )
+}
+
 /// Unix socket server for broadcasting snapshots to clients.
 struct SocketServer {
-    clients: Arc<Mutex<Vec<UnixStream>>>,
-    /// Cached last broadcast payload (length-prefixed) for immediate delivery to new clients.
-    cached_payload: Arc<Mutex<Vec<u8>>>,
+    state: Arc<Mutex<SocketState>>,
 }
 
 impl SocketServer {
@@ -78,82 +159,107 @@ impl SocketServer {
         let listener = UnixListener::bind(path)?;
         // Restrict socket to owner only (prevent other local users from reading snapshots)
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        listener.set_nonblocking(true)?;
-        let clients: Arc<Mutex<Vec<UnixStream>>> = Arc::new(Mutex::new(Vec::new()));
-        let clients_clone = clients.clone();
-        let cached_payload: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        let cached_clone = cached_payload.clone();
+        let state = Arc::new(Mutex::new(SocketState {
+            clients: Vec::new(),
+            cached: BroadcastCache {
+                snapshot: None,
+                payload: Vec::new(),
+                generation: 0,
+            },
+        }));
+        let accept_state = state.clone();
 
         thread::spawn(move || {
             loop {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        // Clear inherited O_NONBLOCK from the listener.
-                        // Without this, write_all fails with WouldBlock when
-                        // the payload exceeds the socket buffer, and
-                        // set_write_timeout has no effect on non-blocking sockets.
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
-                        // Send cached snapshot immediately so the client doesn't
-                        // wait for the next tick (no dirty_flag needed).
-                        // Clone under lock and drop before the blocking write to
-                        // avoid holding the mutex during I/O.
-                        let payload = cached_clone.lock().ok().map(|p| p.clone());
-                        let cache_ok = match payload {
-                            Some(ref p) if !p.is_empty() => stream.write_all(p).is_ok(),
-                            _ => true,
-                        };
-                        if cache_ok {
-                            let mut clients = clients_clone.lock().unwrap();
-                            clients.push(stream);
-                            tracing::debug!(clients = clients.len(), "sidebar client connected");
-                        }
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        tracing::error!(%error, "sidebar socket accept failed");
+                        break;
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(50));
+                };
+                let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+                loop {
+                    let (generation, payload) = {
+                        let state = accept_state.lock().unwrap();
+                        (state.cached.generation, state.cached.payload.clone())
+                    };
+                    if !payload.is_empty() && stream.write_all(&payload).is_err() {
+                        break;
                     }
-                    Err(_) => break,
+
+                    let mut state = accept_state.lock().unwrap();
+                    if state.cached.generation != generation {
+                        continue;
+                    }
+                    state.clients.push(stream);
+                    tracing::debug!(clients = state.clients.len(), "sidebar client connected");
+                    break;
                 }
             }
         });
 
-        Ok(Self {
-            clients,
-            cached_payload,
-        })
+        Ok(Self { state })
     }
 
-    fn broadcast(&self, snapshot: &super::snapshot::SidebarSnapshot) {
-        let data = serde_json::to_vec(snapshot).unwrap_or_default();
-        let len = (data.len() as u32).to_be_bytes();
-
-        // Cache the length-prefixed payload for new client connections
-        if let Ok(mut cached) = self.cached_payload.lock() {
-            cached.clear();
-            cached.extend_from_slice(&len);
-            cached.extend_from_slice(&data);
+    /// Publish a snapshot when its sidebar-visible contents change.
+    fn broadcast(&self, snapshot: &super::snapshot::SidebarSnapshot) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state
+            .cached
+            .snapshot
+            .as_ref()
+            .is_some_and(|cached| snapshots_equal(cached, snapshot))
+        {
+            return false;
         }
 
-        // Take clients out of mutex to avoid holding lock during writes
-        let mut clients = std::mem::take(&mut *self.clients.lock().unwrap());
+        let data = match serde_json::to_vec(snapshot) {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::error!(%error, "failed to serialize sidebar snapshot");
+                return false;
+            }
+        };
+        if data.len() > 1024 * 1024 {
+            tracing::error!(
+                payload_bytes = data.len(),
+                "sidebar snapshot exceeds client limit"
+            );
+            return false;
+        }
+        let mut payload = Vec::with_capacity(4 + data.len());
+        payload.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&data);
+
+        state.cached.snapshot = Some(snapshot.clone());
+        state.cached.payload.clone_from(&payload);
+        state.cached.generation = state.cached.generation.wrapping_add(1);
+        let mut clients = std::mem::take(&mut state.clients);
+        drop(state);
+
         let before = clients.len();
-        clients
-            .retain_mut(|stream| stream.write_all(&len).is_ok() && stream.write_all(&data).is_ok());
+        clients.retain_mut(|stream| stream.write_all(&payload).is_ok());
         let dropped = before - clients.len();
+        let mut state = self.state.lock().unwrap();
+        let remaining = state.clients.len() + clients.len();
+        state.clients.append(&mut clients);
         if dropped > 0 {
             tracing::info!(
                 dropped,
-                remaining = clients.len(),
+                remaining,
                 payload_bytes = data.len(),
                 "sidebar broadcast: clients disconnected"
             );
         }
-        // Merge surviving clients back (append to preserve any new connections accepted during writes)
-        self.clients.lock().unwrap().append(&mut clients);
+        true
     }
 
     fn client_count(&self) -> usize {
-        self.clients.lock().unwrap().len()
+        let mut state = self.state.lock().unwrap();
+        state.clients.retain(stream_is_connected);
+        state.clients.len()
     }
 }
 
@@ -309,8 +415,24 @@ fn is_event_ignored(
     }
 }
 
-/// Compare two GitStatus values ignoring the cached_at timestamp.
+/// Compare sidebar-visible Git state while ignoring cache freshness.
 fn git_status_semantically_equal(a: &GitStatus, b: &GitStatus) -> bool {
+    let GitStatus {
+        ahead: _,
+        behind: _,
+        has_conflict: _,
+        is_dirty: _,
+        lines_added: _,
+        lines_removed: _,
+        uncommitted_added: _,
+        uncommitted_removed: _,
+        cached_at: _,
+        base_branch: _,
+        branch: _,
+        has_upstream: _,
+        is_rebasing: _,
+    } = a;
+
     a.ahead == b.ahead
         && a.behind == b.behind
         && a.has_conflict == b.has_conflict
@@ -322,6 +444,7 @@ fn git_status_semantically_equal(a: &GitStatus, b: &GitStatus) -> bool {
         && a.base_branch == b.base_branch
         && a.branch == b.branch
         && a.has_upstream == b.has_upstream
+        && a.is_rebasing == b.is_rebasing
 }
 
 /// Find which worktrees are affected by a filesystem event at the given path.
@@ -499,15 +622,18 @@ fn next_worker_timeout(
 /// Returns true if any published status changed, ignoring cached_at.
 fn refresh_git_status(worktree: &Path, agent_paths: &[PathBuf], cache: &GitCache) -> bool {
     let new_status = crate::git::get_git_status(worktree, None);
+    let Ok(mut cache) = cache.lock() else {
+        return true;
+    };
     let mut changed = false;
-    if let Ok(mut cache) = cache.lock() {
-        for path in agent_paths {
-            changed |= cache
-                .get(path)
-                .is_none_or(|old| !git_status_semantically_equal(old, &new_status));
-            cache.insert(path.clone(), new_status.clone());
+    for path in agent_paths {
+        if cache
+            .get(path)
+            .is_some_and(|old| git_status_semantically_equal(old, &new_status))
+        {
+            continue;
         }
-    } else {
+        cache.insert(path.clone(), new_status.clone());
         changed = true;
     }
     changed
@@ -2048,9 +2174,280 @@ mod tests {
         assert!(github_fetch_due(true, Duration::ZERO));
     }
 
+    fn empty_snapshot() -> super::super::snapshot::SidebarSnapshot {
+        super::super::snapshot::SidebarSnapshot {
+            position: SidebarPosition::Left,
+            layout_mode: SidebarLayoutMode::Tiles,
+            filter_mode: SidebarFilterMode::None,
+            active_windows: HashSet::new(),
+            active_pane_ids: HashSet::new(),
+            window_pane_counts: HashMap::new(),
+            git_statuses: HashMap::new(),
+            pr_statuses: HashMap::new(),
+            check_statuses: HashMap::new(),
+            interrupted_pane_ids: HashSet::new(),
+            sleeping_pane_ids: HashSet::new(),
+            agents: Vec::new(),
+            config_version: 0,
+        }
+    }
+
+    fn read_snapshot(stream: &mut UnixStream) -> super::super::snapshot::SidebarSnapshot {
+        use std::io::Read;
+
+        let mut header = [0; 4];
+        stream.read_exact(&mut header).unwrap();
+        let mut payload = vec![0; u32::from_be_bytes(header) as usize];
+        stream.read_exact(&mut payload).unwrap();
+        serde_json::from_slice(&payload).unwrap()
+    }
+
+    fn wait_for_clients(server: &SocketServer, expected: usize) {
+        for _ in 0..100 {
+            if server.client_count() == expected {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(server.client_count(), expected);
+    }
+
     #[test]
     fn mutation_watchers_exclude_access_events() {
         assert_eq!(mutation_watcher_config().event_kinds(), EventKindMask::CORE);
+    }
+
+    #[test]
+    fn snapshot_comparison_covers_every_sidebar_state_category() {
+        use crate::github::{CheckState, CheckSummary, PrSummary};
+
+        let original = empty_snapshot();
+        let mut variants = Vec::new();
+
+        let mut changed = original.clone();
+        changed.position = SidebarPosition::Top;
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.layout_mode = SidebarLayoutMode::Compact;
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.filter_mode = SidebarFilterMode::Session;
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.active_windows.insert(("s".into(), "@1".into()));
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.active_pane_ids.insert("%1".into());
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.window_pane_counts.insert("@1".into(), 2);
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.git_statuses.insert(
+            PathBuf::from("/repo"),
+            GitStatus {
+                is_dirty: true,
+                ..GitStatus::default()
+            },
+        );
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.pr_statuses.insert(
+            PathBuf::from("/repo"),
+            PrSummary {
+                number: 1,
+                title: "title".into(),
+                state: "OPEN".into(),
+                is_draft: false,
+                checks: None,
+                check_meta: None,
+                url: None,
+            },
+        );
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.check_statuses.insert(
+            PathBuf::from("/repo"),
+            CheckSummary {
+                state: CheckState::Success,
+                meta: None,
+            },
+        );
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.interrupted_pane_ids.insert("%1".into());
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.sleeping_pane_ids.insert("%1".into());
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.agents.push(working_agent("%1", 1));
+        variants.push(changed);
+        let mut changed = original.clone();
+        changed.config_version = 1;
+        variants.push(changed);
+
+        assert!(
+            variants
+                .iter()
+                .all(|changed| !snapshots_equal(&original, changed))
+        );
+    }
+
+    #[test]
+    fn agent_display_and_sorting_changes_are_meaningful() {
+        let mut first = empty_snapshot();
+        first.agents.push(working_agent("%1", 1));
+
+        let mut prompt = first.clone();
+        prompt.agents[0].pane_title = Some("updated prompt".into());
+        assert!(!snapshots_equal(&first, &prompt));
+
+        let mut status = first.clone();
+        status.agents[0].status = Some(AgentStatus::Waiting);
+        assert!(!snapshots_equal(&first, &status));
+
+        let mut activity = first.clone();
+        activity.agents[0].activity_ts = Some(200);
+        assert!(!snapshots_equal(&first, &activity));
+
+        let mut window_order = first.clone();
+        window_order.agents[0].window_index = Some(2);
+        assert!(!snapshots_equal(&first, &window_order));
+    }
+
+    #[test]
+    fn snapshot_comparison_is_set_order_independent() {
+        let mut first = empty_snapshot();
+        first.active_pane_ids.extend(["%1".into(), "%2".into()]);
+        first
+            .active_windows
+            .extend([("one".into(), "@1".into()), ("two".into(), "@2".into())]);
+        let mut second = empty_snapshot();
+        second.active_pane_ids.extend(["%2".into(), "%1".into()]);
+        second
+            .active_windows
+            .extend([("two".into(), "@2".into()), ("one".into(), "@1".into())]);
+
+        assert!(snapshots_equal(&first, &second));
+    }
+
+    #[test]
+    fn git_snapshot_comparison_ignores_only_cache_freshness() {
+        let mut first = empty_snapshot();
+        first.git_statuses.insert(
+            PathBuf::from("/repo"),
+            GitStatus {
+                cached_at: Some(1),
+                ..GitStatus::default()
+            },
+        );
+        let mut second = first.clone();
+        second
+            .git_statuses
+            .get_mut(Path::new("/repo"))
+            .unwrap()
+            .cached_at = Some(2);
+        assert!(snapshots_equal(&first, &second));
+
+        second
+            .git_statuses
+            .get_mut(Path::new("/repo"))
+            .unwrap()
+            .is_rebasing = true;
+        assert!(!snapshots_equal(&first, &second));
+    }
+
+    #[test]
+    fn socket_server_delivers_initial_cache_and_changed_state_only() {
+        use std::io::{Read, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("sidebar.sock");
+        let server = SocketServer::bind(&socket).unwrap();
+        let mut first = UnixStream::connect(&socket).unwrap();
+        first
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+
+        let mut snapshot = empty_snapshot();
+        assert!(server.broadcast(&snapshot));
+        assert_eq!(read_snapshot(&mut first).config_version, 0);
+
+        let mut late = UnixStream::connect(&socket).unwrap();
+        late.set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        assert_eq!(read_snapshot(&mut late).config_version, 0);
+
+        assert!(!server.broadcast(&snapshot));
+        let mut header = [0; 4];
+        let error = first.read_exact(&mut header).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+
+        snapshot.git_statuses.insert(
+            PathBuf::from("/repo"),
+            GitStatus {
+                cached_at: Some(1),
+                ..GitStatus::default()
+            },
+        );
+        assert!(server.broadcast(&snapshot));
+        let _ = read_snapshot(&mut first);
+        let _ = read_snapshot(&mut late);
+        snapshot
+            .git_statuses
+            .get_mut(Path::new("/repo"))
+            .unwrap()
+            .cached_at = Some(2);
+        assert!(!server.broadcast(&snapshot));
+
+        snapshot.active_pane_ids.insert("%1".into());
+        assert!(server.broadcast(&snapshot));
+        assert!(read_snapshot(&mut first).active_pane_ids.contains("%1"));
+        wait_for_clients(&server, 2);
+
+        drop(first);
+        drop(late);
+        wait_for_clients(&server, 0);
+
+        let mut malformed = UnixStream::connect(&socket).unwrap();
+        wait_for_clients(&server, 1);
+        malformed.write_all(b"unexpected").unwrap();
+        wait_for_clients(&server, 0);
+    }
+
+    #[test]
+    fn concurrent_accept_observes_latest_published_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("sidebar.sock");
+        let server = Arc::new(SocketServer::bind(&socket).unwrap());
+        assert!(server.broadcast(&empty_snapshot()));
+
+        let publisher = Arc::clone(&server);
+        let publish = thread::spawn(move || {
+            for version in 1..=20 {
+                let mut snapshot = empty_snapshot();
+                snapshot.config_version = version;
+                assert!(publisher.broadcast(&snapshot));
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let mut client = UnixStream::connect(&socket).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let mut seen = 0;
+        while seen < 20 {
+            let next = read_snapshot(&mut client).config_version;
+            assert!(next >= seen);
+            seen = next;
+        }
+        publish.join().unwrap();
+        assert_eq!(seen, 20);
     }
 
     #[test]
