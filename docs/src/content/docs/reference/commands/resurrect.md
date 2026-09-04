@@ -23,6 +23,14 @@ workmux resurrect [--dry-run]
 6. Uses agent-specific behavior, such as Codex's resume subcommand with its last-session flag
 7. Cleans up consumed stale state files
 
+Agent state from known earlier multiplexer boots is compacted to one recovery
+candidate per exact working directory. Unrestored worktrees remain recoverable
+across repeated restarts without retaining duplicate records for every boot.
+Current-boot records, records without a reliable boot identity, malformed files,
+and state owned by another multiplexer instance or backend are preserved. Each
+instance compacts its own history when workmux observes that instance with a
+reliable boot identity.
+
 ## Examples
 
 ```bash

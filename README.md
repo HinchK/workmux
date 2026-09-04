@@ -1591,6 +1591,14 @@ workmux resurrect
 3. Skips worktrees that are already open or no longer exist
 4. Opens each matched worktree with `--continue` to resume the agent
 
+Agent state from known earlier multiplexer boots is compacted to one recovery
+candidate per exact working directory. This keeps repeated server restarts from
+accumulating duplicate recovery history while retaining unrestored worktrees
+across any number of restarts. Current-boot records, records without a reliable
+boot identity, malformed files, and state owned by another multiplexer instance
+or backend are preserved. Each instance compacts its own history when workmux
+observes that instance with a reliable boot identity.
+
 ---
 
 ### `workmux sync-files`

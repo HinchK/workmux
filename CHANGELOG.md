@@ -23,6 +23,8 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## Unreleased
 
+- Bound historical agent state across multiplexer restarts while preserving
+  resurrection recovery and avoiding repeated sidebar parsing.
 - Reduce sidebar tmux overhead without delaying status updates or inactivity
   detection.
 - Reduce sidebar background CPU and process churn while keeping GitHub PR and

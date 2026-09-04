@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -8,6 +8,15 @@ const STALE_ATOMIC_TEMP_AGE: Duration = Duration::from_secs(60);
 
 /// Write content through a same-directory temporary file and atomically replace the target.
 pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
+    write_atomic_with_durability(path, content, false)
+}
+
+/// Atomically replace a target and make the replacement durable before returning.
+pub(crate) fn write_atomic_durable(path: &Path, content: &[u8]) -> Result<()> {
+    write_atomic_with_durability(path, content, true)
+}
+
+fn write_atomic_with_durability(path: &Path, content: &[u8], durable: bool) -> Result<()> {
     cleanup_stale_atomic_temps(path)?;
 
     let parent = path
@@ -24,9 +33,19 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
         .with_context(|| format!("Failed to write temp file for {}", path.display()))?;
     tmp.flush()
         .with_context(|| format!("Failed to flush temp file for {}", path.display()))?;
+    if durable {
+        tmp.as_file()
+            .sync_all()
+            .with_context(|| format!("Failed to sync temp file for {}", path.display()))?;
+    }
     tmp.persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("Failed to rename temp file for {}", path.display()))?;
+    if durable {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("Failed to sync directory for {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -267,6 +286,17 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn write_atomic_durable_replaces_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        write_atomic_durable(&path, b"first").unwrap();
+        write_atomic_durable(&path, b"second").unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "second");
     }
 
     #[test]

@@ -201,9 +201,10 @@ well. It uses a daemon + client architecture with event-driven rendering:
    edge of every window, starts a background daemon, and installs tmux hooks.
 
 2. **Daemon**: a single headless process that polls tmux state every 2 seconds
-   (or immediately when signaled via SIGUSR1). It reads agent state from the
-   filesystem, queries tmux for pane geometry and active windows, then pushes
-   snapshots to all connected sidebar clients over a Unix socket.
+   (or immediately when signaled via SIGUSR1). It reads agent state from a
+   context-scoped filesystem cache, queries tmux for pane geometry and active
+   windows, then pushes snapshots to all connected sidebar clients over a Unix
+   socket. Unchanged records are reused without loading or parsing their JSON.
 
 3. **Clients**: every tmux window gets its own sidebar pane running a separate
    `workmux _sidebar-run` process. Each process connects to the shared daemon

@@ -9,25 +9,16 @@ pub mod store;
 pub(crate) mod test_support;
 mod types;
 
-use std::fs;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
 use tracing::warn;
 
 use crate::agent_identity::classify_agent_kind;
 use crate::multiplexer::{AgentStatus, Multiplexer};
 
 pub use store::StateStore;
+pub(crate) use store::{AgentStateCache, AgentStateSource, ResurrectionAgentState};
 pub use types::{AgentState, LastDoneCycleState, PaneKey, RuntimeState};
-
-pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, content).context("Failed to write temp file")?;
-    fs::rename(&tmp, path).context("Failed to rename temp file")?;
-    Ok(())
-}
 
 /// Persist an agent state update to the StateStore.
 ///
@@ -58,6 +49,34 @@ pub fn persist_agent_registration(mux: &dyn Multiplexer, pane_id: &str) {
 }
 
 fn persist_agent_snapshot(
+    mux: &dyn Multiplexer,
+    pane_id: &str,
+    status: Option<AgentStatus>,
+    title_override: Option<String>,
+    agent_session_id: Option<String>,
+    preserve_existing: bool,
+) {
+    let Ok(store) = StateStore::new() else {
+        return;
+    };
+    if let Err(error) = store.with_agent_lock(|store| {
+        persist_agent_snapshot_locked(
+            store,
+            mux,
+            pane_id,
+            status,
+            title_override,
+            agent_session_id,
+            preserve_existing,
+        );
+        Ok(())
+    }) {
+        warn!(%error, "failed to lock agent state persistence");
+    }
+}
+
+fn persist_agent_snapshot_locked(
+    store: &StateStore,
     mux: &dyn Multiplexer,
     pane_id: &str,
     status: Option<AgentStatus>,
@@ -112,16 +131,20 @@ fn persist_agent_snapshot(
         )
     };
 
+    if let Some(boot_id) = boot_id.as_deref()
+        && let Err(error) = store.compact_context_locked(mux.name(), &mux.instance_id(), boot_id)
+    {
+        warn!(%error, "failed to compact historical agent state");
+        return;
+    }
+
     // tmux pane PIDs and server lifecycles form a stable process identity.
     // Other backends retain their established pane-key merge behavior.
     let existing = preserve_existing
         .then(|| {
-            StateStore::new()
-                .ok()
-                .and_then(|store| store.get_agent(&pane_key).ok().flatten())
-                .filter(|state| {
-                    mux.name() != "tmux" || (state.pane_pid == live_pid && state.boot_id == boot_id)
-                })
+            store.get_agent(&pane_key).ok().flatten().filter(|state| {
+                mux.name() != "tmux" || (state.pane_pid == live_pid && state.boot_id == boot_id)
+            })
         })
         .flatten();
 
@@ -197,10 +220,8 @@ fn persist_agent_snapshot(
         agent_session_id,
     };
 
-    if let Ok(store) = StateStore::new()
-        && let Err(e) = store.upsert_agent(&state)
-    {
-        warn!(error = %e, "failed to persist agent state");
+    if let Err(error) = store.upsert_agent_locked(&state) {
+        warn!(%error, "failed to persist agent state");
     }
 }
 

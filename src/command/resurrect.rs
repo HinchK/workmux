@@ -83,7 +83,7 @@ pub fn run(dry_run: bool) -> Result<()> {
         info!(
             handle = candidate.handle,
             mode = ?candidate.mode,
-            stale_keys = candidate.stale_pane_keys.len(),
+            stale_keys = candidate.stale_sources.len(),
             "resurrect:exec opening worktree"
         );
 
@@ -104,13 +104,8 @@ pub fn run(dry_run: bool) -> Result<()> {
                     path = %result.worktree_path.display(),
                     "resurrect:exec restored successfully"
                 );
-                // Clean up stale state files by specific PaneKey
-                for key in &candidate.stale_pane_keys {
-                    info!(
-                        pane_id = %key.pane_id,
-                        "resurrect:exec deleting stale state file"
-                    );
-                    let _ = store.delete_agent(key);
+                if let Err(error) = store.consume_agent_sources(&candidate.stale_sources) {
+                    tracing::warn!(%error, "resurrect:exec failed to consume stale state");
                 }
                 restored.push(candidate.handle.clone());
             }

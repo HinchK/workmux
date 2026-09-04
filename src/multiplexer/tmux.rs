@@ -31,9 +31,22 @@ const LIVE_PANE_ESCAPED_RECORD_SEPARATOR: &str = "\\036";
 const LIVE_PANE_ESCAPED_FIELD_SEPARATOR: &str = "\\037";
 const LIVE_PANE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{session_id}\x1f#{window_id}";
 const WINDOW_OWNERSHIP_FORMAT: &str = "\x1e#{window_id}\x1f#{window_name}\x1f#{session_name}\x1f#{@workmux_token}\x1f#{pane_current_path}";
+macro_rules! server_boot_format {
+    () => {
+        "#{start_time}:#{pid}"
+    };
+}
+
 // Sidebar agent paths come from persisted AgentState workdirs. Live pane CWD remains
 // available through LIVE_PANE_FORMAT for callers that use it for session selection.
-const SIDEBAR_STATE_FORMAT: &str = "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{session_name}\x1f#{window_name}\x1f#{window_id}\x1f#{@workmux_pane_status}\x1f#{window_active}\x1f#{session_attached}\x1f#{pane_active}\x1f#{window_index}\x1f#{start_time}\x1f#{@workmux_sidebar_position}\x1f#{@workmux_sidebar_layout}\x1f#{@workmux_sidebar_filter}\x1f#{@workmux_sleeping_panes}";
+const SIDEBAR_STATE_FORMAT: &str = concat!(
+    "\x1e#{pane_id}\x1f#{pane_pid}\x1f#{pane_current_command}\x1f#{pane_title}",
+    "\x1f#{session_name}\x1f#{window_name}\x1f#{window_id}\x1f#{@workmux_pane_status}",
+    "\x1f#{window_active}\x1f#{session_attached}\x1f#{pane_active}\x1f#{window_index}\x1f",
+    server_boot_format!(),
+    "\x1f#{@workmux_sidebar_position}\x1f#{@workmux_sidebar_layout}",
+    "\x1f#{@workmux_sidebar_filter}\x1f#{@workmux_sleeping_panes}"
+);
 
 /// One tmux server observation containing every input needed by a daemon tick.
 #[derive(Debug)]
@@ -1444,9 +1457,10 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn server_boot_id(&self) -> Result<Option<String>> {
-        // #{start_time} is the Unix timestamp when the tmux server started.
-        // Stable across the server's lifetime, changes on restart.
-        self.tmux_query(&["display-message", "-p", "#{start_time}"])
+        // Server start time plus PID distinguishes rapid restarts while remaining
+        // stable for the server lifetime. Legacy start-time-only IDs compare as
+        // an earlier lifecycle and remain valid recovery input.
+        self.tmux_query(&["display-message", "-p", server_boot_format!()])
             .map(|s| {
                 let trimmed = s.trim().to_string();
                 if trimmed.is_empty() {
@@ -1560,7 +1574,7 @@ mod tests {
 
     #[test]
     fn sidebar_snapshot_parses_one_server_observation() {
-        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f✓\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n";
+        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f✓\x1f1\x1f1\x1f1\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n";
 
         let snapshot = parse_sidebar_snapshot(output).unwrap();
 
@@ -1578,7 +1592,7 @@ mod tests {
         );
         assert!(snapshot.active_pane_ids.contains("%7"));
         assert!(!snapshot.active_pane_ids.contains("%8"));
-        assert_eq!(snapshot.server_boot_id.as_deref(), Some("1700000000"));
+        assert_eq!(snapshot.server_boot_id.as_deref(), Some("1700000000:42"));
         assert_eq!(snapshot.position.as_deref(), Some("top"));
         assert_eq!(snapshot.layout.as_deref(), Some("compact"));
         assert_eq!(snapshot.filter.as_deref(), Some("session"));

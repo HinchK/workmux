@@ -2071,6 +2071,9 @@ pub fn run() -> Result<()> {
     let mut inactivity_tracker = InactivityTracker::new(Duration::from_secs(10));
     let mut last_interrupted: HashSet<String> = HashSet::new();
     let backend_name = mux.name().to_string();
+    let store = StateStore::new()?;
+    let mut agent_state_cache = crate::state::AgentStateCache::default();
+    let mut compacted_boot_id: Option<String> = None;
     let mut cached_inputs: Option<(Vec<crate::multiplexer::AgentPane>, TmuxState)> = None;
     let mut pending_captures: Option<HashMap<String, String>> = None;
     let mut publish_pending = false;
@@ -2093,15 +2096,42 @@ pub fn run() -> Result<()> {
             scheduler.finish_observation(now);
             match query_tmux_state(&tmux) {
                 Ok(tmux_state) => {
-                    let agents = StateStore::new().and_then(|store| {
-                        store.load_reconciled_agents_from_snapshot(
-                            mux.as_ref(),
-                            &tmux_state.live_panes,
+                    if tmux_state.server_boot_id != compacted_boot_id {
+                        match store.compact_context(
+                            &backend_name,
+                            &instance_id,
                             tmux_state.server_boot_id.as_deref(),
-                        )
-                    });
-                    match agents {
-                        Ok(agents) => {
+                        ) {
+                            Ok(stats) => {
+                                tracing::info!(
+                                    scanned = stats.scanned,
+                                    compacted = stats.compacted,
+                                    retained_flat = stats.retained_flat,
+                                    recovery_entries = stats.recovery_entries,
+                                    "agent state compaction complete"
+                                );
+                                compacted_boot_id = tmux_state.server_boot_id.clone();
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "agent state compaction failed");
+                            }
+                        }
+                    }
+
+                    match store.load_reconciled_agents_from_snapshot_cached(
+                        &mut agent_state_cache,
+                        mux.as_ref(),
+                        &tmux_state.live_panes,
+                        tmux_state.server_boot_id.as_deref(),
+                    ) {
+                        Ok((agents, stats)) => {
+                            tracing::trace!(
+                                listed = stats.listed,
+                                metadata = stats.metadata,
+                                reads = stats.reads,
+                                parses = stats.parses,
+                                "sidebar agent state load"
+                            );
                             inactivity_tracker.reconcile_identities(
                                 &tmux_state.live_panes,
                                 tmux_state.server_boot_id.as_deref(),
@@ -2169,9 +2199,7 @@ pub fn run() -> Result<()> {
                 false,
             );
 
-            if let Ok(store) = StateStore::new()
-                && apply_tick_effects(&output, &store, &backend_name, &instance_id)
-            {
+            if apply_tick_effects(&output, &store, &backend_name, &instance_id) {
                 scheduler.finish_heartbeat(Instant::now(), true);
             }
             last_interrupted = output.next_interrupted;
@@ -2458,10 +2486,10 @@ fn apply_tick_effects(
             instance: instance.to_string(),
             pane_id: write.pane_id.clone(),
         };
-        if let Ok(Some(mut state)) = store.get_agent(&pane_key) {
+        if let Ok(Some((mut state, revision))) = store.get_agent_with_revision(&pane_key) {
             state.status_ts = Some(write.resumed_ts);
             state.activity_ts = Some(write.resumed_ts);
-            let _ = store.upsert_agent(&state);
+            let _ = store.upsert_agent_if_revision(&state, &revision);
         }
     }
 

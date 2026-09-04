@@ -70,7 +70,7 @@ impl PaneKey {
 ///
 /// This is the persistent storage format. For dashboard display,
 /// convert to `AgentPane` using `to_agent_pane()`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentState {
     /// Composite identifier for the pane
     pub pane_key: PaneKey,
