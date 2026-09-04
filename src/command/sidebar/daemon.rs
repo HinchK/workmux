@@ -388,99 +388,82 @@ fn platform_supports_worktree_watches() -> bool {
     cfg!(target_os = "macos")
 }
 
-/// Set up filesystem watches for a worktree.
+#[derive(Debug)]
+struct WorktreeWatchSpec {
+    path: PathBuf,
+    mode: RecursiveMode,
+}
+
+/// Describe the filesystem watches needed for a verified worktree root.
+fn worktree_watch_specs(worktree: &Path, watch_worktree_files: bool) -> Vec<WorktreeWatchSpec> {
+    let mut specs = Vec::new();
+    let dot_git = worktree.join(".git");
+
+    if dot_git.is_file() {
+        if let Some(git_dir) = resolve_git_dir(worktree) {
+            specs.push(WorktreeWatchSpec {
+                path: git_dir.clone(),
+                mode: RecursiveMode::NonRecursive,
+            });
+
+            if let Some(common_dir) = resolve_common_git_dir(&git_dir) {
+                let refs_dir = common_dir.join("refs");
+                if refs_dir.is_dir() {
+                    specs.push(WorktreeWatchSpec {
+                        path: refs_dir,
+                        mode: RecursiveMode::Recursive,
+                    });
+                }
+                specs.push(WorktreeWatchSpec {
+                    path: common_dir,
+                    mode: RecursiveMode::NonRecursive,
+                });
+            }
+        }
+    } else if dot_git.is_dir() {
+        specs.push(WorktreeWatchSpec {
+            path: dot_git.clone(),
+            mode: RecursiveMode::NonRecursive,
+        });
+        let refs_dir = dot_git.join("refs");
+        if refs_dir.is_dir() {
+            specs.push(WorktreeWatchSpec {
+                path: refs_dir,
+                mode: RecursiveMode::Recursive,
+            });
+        }
+    }
+
+    if watch_worktree_files {
+        specs.push(WorktreeWatchSpec {
+            path: worktree.to_path_buf(),
+            mode: RecursiveMode::Recursive,
+        });
+    }
+
+    specs
+}
+
+/// Set up filesystem watches for a verified worktree root.
 ///
-/// Always watches .git metadata (non-recursively for HEAD/index/etc., recursively
-/// for refs/) to detect commits, staging, and branch changes instantly.
-///
-/// On macOS (FSEvents), also watches the worktree root recursively for near-instant
-/// uncommitted change detection. On Linux (inotify), working tree changes are
-/// detected by the periodic poll sweep instead, avoiding the massive inotify event
-/// volume that recursive watches generate under heavy file I/O.
+/// Git metadata watches detect commits, staging, and branch changes. macOS also
+/// watches worktree files recursively, while Linux detects them through polling.
 fn setup_worktree_watches(
     watcher: &mut notify::RecommendedWatcher,
     worktree: &Path,
     watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
 ) -> Vec<PathBuf> {
     let mut watched = Vec::new();
-    let dot_git = worktree.join(".git");
-    let is_linked = dot_git.is_file();
-
-    if is_linked {
-        // Linked worktree: gitdir is outside the worktree root
-        if let Some(git_dir) = resolve_git_dir(worktree) {
-            // Watch per-worktree gitdir non-recursively (HEAD, index, etc.)
-            add_watch(
-                watcher,
-                &git_dir,
-                RecursiveMode::NonRecursive,
-                worktree,
-                watch_to_worktrees,
-                &mut watched,
-            );
-
-            // Watch common dir's refs/ for shared branch updates
-            if let Some(common_dir) = resolve_common_git_dir(&git_dir) {
-                let refs_dir = common_dir.join("refs");
-                if refs_dir.is_dir() {
-                    add_watch(
-                        watcher,
-                        &refs_dir,
-                        RecursiveMode::Recursive,
-                        worktree,
-                        watch_to_worktrees,
-                        &mut watched,
-                    );
-                }
-                // Watch common dir non-recursively for packed-refs
-                add_watch(
-                    watcher,
-                    &common_dir,
-                    RecursiveMode::NonRecursive,
-                    worktree,
-                    watch_to_worktrees,
-                    &mut watched,
-                );
-            }
-        }
-    } else if dot_git.is_dir() {
-        // Normal worktree: watch .git/ non-recursively (HEAD, index, MERGE_HEAD, etc.)
+    for spec in worktree_watch_specs(worktree, platform_supports_worktree_watches()) {
         add_watch(
             watcher,
-            &dot_git,
-            RecursiveMode::NonRecursive,
-            worktree,
-            watch_to_worktrees,
-            &mut watched,
-        );
-        // Watch refs/ recursively (low volume: branch creates/deletes/updates)
-        let refs_dir = dot_git.join("refs");
-        if refs_dir.is_dir() {
-            add_watch(
-                watcher,
-                &refs_dir,
-                RecursiveMode::Recursive,
-                worktree,
-                watch_to_worktrees,
-                &mut watched,
-            );
-        }
-    }
-
-    // On macOS, also watch the worktree root for near-instant uncommitted change
-    // detection. FSEvents handles heavy I/O efficiently via kernel-level aggregation.
-    // On Linux, skip this and rely on the periodic poll sweep instead.
-    if platform_supports_worktree_watches() {
-        add_watch(
-            watcher,
-            worktree,
-            RecursiveMode::Recursive,
+            &spec.path,
+            spec.mode,
             worktree,
             watch_to_worktrees,
             &mut watched,
         );
     }
-
     watched
 }
 
@@ -512,30 +495,69 @@ fn next_worker_timeout(
     min_wait.min(Duration::from_secs(1))
 }
 
-/// Refresh git status for a worktree path, updating the cache.
-/// Returns true if the status actually changed (semantically, ignoring cached_at).
-fn refresh_git_status(path: &Path, cache: &GitCache) -> bool {
-    let new_status = crate::git::get_git_status(path, None);
-    let changed = cache
-        .lock()
-        .ok()
-        .map(|c| {
-            c.get(path)
-                .is_none_or(|old| !git_status_semantically_equal(old, &new_status))
-        })
-        .unwrap_or(true);
-    if let Ok(mut c) = cache.lock() {
-        c.insert(path.to_path_buf(), new_status);
+/// Refresh git status once for a worktree and publish it for every agent path.
+/// Returns true if any published status changed, ignoring cached_at.
+fn refresh_git_status(worktree: &Path, agent_paths: &[PathBuf], cache: &GitCache) -> bool {
+    let new_status = crate::git::get_git_status(worktree, None);
+    let mut changed = false;
+    if let Ok(mut cache) = cache.lock() {
+        for path in agent_paths {
+            changed |= cache
+                .get(path)
+                .is_none_or(|old| !git_status_semantically_equal(old, &new_status));
+            cache.insert(path.clone(), new_status.clone());
+        }
+    } else {
+        changed = true;
     }
     changed
 }
 
 /// Info about an active agent path sent to the git worker.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct GitWorkerPath {
     path: PathBuf,
     /// Whether this agent is stale (idle > threshold). Stale agents only
     /// get git status on the full sweep, not on every poll cycle.
     is_stale: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ResolvedGitWorktree {
+    agent_paths: Vec<PathBuf>,
+    is_stale: bool,
+}
+
+/// Resolve agent directories to verified worktree roots and group shared roots.
+/// Paths outside a non-bare Git worktree are absent from the result.
+fn resolve_git_worktrees(entries: &[GitWorkerPath]) -> HashMap<PathBuf, ResolvedGitWorktree> {
+    let mut agents = HashMap::new();
+    for entry in entries {
+        let is_stale = agents.entry(entry.path.clone()).or_insert(true);
+        *is_stale &= entry.is_stale;
+    }
+
+    let mut worktrees: HashMap<PathBuf, ResolvedGitWorktree> = HashMap::new();
+    for (agent_path, is_stale) in agents {
+        let Ok(root) = crate::git::get_repo_root_for(&agent_path) else {
+            tracing::debug!(path = %agent_path.display(), "excluding non-repository agent path from git worker");
+            continue;
+        };
+        let root = root.canonicalize().unwrap_or(root);
+        let worktree = worktrees
+            .entry(root)
+            .or_insert_with(|| ResolvedGitWorktree {
+                agent_paths: Vec::new(),
+                is_stale: true,
+            });
+        worktree.agent_paths.push(agent_path);
+        worktree.is_stale &= is_stale;
+    }
+
+    for worktree in worktrees.values_mut() {
+        worktree.agent_paths.sort();
+    }
+    worktrees
 }
 
 /// Info about an active agent path sent to the GitHub worker.
@@ -916,6 +938,7 @@ fn spawn_git_worker(
         };
 
         let mut active_entries: Vec<GitWorkerPath> = Vec::new();
+        let mut resolved_worktrees: HashMap<PathBuf, ResolvedGitWorktree> = HashMap::new();
         // Maps: watched directory -> set of worktrees it covers
         let mut watch_to_worktrees: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
         // Maps: worktree path -> list of watched paths for it
@@ -924,9 +947,9 @@ fn spawn_git_worker(
         let mut gitignores: HashMap<PathBuf, Gitignore> = HashMap::new();
         // Per-worktree: timestamp of last fs event (for debouncing)
         let mut pending_worktrees: HashMap<PathBuf, Instant> = HashMap::new();
-        // Stale status per path (true = all agents at path are stale)
+        // Stale status per worktree root (true when all associated agents are stale)
         let mut path_stale: HashMap<PathBuf, bool> = HashMap::new();
-        // Track unique active paths for fallback polling
+        // Track unique active worktree roots for fallback polling
         let mut unique_active: Vec<PathBuf> = Vec::new();
         let mut last_full_sweep = Instant::now();
         let full_sweep_interval = if watcher.is_none() {
@@ -1004,24 +1027,33 @@ fn spawn_git_worker(
             }
 
             // Check for path updates (non-blocking)
-            let mut paths_changed = false;
+            let mut latest_entries = None;
             while let Ok(entries) = rx.try_recv() {
-                active_entries = entries;
-                paths_changed = true;
+                latest_entries = Some(entries);
             }
+            let paths_changed = latest_entries.is_some_and(|mut entries| {
+                entries.sort();
+                if entries == active_entries {
+                    false
+                } else {
+                    active_entries = entries;
+                    true
+                }
+            });
 
             if paths_changed {
-                // Deduplicate paths. A path is stale only if ALL agents at that path are stale.
-                path_stale.clear();
-                for entry in &active_entries {
-                    let e = path_stale.entry(entry.path.clone()).or_insert(true);
-                    if !entry.is_stale {
-                        *e = false;
-                    }
-                }
-                unique_active = path_stale.keys().cloned().collect();
+                resolved_worktrees = resolve_git_worktrees(&active_entries);
+                path_stale = resolved_worktrees
+                    .iter()
+                    .map(|(path, entry)| (path.clone(), entry.is_stale))
+                    .collect();
+                unique_active = resolved_worktrees.keys().cloned().collect();
                 unique_active.sort();
                 let unique_set: HashSet<PathBuf> = unique_active.iter().cloned().collect();
+                let active_agent_paths: HashSet<&PathBuf> = resolved_worktrees
+                    .values()
+                    .flat_map(|entry| &entry.agent_paths)
+                    .collect();
 
                 if let Some(ref mut w) = watcher {
                     // Remove watches for worktrees no longer active
@@ -1042,44 +1074,25 @@ fn spawn_git_worker(
 
                     // Add watches for new worktrees
                     for path in &unique_active {
-                        if worktree_watches.contains_key(path) {
-                            continue;
+                        if !worktree_watches.contains_key(path) {
+                            let watched = setup_worktree_watches(w, path, &mut watch_to_worktrees);
+                            worktree_watches.insert(path.clone(), watched);
+                            gitignores.insert(path.clone(), build_gitignore(path));
                         }
-                        let watched = setup_worktree_watches(w, path, &mut watch_to_worktrees);
-                        worktree_watches.insert(path.clone(), watched);
-                        gitignores.insert(path.clone(), build_gitignore(path));
-                        // Trigger immediate status fetch for new worktrees
                         pending_worktrees.insert(path.clone(), Instant::now() - debounce_duration);
                     }
+                } else {
+                    for path in &unique_active {
+                        pending_worktrees.insert(path.clone(), Instant::now() - debounce_duration);
+                    }
+                }
 
-                    // Prune cache for removed worktrees
-                    if !removed.is_empty() {
-                        if let Ok(mut c) = cache_clone.lock() {
-                            c.retain(|p, _| unique_set.contains(p));
-                        }
+                if let Ok(mut cache) = cache_clone.lock() {
+                    let before = cache.len();
+                    cache.retain(|path, _| active_agent_paths.contains(path));
+                    if cache.len() != before {
                         dirty_flag.store(true, Ordering::Relaxed);
                         let _ = wake_tx.try_send(());
-                    }
-                } else {
-                    // Poll-only mode: just prune cache, no watches to manage
-                    if let Ok(mut c) = cache_clone.lock() {
-                        let before = c.len();
-                        c.retain(|p, _| unique_set.contains(p));
-                        if c.len() != before {
-                            dirty_flag.store(true, Ordering::Relaxed);
-                            let _ = wake_tx.try_send(());
-                        }
-                    }
-                    // Trigger immediate fetch for new paths
-                    for path in &unique_active {
-                        if !cache_clone
-                            .lock()
-                            .ok()
-                            .is_some_and(|c| c.contains_key(path))
-                        {
-                            pending_worktrees
-                                .insert(path.clone(), Instant::now() - debounce_duration);
-                        }
                     }
                 }
             }
@@ -1099,7 +1112,9 @@ fn spawn_git_worker(
                 if is_stale {
                     continue;
                 }
-                if refresh_git_status(path, &cache_clone) {
+                if let Some(worktree) = resolved_worktrees.get(path)
+                    && refresh_git_status(path, &worktree.agent_paths, &cache_clone)
+                {
                     any_changed = true;
                 }
             }
@@ -1114,7 +1129,9 @@ fn spawn_git_worker(
                 };
                 for path in &sweep_paths {
                     pending_worktrees.remove(path);
-                    if refresh_git_status(path, &cache_clone) {
+                    if let Some(worktree) = resolved_worktrees.get(path)
+                        && refresh_git_status(path, &worktree.agent_paths, &cache_clone)
+                    {
                         any_changed = true;
                     }
                 }
@@ -1982,6 +1999,21 @@ mod tests {
     use crate::multiplexer::{AgentPane, AgentStatus};
     use std::cell::RefCell;
     use std::path::PathBuf;
+    use std::process::Command;
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    }
+
+    fn init_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        run_git(path, &["init", "-q"]);
+    }
 
     fn working_agent(pane_id: &str, updated_ts: u64) -> AgentPane {
         AgentPane {
@@ -2019,6 +2051,108 @@ mod tests {
     #[test]
     fn mutation_watchers_exclude_access_events() {
         assert_eq!(mutation_watcher_config().event_kinds(), EventKindMask::CORE);
+    }
+
+    #[test]
+    fn non_repository_agent_path_produces_no_watch_or_refresh_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![GitWorkerPath {
+            path: dir.path().to_path_buf(),
+            is_stale: false,
+        }];
+
+        let resolved = resolve_git_worktrees(&entries);
+        let watch_specs: Vec<_> = resolved
+            .keys()
+            .flat_map(|root| worktree_watch_specs(root, true))
+            .collect();
+
+        assert!(resolved.is_empty());
+        assert!(watch_specs.is_empty());
+    }
+
+    #[test]
+    fn nested_agent_paths_share_the_repository_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let nested = repo.join("src/nested");
+        init_repo(&repo);
+        std::fs::create_dir_all(&nested).unwrap();
+        let entries = vec![
+            GitWorkerPath {
+                path: repo.clone(),
+                is_stale: true,
+            },
+            GitWorkerPath {
+                path: nested.clone(),
+                is_stale: false,
+            },
+        ];
+
+        let resolved = resolve_git_worktrees(&entries);
+        let root = repo.canonicalize().unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved.get(&root),
+            Some(&ResolvedGitWorktree {
+                agent_paths: vec![repo, nested],
+                is_stale: false,
+            })
+        );
+    }
+
+    #[test]
+    fn linked_worktree_uses_its_root_and_shared_git_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let linked = dir.path().join("linked");
+        init_repo(&repo);
+        run_git(&repo, &["config", "user.name", "Workmux Tests"]);
+        run_git(&repo, &["config", "user.email", "workmux@example.com"]);
+        std::fs::write(repo.join("tracked"), "content").unwrap();
+        run_git(&repo, &["add", "tracked"]);
+        run_git(&repo, &["commit", "-q", "-m", "initial"]);
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked-test",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let nested = linked.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+
+        let resolved = resolve_git_worktrees(&[GitWorkerPath {
+            path: nested.clone(),
+            is_stale: false,
+        }]);
+        let linked_root = linked.canonicalize().unwrap();
+        assert_eq!(resolved.keys().collect::<Vec<_>>(), vec![&linked_root]);
+
+        let git_dir = resolve_git_dir(&linked_root)
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let common_dir = resolve_common_git_dir(&git_dir).unwrap();
+        let specs = worktree_watch_specs(&linked_root, true);
+
+        assert!(specs.iter().any(|spec| {
+            spec.path == git_dir && matches!(spec.mode, RecursiveMode::NonRecursive)
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.path == common_dir && matches!(spec.mode, RecursiveMode::NonRecursive)
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.path == common_dir.join("refs") && matches!(spec.mode, RecursiveMode::Recursive)
+        }));
+        assert!(specs.iter().any(|spec| {
+            spec.path == linked_root && matches!(spec.mode, RecursiveMode::Recursive)
+        }));
     }
 
     #[test]
