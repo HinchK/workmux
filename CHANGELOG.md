@@ -25,6 +25,9 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 - Reduce sidebar idle CPU while keeping Git status updates responsive for stale
   repositories.
+- Avoid redundant sidebar updates and redraws when visible state is unchanged.
+- Keep sidebar Git status accurate for nested agent paths, shared repositories,
+  and linked worktrees while excluding non-repository paths.
 
 ## v0.1.254 (2026-09-03)
 
