@@ -381,6 +381,28 @@ fn build_gitignore(worktree: &Path) -> Gitignore {
     builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
+/// Find tracked files that match ignore rules so their mutation events remain visible.
+fn load_ignored_tracked_paths(worktree: &Path) -> HashSet<PathBuf> {
+    let Ok(mut command) = crate::git::unattended_git(Some(worktree)) else {
+        return HashSet::new();
+    };
+    let Ok(output) = command
+        .args(["ls-files", "-ci", "--exclude-standard", "-z"])
+        .output()
+    else {
+        return HashSet::new();
+    };
+    if !output.status.success() {
+        return HashSet::new();
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| worktree.join(String::from_utf8_lossy(path).as_ref()))
+        .collect()
+}
+
 /// Check if a filesystem event path should be skipped based on gitignore rules.
 /// Returns true if the path is inside a .git directory (non-working-tree change)
 /// or matches the worktree's .gitignore patterns.
@@ -388,6 +410,7 @@ fn is_event_ignored(
     event_path: &Path,
     worktree: &Path,
     gitignores: &HashMap<PathBuf, Gitignore>,
+    ignored_tracked_paths: &HashMap<PathBuf, HashSet<PathBuf>>,
 ) -> bool {
     // Linked-worktree git metadata events (e.g. shared gitdir, common refs)
     // live outside the worktree root. They are git events, not working-tree
@@ -402,6 +425,13 @@ fn is_event_ignored(
         // Skip .git/objects and .git/logs (high volume, don't affect status)
         // but allow .git/index, .git/HEAD, .git/refs, etc.
         return rel_str.starts_with(".git/objects/") || rel_str.starts_with(".git/logs/");
+    }
+
+    if ignored_tracked_paths
+        .get(worktree)
+        .is_some_and(|paths| paths.contains(event_path))
+    {
+        return false;
     }
 
     if let Some(gi) = gitignores.get(worktree) {
@@ -470,20 +500,19 @@ fn add_watch(
     mode: RecursiveMode,
     worktree: &Path,
     watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
-    watched_for_worktree: &mut Vec<PathBuf>,
-) {
+) -> bool {
     let already_watching = watch_to_worktrees.get(path).is_some_and(|s| !s.is_empty());
 
     if !already_watching && let Err(e) = watcher.watch(path, mode) {
         tracing::warn!("failed to watch {}: {}", path.display(), e);
-        return;
+        return false;
     }
 
     watch_to_worktrees
         .entry(path.to_path_buf())
         .or_default()
         .insert(worktree.to_path_buf());
-    watched_for_worktree.push(path.to_path_buf());
+    true
 }
 
 /// Remove watch association for a worktree. Unwatches the path if no other worktree needs it.
@@ -575,33 +604,51 @@ fn setup_worktree_watches(
     watcher: &mut notify::RecommendedWatcher,
     worktree: &Path,
     watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
-) -> Vec<PathBuf> {
+) -> (Vec<PathBuf>, bool) {
     let mut watched = Vec::new();
-    for spec in worktree_watch_specs(worktree, platform_supports_worktree_watches()) {
-        add_watch(
-            watcher,
-            &spec.path,
-            spec.mode,
-            worktree,
-            watch_to_worktrees,
-            &mut watched,
-        );
+    let specs = worktree_watch_specs(worktree, platform_supports_worktree_watches());
+    let mut complete = !specs.is_empty();
+    for spec in specs {
+        if add_watch(watcher, &spec.path, spec.mode, worktree, watch_to_worktrees) {
+            watched.push(spec.path);
+        } else {
+            complete = false;
+        }
     }
-    watched
+    (watched, complete)
 }
 
-/// Calculate the next timeout for the worker's recv_timeout.
-/// Returns the shortest wait until either a debounced worktree is ready,
-/// the full sweep is due, or a 1s cap for checking the term flag.
-fn next_worker_timeout(
-    pending: &HashMap<PathBuf, Instant>,
-    debounce: Duration,
-    last_sweep: Instant,
-    sweep_interval: Duration,
-) -> Duration {
+fn detach_worktree_watches(
+    watcher: &mut notify::RecommendedWatcher,
+    worktree: &Path,
+    worktree_watches: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
+) {
+    if let Some(watched_paths) = worktree_watches.remove(worktree) {
+        for watched_path in watched_paths {
+            remove_worktree_watch(watcher, &watched_path, worktree, watch_to_worktrees);
+        }
+    }
+}
+
+fn replace_worktree_watches(
+    watcher: &mut notify::RecommendedWatcher,
+    worktree: &Path,
+    worktree_watches: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    watch_complete: &mut HashMap<PathBuf, bool>,
+    watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
+) {
+    detach_worktree_watches(watcher, worktree, worktree_watches, watch_to_worktrees);
+    let (watched, complete) = setup_worktree_watches(watcher, worktree, watch_to_worktrees);
+    worktree_watches.insert(worktree.to_path_buf(), watched);
+    watch_complete.insert(worktree.to_path_buf(), complete);
+}
+
+/// Calculate the next timeout for debounced work, capped at one second so
+/// termination and maintenance remain responsive.
+fn next_worker_timeout(pending: &HashMap<PathBuf, Instant>, debounce: Duration) -> Duration {
     let now = Instant::now();
-    let sweep_wait = sweep_interval.saturating_sub(last_sweep.elapsed());
-    let mut min_wait = sweep_wait;
+    let mut min_wait = Duration::from_secs(1);
 
     for last_event in pending.values() {
         let ready_at = *last_event + debounce;
@@ -639,47 +686,97 @@ fn refresh_git_status(worktree: &Path, agent_paths: &[PathBuf], cache: &GitCache
     changed
 }
 
+fn reconcile_git_cache(
+    previous: &HashMap<PathBuf, ResolvedGitWorktree>,
+    current: &HashMap<PathBuf, ResolvedGitWorktree>,
+    cache: &mut HashMap<PathBuf, GitStatus>,
+) -> (bool, Vec<PathBuf>) {
+    let active_agent_paths: HashSet<PathBuf> = current
+        .values()
+        .flat_map(|entry| entry.agent_paths.iter().cloned())
+        .collect();
+    let root_statuses: HashMap<PathBuf, GitStatus> = previous
+        .iter()
+        .filter_map(|(root, old)| {
+            old.agent_paths
+                .iter()
+                .find_map(|path| cache.get(path).cloned())
+                .map(|status| (root.clone(), status))
+        })
+        .collect();
+
+    let before = cache.len();
+    cache.retain(|path, _| active_agent_paths.contains(path));
+    let mut changed = cache.len() != before;
+    let mut missing = Vec::new();
+    for (root, worktree) in current {
+        let existing = root_statuses.get(root).cloned().or_else(|| {
+            worktree
+                .agent_paths
+                .iter()
+                .find_map(|path| cache.get(path).cloned())
+        });
+        if let Some(status) = existing {
+            for path in &worktree.agent_paths {
+                if !cache.contains_key(path) {
+                    cache.insert(path.clone(), status.clone());
+                    changed = true;
+                }
+            }
+        } else {
+            missing.push(root.clone());
+        }
+    }
+    (changed, missing)
+}
+
 /// Info about an active agent path sent to the git worker.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct GitWorkerPath {
     path: PathBuf,
-    /// Whether this agent is stale (idle > threshold). Stale agents only
-    /// get git status on the full sweep, not on every poll cycle.
     is_stale: bool,
+    is_focused: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct ResolvedGitWorktree {
     agent_paths: Vec<PathBuf>,
     is_stale: bool,
+    is_focused: bool,
 }
 
 /// Resolve agent directories to verified worktree roots and group shared roots.
 /// Paths outside a non-bare Git worktree are absent from the result.
-fn resolve_git_worktrees(entries: &[GitWorkerPath]) -> HashMap<PathBuf, ResolvedGitWorktree> {
-    let mut agents = HashMap::new();
-    for entry in entries {
-        let is_stale = agents.entry(entry.path.clone()).or_insert(true);
-        *is_stale &= entry.is_stale;
-    }
+fn resolve_git_worktrees_cached(
+    entries: &[GitWorkerPath],
+    roots_by_agent: &mut HashMap<PathBuf, Option<PathBuf>>,
+) -> HashMap<PathBuf, ResolvedGitWorktree> {
+    let active_paths: HashSet<&PathBuf> = entries.iter().map(|entry| &entry.path).collect();
+    roots_by_agent.retain(|path, _| active_paths.contains(path));
 
     let mut worktrees: HashMap<PathBuf, ResolvedGitWorktree> = HashMap::new();
-    for (agent_path, is_stale) in agents {
-        let Ok(root) = crate::git::get_repo_root_for(&agent_path) else {
-            tracing::debug!(path = %agent_path.display(), "excluding non-repository agent path from git worker");
+    for entry in entries {
+        let root = roots_by_agent.entry(entry.path.clone()).or_insert_with(|| {
+            crate::git::get_repo_root_for(&entry.path)
+                .ok()
+                .map(|root| crate::util::canon_or_self(&root))
+        });
+        let Some(root) = root else {
             continue;
         };
-        let root = root.canonicalize().unwrap_or(root);
         let worktree = worktrees
-            .entry(root)
+            .entry(root.clone())
             .or_insert_with(|| ResolvedGitWorktree {
                 agent_paths: Vec::new(),
                 is_stale: true,
+                is_focused: false,
             });
-        worktree.agent_paths.push(agent_path);
-        worktree.is_stale &= is_stale;
+        if !worktree.agent_paths.contains(&entry.path) {
+            worktree.agent_paths.push(entry.path.clone());
+        }
+        worktree.is_stale &= entry.is_stale;
+        worktree.is_focused |= entry.is_focused;
     }
-
     for worktree in worktrees.values_mut() {
         worktree.agent_paths.sort();
     }
@@ -1011,12 +1108,36 @@ fn mutation_watcher_config() -> notify::Config {
     notify::Config::default().with_event_kinds(EventKindMask::CORE)
 }
 
+fn git_event_requires_recovery(event: &notify::Event) -> bool {
+    event.need_rescan()
+}
+
+fn recovery_ready(due: bool, last_recovery: Instant, cooldown: Duration) -> bool {
+    due && last_recovery.elapsed() >= cooldown
+}
+
+fn next_audit_path(
+    paths: &[PathBuf],
+    watch_complete: &HashMap<PathBuf, bool>,
+    cursor: &mut usize,
+) -> Option<PathBuf> {
+    for _ in 0..paths.len() {
+        *cursor %= paths.len();
+        let path = paths[*cursor].clone();
+        *cursor = (*cursor + 1) % paths.len();
+        if watch_complete.get(&path).copied().unwrap_or(false) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Spawn a background thread that watches for git changes and updates the cache.
 ///
 /// Uses the `notify` crate for OS-level filesystem event detection (FSEvents on macOS).
-/// Watches .git internals and worktree roots for each active worktree. Events are
-/// debounced per-worktree (300ms) before triggering `get_git_status()`. A fallback
-/// sweep runs every 30s for edge cases where the watcher might miss events.
+/// Watches Git metadata and, where efficient, worktree roots. Events are debounced
+/// per worktree before status refresh. Polling covers platforms or roots without
+/// complete worktree watches, and a rolling audit detects silent event loss.
 fn spawn_git_worker(
     term: Arc<AtomicBool>,
     dirty_flag: Arc<AtomicBool>,
@@ -1064,202 +1185,262 @@ fn spawn_git_worker(
         };
 
         let mut active_entries: Vec<GitWorkerPath> = Vec::new();
+        let mut roots_by_agent: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
         let mut resolved_worktrees: HashMap<PathBuf, ResolvedGitWorktree> = HashMap::new();
-        // Maps: watched directory -> set of worktrees it covers
         let mut watch_to_worktrees: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
-        // Maps: worktree path -> list of watched paths for it
         let mut worktree_watches: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        // Per-worktree gitignore matchers for filtering irrelevant events
+        let mut watch_complete: HashMap<PathBuf, bool> = HashMap::new();
         let mut gitignores: HashMap<PathBuf, Gitignore> = HashMap::new();
-        // Per-worktree: timestamp of last fs event (for debouncing)
+        let mut ignored_tracked_paths: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
         let mut pending_worktrees: HashMap<PathBuf, Instant> = HashMap::new();
-        // Stale status per worktree root (true when all associated agents are stale)
-        let mut path_stale: HashMap<PathBuf, bool> = HashMap::new();
-        // Track unique active worktree roots for fallback polling
+        let mut last_refreshed: HashMap<PathBuf, Instant> = HashMap::new();
         let mut unique_active: Vec<PathBuf> = Vec::new();
-        let mut last_full_sweep = Instant::now();
-        let full_sweep_interval = if watcher.is_none() {
-            // No watcher available: poll frequently as the only change detection
-            Duration::from_secs(2)
-        } else if platform_supports_worktree_watches() {
-            // macOS: worktree watches give instant detection, sweep is just a safety net
-            Duration::from_secs(30)
-        } else {
-            // Linux: only .git metadata is watched, working tree changes need polling.
-            // 5s balances responsiveness with CPU cost (one git-status per worktree).
-            Duration::from_secs(5)
-        };
+        let mut audit_cursor = 0usize;
+        let mut last_maintenance = Instant::now();
+        let mut last_audit = Instant::now();
+        let mut last_recovery = Instant::now() - Duration::from_secs(30);
+        let mut last_negative_retry = Instant::now();
+        let mut recovery_due = false;
+        let mut watcher_degraded = watcher.is_none();
         let debounce_duration = Duration::from_millis(300);
+        let min_refresh_interval = Duration::from_secs(2);
+        let recovery_cooldown = Duration::from_secs(30);
+        let audit_interval = Duration::from_secs(5);
 
         while !term.load(Ordering::Relaxed) {
-            // Block on filesystem events (zero CPU when idle), or sleep briefly in poll mode
             if watcher.is_some() {
-                let timeout = next_worker_timeout(
-                    &pending_worktrees,
-                    debounce_duration,
-                    last_full_sweep,
-                    full_sweep_interval,
-                );
-                // Process a single FS event: find affected worktrees,
-                // skip gitignored paths, and mark worktrees as pending.
-                let mut process_event = |event: notify::Event| {
+                let timeout = next_worker_timeout(&pending_worktrees, debounce_duration);
+                let mut process_event = |event: notify::Event| -> bool {
+                    if git_event_requires_recovery(&event) {
+                        return true;
+                    }
                     for path in &event.paths {
-                        // Rebuild gitignore matcher when .gitignore itself changes
-                        if path.file_name().is_some_and(|n| n == ".gitignore") {
-                            for wt in find_worktrees_for_path(path, &watch_to_worktrees) {
-                                let gi = build_gitignore(&wt);
-                                gitignores.insert(wt, gi);
+                        let worktrees = find_worktrees_for_path(path, &watch_to_worktrees);
+                        if path.file_name().is_some_and(|name| name == ".gitignore") {
+                            for worktree in &worktrees {
+                                gitignores.insert(worktree.clone(), build_gitignore(worktree));
+                                ignored_tracked_paths
+                                    .insert(worktree.clone(), load_ignored_tracked_paths(worktree));
                             }
                         }
-                        for wt in find_worktrees_for_path(path, &watch_to_worktrees) {
-                            if is_event_ignored(path, &wt, &gitignores) {
+                        for worktree in worktrees {
+                            if is_event_ignored(
+                                path,
+                                &worktree,
+                                &gitignores,
+                                &ignored_tracked_paths,
+                            ) {
                                 continue;
                             }
-                            pending_worktrees.entry(wt).or_insert_with(Instant::now);
+                            pending_worktrees
+                                .entry(worktree)
+                                .or_insert_with(Instant::now);
                         }
                     }
+                    false
                 };
 
                 match fs_rx.recv_timeout(timeout) {
-                    Ok(Ok(event)) => process_event(event),
-                    Ok(Err(e)) => {
-                        tracing::warn!("filesystem watch error: {}", e);
+                    Ok(Ok(event)) => recovery_due |= process_event(event),
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "filesystem watch error; using polling fallback");
+                        watcher_degraded = true;
+                        recovery_due = true;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-
-                // Drain any additional buffered events
                 while let Ok(event_result) = fs_rx.try_recv() {
-                    if let Ok(event) = event_result {
-                        process_event(event);
+                    match event_result {
+                        Ok(event) => recovery_due |= process_event(event),
+                        Err(error) => {
+                            tracing::warn!(%error, "filesystem watch error; using polling fallback");
+                            watcher_degraded = true;
+                            recovery_due = true;
+                        }
                     }
                 }
-
-                // On channel overflow, mark all active worktrees as pending so
-                // events for one noisy worktree can't starve updates to others.
                 if fs_overflow.swap(false, Ordering::Relaxed) {
-                    let now = Instant::now();
-                    for path in worktree_watches.keys() {
-                        pending_worktrees.entry(path.clone()).or_insert(now);
-                    }
+                    recovery_due = true;
                 }
             } else {
-                // Poll-only fallback: sleep until next sweep check
-                let sleep = full_sweep_interval
-                    .saturating_sub(last_full_sweep.elapsed())
-                    .min(Duration::from_secs(1));
-                thread::sleep(sleep);
+                thread::sleep(Duration::from_secs(1));
             }
 
-            // Check for path updates (non-blocking)
+            if last_negative_retry.elapsed() >= Duration::from_secs(30) {
+                last_negative_retry = Instant::now();
+                if roots_by_agent.values().any(Option::is_none) {
+                    roots_by_agent.retain(|_, root| root.is_some());
+                    active_entries.clear();
+                }
+            }
+
             let mut latest_entries = None;
             while let Ok(entries) = rx.try_recv() {
                 latest_entries = Some(entries);
             }
-            let paths_changed = latest_entries.is_some_and(|mut entries| {
+            if let Some(mut entries) = latest_entries {
                 entries.sort();
-                if entries == active_entries {
-                    false
-                } else {
+                if entries != active_entries {
+                    let previous = std::mem::take(&mut resolved_worktrees);
                     active_entries = entries;
-                    true
-                }
-            });
+                    resolved_worktrees =
+                        resolve_git_worktrees_cached(&active_entries, &mut roots_by_agent);
+                    unique_active = resolved_worktrees.keys().cloned().collect();
+                    unique_active.sort();
+                    let unique_set: HashSet<PathBuf> = unique_active.iter().cloned().collect();
+                    if let Some(ref mut active_watcher) = watcher {
+                        let removed: Vec<PathBuf> = worktree_watches
+                            .keys()
+                            .filter(|path| !unique_set.contains(*path))
+                            .cloned()
+                            .collect();
+                        for path in removed {
+                            detach_worktree_watches(
+                                active_watcher,
+                                &path,
+                                &mut worktree_watches,
+                                &mut watch_to_worktrees,
+                            );
+                            watch_complete.remove(&path);
+                            gitignores.remove(&path);
+                            ignored_tracked_paths.remove(&path);
+                            pending_worktrees.remove(&path);
+                            last_refreshed.remove(&path);
+                        }
 
-            if paths_changed {
-                resolved_worktrees = resolve_git_worktrees(&active_entries);
-                path_stale = resolved_worktrees
-                    .iter()
-                    .map(|(path, entry)| (path.clone(), entry.is_stale))
-                    .collect();
-                unique_active = resolved_worktrees.keys().cloned().collect();
-                unique_active.sort();
-                let unique_set: HashSet<PathBuf> = unique_active.iter().cloned().collect();
-                let active_agent_paths: HashSet<&PathBuf> = resolved_worktrees
-                    .values()
-                    .flat_map(|entry| &entry.agent_paths)
-                    .collect();
-
-                if let Some(ref mut w) = watcher {
-                    // Remove watches for worktrees no longer active
-                    let removed: Vec<PathBuf> = worktree_watches
-                        .keys()
-                        .filter(|p| !unique_set.contains(*p))
-                        .cloned()
-                        .collect();
-                    for path in &removed {
-                        if let Some(watched_paths) = worktree_watches.remove(path) {
-                            for wp in &watched_paths {
-                                remove_worktree_watch(w, wp, path, &mut watch_to_worktrees);
+                        for path in &unique_active {
+                            if !worktree_watches.contains_key(path) {
+                                replace_worktree_watches(
+                                    active_watcher,
+                                    path,
+                                    &mut worktree_watches,
+                                    &mut watch_complete,
+                                    &mut watch_to_worktrees,
+                                );
+                                gitignores.insert(path.clone(), build_gitignore(path));
+                                ignored_tracked_paths
+                                    .insert(path.clone(), load_ignored_tracked_paths(path));
                             }
                         }
-                        gitignores.remove(path);
-                        pending_worktrees.remove(path);
                     }
 
-                    // Add watches for new worktrees
-                    for path in &unique_active {
-                        if !worktree_watches.contains_key(path) {
-                            let watched = setup_worktree_watches(w, path, &mut watch_to_worktrees);
-                            worktree_watches.insert(path.clone(), watched);
-                            gitignores.insert(path.clone(), build_gitignore(path));
-                        }
-                        pending_worktrees.insert(path.clone(), Instant::now() - debounce_duration);
+                    let (projected_change, missing_roots) = cache_clone
+                        .lock()
+                        .ok()
+                        .map(|mut cache| {
+                            reconcile_git_cache(&previous, &resolved_worktrees, &mut cache)
+                        })
+                        .unwrap_or_default();
+                    for root in missing_roots {
+                        pending_worktrees.insert(root, Instant::now() - debounce_duration);
                     }
-                } else {
-                    for path in &unique_active {
-                        pending_worktrees.insert(path.clone(), Instant::now() - debounce_duration);
-                    }
-                }
-
-                if let Ok(mut cache) = cache_clone.lock() {
-                    let before = cache.len();
-                    cache.retain(|path, _| active_agent_paths.contains(path));
-                    if cache.len() != before {
+                    if projected_change {
                         dirty_flag.store(true, Ordering::Relaxed);
                         let _ = wake_tx.try_send(());
                     }
+
+                    for (root, worktree) in &resolved_worktrees {
+                        if let Some(old) = previous.get(root) {
+                            let became_recent = old.is_stale && !worktree.is_stale;
+                            let became_focused = !old.is_focused && worktree.is_focused;
+                            if became_recent || became_focused {
+                                pending_worktrees
+                                    .insert(root.clone(), Instant::now() - debounce_duration);
+                            }
+                        }
+                    }
                 }
             }
 
-            // Process debounce-ready worktrees (skip stale ones, they only refresh on sweep)
             let now = Instant::now();
+            if recovery_ready(recovery_due, last_recovery, recovery_cooldown) {
+                recovery_due = false;
+                last_recovery = now;
+                for path in &unique_active {
+                    pending_worktrees
+                        .entry(path.clone())
+                        .or_insert(now - debounce_duration);
+                }
+            }
+
+            let poll_interval = if watcher_degraded || watcher.is_none() {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(5)
+            };
+            if last_maintenance.elapsed() >= poll_interval {
+                last_maintenance = now;
+                if watcher.is_none() || !platform_supports_worktree_watches() || watcher_degraded {
+                    for path in &unique_active {
+                        pending_worktrees
+                            .entry(path.clone())
+                            .or_insert(now - debounce_duration);
+                    }
+                } else {
+                    let incomplete: Vec<PathBuf> = unique_active
+                        .iter()
+                        .filter(|path| !watch_complete.get(*path).copied().unwrap_or(false))
+                        .cloned()
+                        .collect();
+                    for path in &incomplete {
+                        pending_worktrees
+                            .entry(path.clone())
+                            .or_insert(now - debounce_duration);
+                    }
+                    if let Some(ref mut active_watcher) = watcher {
+                        for path in incomplete {
+                            replace_worktree_watches(
+                                active_watcher,
+                                &path,
+                                &mut worktree_watches,
+                                &mut watch_complete,
+                                &mut watch_to_worktrees,
+                            );
+                        }
+                    }
+                }
+            }
+
+            if watcher.is_some()
+                && platform_supports_worktree_watches()
+                && !watcher_degraded
+                && last_audit.elapsed() >= audit_interval
+                && !unique_active.is_empty()
+            {
+                last_audit = now;
+                if let Some(path) =
+                    next_audit_path(&unique_active, &watch_complete, &mut audit_cursor)
+                {
+                    pending_worktrees
+                        .entry(path)
+                        .or_insert(now - debounce_duration);
+                }
+            }
+
             let ready: Vec<PathBuf> = pending_worktrees
                 .iter()
-                .filter(|(_, last_event)| now.duration_since(**last_event) >= debounce_duration)
+                .filter(|(_, event_at)| {
+                    now.saturating_duration_since(**event_at) >= debounce_duration
+                })
                 .map(|(path, _)| path.clone())
                 .collect();
-
             let mut any_changed = false;
-            for path in &ready {
-                pending_worktrees.remove(path);
-                let is_stale = path_stale.get(path).copied().unwrap_or(false);
-                if is_stale {
+            for path in ready {
+                if let Some(last) = last_refreshed.get(&path)
+                    && last.elapsed() < min_refresh_interval
+                {
+                    let ready_at = *last + min_refresh_interval;
+                    let event_at = ready_at.checked_sub(debounce_duration).unwrap_or(ready_at);
+                    pending_worktrees.insert(path, event_at);
                     continue;
                 }
-                if let Some(worktree) = resolved_worktrees.get(path)
-                    && refresh_git_status(path, &worktree.agent_paths, &cache_clone)
-                {
-                    any_changed = true;
-                }
-            }
-
-            // Fallback full sweep (30s with watcher, 2s without; includes stale worktrees)
-            if last_full_sweep.elapsed() >= full_sweep_interval {
-                last_full_sweep = Instant::now();
-                let sweep_paths: Vec<PathBuf> = if watcher.is_some() {
-                    worktree_watches.keys().cloned().collect()
-                } else {
-                    unique_active.clone()
-                };
-                for path in &sweep_paths {
-                    pending_worktrees.remove(path);
-                    if let Some(worktree) = resolved_worktrees.get(path)
-                        && refresh_git_status(path, &worktree.agent_paths, &cache_clone)
-                    {
+                pending_worktrees.remove(&path);
+                if let Some(worktree) = resolved_worktrees.get(&path) {
+                    if refresh_git_status(&path, &worktree.agent_paths, &cache_clone) {
                         any_changed = true;
                     }
+                    last_refreshed.insert(path, Instant::now());
                 }
             }
 
@@ -1815,7 +1996,7 @@ pub fn run() -> Result<()> {
             output.snapshot.config_version = config_version.load(Ordering::Relaxed);
             server.broadcast(&output.snapshot);
 
-            // Update git worker with current agent paths and stale status
+            // Update git worker with current agent paths and relevance.
             let stale_threshold = 60 * 60; // 1 hour, matches sidebar UI
             let entries: Vec<GitWorkerPath> = output
                 .snapshot
@@ -1827,6 +2008,12 @@ pub fn run() -> Result<()> {
                         .activity_ts()
                         .map(|ts| now_ts.saturating_sub(ts) > stale_threshold)
                         .unwrap_or(false),
+                    is_focused: output.snapshot.active_pane_ids.contains(&a.pane_id)
+                        || (!a.window_id.is_empty()
+                            && output
+                                .snapshot
+                                .active_windows
+                                .contains(&(a.session.clone(), a.window_id.clone()))),
                 })
                 .collect();
             let _ = git_path_tx.send(entries);
@@ -2451,14 +2638,148 @@ mod tests {
     }
 
     #[test]
+    fn rescan_events_request_recovery() {
+        let event =
+            notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert!(git_event_requires_recovery(&event));
+        assert!(!git_event_requires_recovery(&notify::Event::new(
+            notify::EventKind::Other,
+        )));
+    }
+
+    #[test]
+    fn recovery_cooldown_coalesces_repeated_failures() {
+        let cooldown = Duration::from_secs(30);
+        assert!(recovery_ready(true, Instant::now() - cooldown, cooldown));
+        assert!(!recovery_ready(true, Instant::now(), cooldown));
+        assert!(!recovery_ready(false, Instant::now() - cooldown, cooldown));
+    }
+
+    #[test]
+    fn rolling_audit_is_fair_and_skips_incomplete_watches() {
+        let paths = vec![
+            PathBuf::from("/one"),
+            PathBuf::from("/two"),
+            PathBuf::from("/three"),
+        ];
+        let complete = HashMap::from([
+            (paths[0].clone(), true),
+            (paths[1].clone(), false),
+            (paths[2].clone(), true),
+        ]);
+        let mut cursor = 0;
+
+        assert_eq!(
+            next_audit_path(&paths, &complete, &mut cursor),
+            Some(paths[0].clone())
+        );
+        assert_eq!(
+            next_audit_path(&paths, &complete, &mut cursor),
+            Some(paths[2].clone())
+        );
+        assert_eq!(
+            next_audit_path(&paths, &complete, &mut cursor),
+            Some(paths[0].clone())
+        );
+    }
+
+    #[test]
+    fn ignored_tracked_files_still_trigger_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(repo.join("tracked.log"), "tracked\n").unwrap();
+        run_git(&repo, &["add", ".gitignore"]);
+        run_git(&repo, &["add", "-f", "tracked.log"]);
+
+        let root = repo.canonicalize().unwrap();
+        let gitignores = HashMap::from([(root.clone(), build_gitignore(&root))]);
+        let ignored_tracked_paths =
+            HashMap::from([(root.clone(), load_ignored_tracked_paths(&root))]);
+
+        assert!(!is_event_ignored(
+            &root.join("tracked.log"),
+            &root,
+            &gitignores,
+            &ignored_tracked_paths,
+        ));
+        assert!(is_event_ignored(
+            &root.join("generated.log"),
+            &root,
+            &gitignores,
+            &ignored_tracked_paths,
+        ));
+    }
+
+    #[test]
+    fn cache_projects_status_when_agent_path_changes_under_same_root() {
+        let root = PathBuf::from("/repo");
+        let old_path = root.clone();
+        let nested = root.join("nested");
+        let previous = HashMap::from([(
+            root.clone(),
+            ResolvedGitWorktree {
+                agent_paths: vec![old_path.clone()],
+                is_stale: true,
+                is_focused: false,
+            },
+        )]);
+        let current = HashMap::from([(
+            root,
+            ResolvedGitWorktree {
+                agent_paths: vec![nested.clone()],
+                is_stale: true,
+                is_focused: false,
+            },
+        )]);
+        let status = GitStatus {
+            branch: Some("main".to_string()),
+            ..GitStatus::default()
+        };
+        let mut cache = HashMap::from([(old_path.clone(), status.clone())]);
+
+        let (changed, missing) = reconcile_git_cache(&previous, &current, &mut cache);
+
+        assert!(changed);
+        assert!(missing.is_empty());
+        assert_eq!(cache, HashMap::from([(nested, status)]));
+        assert!(!cache.contains_key(&old_path));
+    }
+
+    #[test]
+    fn cached_resolution_updates_relevance_without_repository_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        let root = repo.canonicalize().unwrap();
+        let mut roots = HashMap::from([(repo.clone(), Some(root.clone()))]);
+
+        let resolved = resolve_git_worktrees_cached(
+            &[GitWorkerPath {
+                path: repo.clone(),
+                is_stale: false,
+                is_focused: true,
+            }],
+            &mut roots,
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[&root].agent_paths, vec![repo]);
+        assert!(!resolved[&root].is_stale);
+        assert!(resolved[&root].is_focused);
+    }
+
+    #[test]
     fn non_repository_agent_path_produces_no_watch_or_refresh_roots() {
         let dir = tempfile::tempdir().unwrap();
         let entries = vec![GitWorkerPath {
             path: dir.path().to_path_buf(),
             is_stale: false,
+            is_focused: false,
         }];
 
-        let resolved = resolve_git_worktrees(&entries);
+        let resolved = resolve_git_worktrees_cached(&entries, &mut HashMap::new());
         let watch_specs: Vec<_> = resolved
             .keys()
             .flat_map(|root| worktree_watch_specs(root, true))
@@ -2479,14 +2800,16 @@ mod tests {
             GitWorkerPath {
                 path: repo.clone(),
                 is_stale: true,
+                is_focused: false,
             },
             GitWorkerPath {
                 path: nested.clone(),
                 is_stale: false,
+                is_focused: true,
             },
         ];
 
-        let resolved = resolve_git_worktrees(&entries);
+        let resolved = resolve_git_worktrees_cached(&entries, &mut HashMap::new());
         let root = repo.canonicalize().unwrap();
 
         assert_eq!(resolved.len(), 1);
@@ -2495,6 +2818,7 @@ mod tests {
             Some(&ResolvedGitWorktree {
                 agent_paths: vec![repo, nested],
                 is_stale: false,
+                is_focused: true,
             })
         );
     }
@@ -2524,10 +2848,12 @@ mod tests {
         let nested = linked.join("nested");
         std::fs::create_dir(&nested).unwrap();
 
-        let resolved = resolve_git_worktrees(&[GitWorkerPath {
+        let entries = [GitWorkerPath {
             path: nested.clone(),
             is_stale: false,
-        }]);
+            is_focused: false,
+        }];
+        let resolved = resolve_git_worktrees_cached(&entries, &mut HashMap::new());
         let linked_root = linked.canonicalize().unwrap();
         assert_eq!(resolved.keys().collect::<Vec<_>>(), vec![&linked_root]);
 
