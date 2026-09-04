@@ -34,7 +34,7 @@ use crate::cmd::Cmd;
 use crate::config::{SidebarHeight, SidebarPosition, SidebarWidth};
 use anyhow::{Result, anyhow, bail};
 
-use self::daemon_ctrl::{ensure_daemon_running, kill_daemon, signal_daemon};
+use self::daemon_ctrl::{ensure_daemon_running, kill_daemon, signal_daemon, signal_daemon_for};
 use self::hooks::{install_hooks, remove_hooks};
 use self::panes::{
     create_sidebar_in_window, create_sidebars_in_all_windows, create_sidebars_in_session,
@@ -798,8 +798,8 @@ pub fn reflow(window_id: Option<&str>) -> Result<()> {
 }
 
 /// Request a sidebar refresh if the daemon is running.
-pub(crate) fn request_refresh() {
-    signal_daemon();
+pub(crate) fn request_refresh_for(mux: &dyn crate::multiplexer::Multiplexer) {
+    signal_daemon_for(mux);
 }
 
 /// Run the sidebar daemon (called by the hidden `_sidebar-daemon` command).

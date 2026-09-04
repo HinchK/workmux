@@ -457,6 +457,7 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
         "register" => {
             let _ = ctx.mux.clear_status(&ctx.pane_id);
             crate::state::persist_agent_registration(&*ctx.mux, &ctx.pane_id);
+            crate::command::sidebar::request_refresh_for(&*ctx.mux);
             return RpcResponse::Ok;
         }
         "clear" => {
@@ -465,6 +466,7 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
                     message: format!("Failed to clear status: {}", e),
                 };
             }
+            crate::command::sidebar::request_refresh_for(&*ctx.mux);
             return RpcResponse::Ok;
         }
         _ => {
@@ -490,6 +492,7 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
                     None,
                 );
             }
+            crate::command::sidebar::request_refresh_for(&*ctx.mux);
             RpcResponse::Ok
         }
         Err(e) => RpcResponse::Error {
@@ -499,13 +502,7 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
 }
 
 fn handle_set_title(title: &str, ctx: &RpcContext) -> RpcResponse {
-    // Use tmux rename-window via the Cmd helper (consistent with codebase patterns)
-    use crate::cmd::Cmd;
-
-    match Cmd::new("tmux")
-        .args(&["rename-window", "-t", &ctx.pane_id, title])
-        .run()
-    {
+    match ctx.mux.rename_window_at_pane(&ctx.pane_id, title) {
         Ok(_) => {
             // Persist title to StateStore so the dashboard sees it
             crate::state::persist_agent_update(
@@ -515,6 +512,7 @@ fn handle_set_title(title: &str, ctx: &RpcContext) -> RpcResponse {
                 Some(title.to_string()),
                 None,
             );
+            crate::command::sidebar::request_refresh_for(&*ctx.mux);
             RpcResponse::Ok
         }
         Err(e) => RpcResponse::Error {

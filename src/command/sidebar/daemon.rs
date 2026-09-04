@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::cmd::Cmd;
 use crate::config::{Config, SidebarPosition};
 use crate::git::GitStatus;
 use crate::github::{CheckSummary, PrSummary};
@@ -33,6 +32,7 @@ pub fn socket_path(instance_id: &str) -> PathBuf {
 }
 
 /// Result of a batched tmux query.
+#[derive(Clone)]
 struct TmuxState {
     live_panes: HashMap<String, LivePaneInfo>,
     window_statuses: HashMap<String, Option<String>>,
@@ -49,8 +49,8 @@ struct TmuxState {
 }
 
 /// Query all sidebar-relevant tmux state in a single server observation.
-fn query_tmux_state() -> Result<TmuxState> {
-    let snapshot = TmuxBackend::new().sidebar_snapshot()?;
+fn query_tmux_state(tmux: &TmuxBackend) -> Result<TmuxState> {
+    let snapshot = tmux.sidebar_snapshot()?;
     Ok(TmuxState {
         live_panes: snapshot.live_panes,
         window_statuses: snapshot.window_statuses,
@@ -1702,6 +1702,8 @@ fn spawn_config_watcher(
 /// - Interrupted agents show no icon and no timer in the sidebar.
 /// - When an agent resumes, the timer resets to zero.
 struct InactivityTracker {
+    /// pane_id -> (server lifecycle, pane PID)
+    identities: HashMap<String, (Option<String>, u32)>,
     /// pane_id -> (content_hash, first_seen_at, updated_ts at recording time)
     entries: HashMap<String, (u64, Instant, u64)>,
     /// pane_id -> updated_ts at the time interruption was confirmed.
@@ -1714,10 +1716,40 @@ struct InactivityTracker {
 impl InactivityTracker {
     fn new(timeout: Duration) -> Self {
         Self {
+            identities: HashMap::new(),
             entries: HashMap::new(),
             confirmed: HashMap::new(),
             timeout,
         }
+    }
+
+    fn reconcile_identities(
+        &mut self,
+        live_panes: &HashMap<String, LivePaneInfo>,
+        server_boot_id: Option<&str>,
+    ) {
+        let current: HashMap<String, (Option<String>, u32)> = live_panes
+            .iter()
+            .filter_map(|(pane_id, pane)| {
+                pane.pid
+                    .map(|pid| (pane_id.clone(), (server_boot_id.map(str::to_string), pid)))
+            })
+            .collect();
+        for (pane_id, identity) in &current {
+            if self
+                .identities
+                .get(pane_id)
+                .is_some_and(|previous| previous != identity)
+            {
+                self.entries.remove(pane_id);
+                self.confirmed.remove(pane_id);
+            }
+        }
+        self.entries
+            .retain(|pane_id, _| current.contains_key(pane_id));
+        self.confirmed
+            .retain(|pane_id, _| current.contains_key(pane_id));
+        self.identities = current;
     }
 
     /// Whether this pane is confirmed interrupted and capture can be skipped.
@@ -1856,10 +1888,107 @@ fn spawn_signal_listener(
     Ok((handle, thread))
 }
 
+const OBSERVATION_INTERVAL: Duration = Duration::from_secs(2);
+const CAPTURE_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const HEARTBEAT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+const EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(50);
+
+#[derive(Debug)]
+struct Scheduler {
+    next_observation: Instant,
+    next_capture: Instant,
+    next_heartbeat: Instant,
+    next_maintenance: Instant,
+    event_observation: Option<Instant>,
+}
+
+fn advance_deadline(deadline: &mut Instant, interval: Duration, now: Instant) {
+    while *deadline <= now {
+        *deadline += interval;
+    }
+}
+
+impl Scheduler {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_observation: now,
+            next_capture: now,
+            next_heartbeat: now + HEARTBEAT_INTERVAL,
+            next_maintenance: now + MAINTENANCE_INTERVAL,
+            event_observation: None,
+        }
+    }
+
+    fn notify_tmux_event(&mut self, now: Instant) {
+        self.event_observation
+            .get_or_insert(now + EVENT_COALESCE_INTERVAL);
+    }
+
+    fn observation_due(&self, now: Instant) -> bool {
+        self.next_observation <= now
+            || self
+                .event_observation
+                .is_some_and(|deadline| deadline <= now)
+    }
+
+    fn finish_observation(&mut self, now: Instant) {
+        if self.next_observation <= now {
+            advance_deadline(&mut self.next_observation, OBSERVATION_INTERVAL, now);
+        }
+        self.event_observation = None;
+    }
+
+    fn capture_due(&self, now: Instant) -> bool {
+        self.next_capture <= now
+    }
+
+    fn finish_capture(&mut self, now: Instant) {
+        advance_deadline(&mut self.next_capture, CAPTURE_INTERVAL, now);
+    }
+
+    fn heartbeat_due(&self, now: Instant) -> bool {
+        self.next_heartbeat <= now
+    }
+
+    fn finish_heartbeat(&mut self, now: Instant, success: bool) {
+        self.next_heartbeat = now
+            + if success {
+                HEARTBEAT_INTERVAL
+            } else {
+                HEARTBEAT_RETRY_INTERVAL
+            };
+    }
+
+    fn maintenance_due(&self, now: Instant) -> bool {
+        self.next_maintenance <= now
+    }
+
+    fn finish_maintenance(&mut self, now: Instant) {
+        advance_deadline(&mut self.next_maintenance, MAINTENANCE_INTERVAL, now);
+    }
+
+    fn wait(&self, now: Instant) -> Duration {
+        [
+            self.next_observation,
+            self.next_capture,
+            self.next_heartbeat,
+            self.next_maintenance,
+            self.event_observation.unwrap_or(self.next_observation),
+        ]
+        .into_iter()
+        .min()
+        .unwrap()
+        .saturating_duration_since(now)
+    }
+}
+
 /// Run the sidebar daemon (headless, no TUI).
 pub fn run() -> Result<()> {
     let mux = create_backend(detect_backend());
     let instance_id = mux.instance_id();
+    let tmux = TmuxBackend::for_socket(&instance_id);
     let config = Arc::new(Mutex::new(Config::load(None)?));
     // Captured at startup and intentionally not live-reloaded. tmux's
     // @workmux_pane_status holds the icon string itself; build_snapshot
@@ -1870,102 +1999,97 @@ pub fn run() -> Result<()> {
 
     tracing::info!(instance_id = %instance_id, "sidebar daemon starting");
 
-    // Signal state for clean shutdown and dirty notification.
     let term = Arc::new(AtomicBool::new(false));
-    let dirty_flag = Arc::new(AtomicBool::new(false));
-
-    // Producers wake the main loop without polling. Signal delivery uses a
-    // dedicated thread because signal handlers cannot send on channels.
+    let observation_dirty = Arc::new(AtomicBool::new(false));
+    let publication_dirty = Arc::new(AtomicBool::new(false));
     let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let (signal_handle, signal_thread) =
-        spawn_signal_listener(term.clone(), dirty_flag.clone(), wake_tx.clone())?;
-    // Keep a sender alive so recv_timeout won't return Disconnected if a
-    // worker thread panics.
+        spawn_signal_listener(term.clone(), observation_dirty.clone(), wake_tx.clone())?;
     let _wake_tx_keepalive = wake_tx.clone();
 
     let sock_path = socket_path(&instance_id);
-    let _ = std::fs::remove_file(&sock_path); // Clean stale
+    let _ = std::fs::remove_file(&sock_path);
     let server = SocketServer::bind(&sock_path)?;
 
-    // Config watcher: bumps config_version on global / project .workmux.yaml changes.
     let config_paths_tx = spawn_config_watcher(
         term.clone(),
         config.clone(),
         config_version.clone(),
-        dirty_flag.clone(),
+        publication_dirty.clone(),
         wake_tx.clone(),
     );
-
-    // Background git status worker (shares dirty_flag for immediate broadcast on changes)
     let (git_cache, git_path_tx) =
-        spawn_git_worker(term.clone(), dirty_flag.clone(), wake_tx.clone());
+        spawn_git_worker(term.clone(), publication_dirty.clone(), wake_tx.clone());
     let (pr_cache, check_cache, github_path_tx) =
-        spawn_github_worker(term.clone(), dirty_flag.clone(), wake_tx);
+        spawn_github_worker(term.clone(), publication_dirty.clone(), wake_tx);
 
-    // Store PID so toggle-off can kill us and hooks can signal us
-    Cmd::new("tmux")
-        .args(&[
-            "set-option",
-            "-g",
-            "@workmux_sidebar_daemon_pid",
-            &std::process::id().to_string(),
-        ])
-        .run()?;
+    tmux.set_global_option(
+        "@workmux_sidebar_daemon_pid",
+        &std::process::id().to_string(),
+    )?;
 
+    let mut scheduler = Scheduler::new(Instant::now());
     let mut inactivity_tracker = InactivityTracker::new(Duration::from_secs(10));
     let mut last_interrupted: HashSet<String> = HashSet::new();
-    let mut last_runtime_write = Instant::now();
     let backend_name = mux.name().to_string();
-
-    let mut last_refresh = Instant::now();
+    let mut cached_inputs: Option<(Vec<crate::multiplexer::AgentPane>, TmuxState)> = None;
+    let mut pending_captures: Option<HashMap<String, String>> = None;
+    let mut publish_pending = false;
     let mut last_client_seen = Instant::now();
-    let mut dirty_pending = false;
     let mut last_agent_list = String::new();
     let mut last_health_log = Instant::now();
-    let refresh_interval = Duration::from_secs(2);
-    let debounce_interval = Duration::from_millis(50);
-
-    // Cache of agent_path -> project_config_dir so we don't run the walk-up
-    // filesystem search on every tick. Misses (no config found) are NOT
-    // cached, so a newly-created `.workmux.yaml` in or above an agent's path
-    // is picked up on the next tick.
     let mut project_config_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
     let mut last_config_dirs: HashSet<PathBuf> = HashSet::new();
 
     while !term.load(Ordering::Relaxed) {
-        // Coalesce dirty signals: SIGUSR1 sets the flag, we service it once
-        // per debounce interval to prevent signal floods from causing CPU storms
-        if dirty_flag.swap(false, Ordering::Relaxed) {
-            dirty_pending = true;
+        let now = Instant::now();
+        if observation_dirty.swap(false, Ordering::Relaxed) {
+            scheduler.notify_tmux_event(now);
+        }
+        if publication_dirty.swap(false, Ordering::Relaxed) {
+            publish_pending = true;
         }
 
-        let time_since_refresh = last_refresh.elapsed();
-        let debounce_cleared = dirty_pending && time_since_refresh >= debounce_interval;
-        let timer_expired = time_since_refresh >= refresh_interval;
-
-        if debounce_cleared || timer_expired {
-            dirty_pending = false;
-            last_refresh = Instant::now();
-
-            // ── Gather inputs ──
-            let tmux_state = match query_tmux_state() {
-                Ok(state) => state,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to query sidebar tmux state");
-                    continue;
+        if scheduler.observation_due(now) {
+            scheduler.finish_observation(now);
+            match query_tmux_state(&tmux) {
+                Ok(tmux_state) => {
+                    let agents = StateStore::new().and_then(|store| {
+                        store.load_reconciled_agents_from_snapshot(
+                            mux.as_ref(),
+                            &tmux_state.live_panes,
+                            tmux_state.server_boot_id.as_deref(),
+                        )
+                    });
+                    match agents {
+                        Ok(agents) => {
+                            inactivity_tracker.reconcile_identities(
+                                &tmux_state.live_panes,
+                                tmux_state.server_boot_id.as_deref(),
+                            );
+                            cached_inputs = Some((agents, tmux_state));
+                            publish_pending = true;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to reconcile sidebar agent state");
+                        }
+                    }
                 }
-            };
-            let agents = StateStore::new()
-                .and_then(|store| {
-                    store.load_reconciled_agents_from_snapshot(
-                        mux.as_ref(),
-                        &tmux_state.live_panes,
-                        tmux_state.server_boot_id.as_deref(),
-                    )
-                })
-                .ok();
-            let Some(agents) = agents else { continue };
+                Err(error) => tracing::warn!(%error, "failed to query sidebar tmux state"),
+            }
+        }
 
+        let now = Instant::now();
+        if scheduler.capture_due(now) {
+            scheduler.finish_capture(now);
+            if let Some((agents, _)) = &cached_inputs {
+                pending_captures = Some(gather_captures(agents, mux.as_ref(), &inactivity_tracker));
+                publish_pending = true;
+            }
+        }
+
+        if publish_pending && let Some((agents, tmux_state)) = &cached_inputs {
+            publish_pending = false;
             let (position, layout_mode, sort) = {
                 let cfg = config.lock().unwrap();
                 (
@@ -1975,76 +2099,63 @@ pub fn run() -> Result<()> {
                     cfg.sidebar.sort.unwrap_or_default(),
                 )
             };
-            let filter_mode = read_sidebar_filter_mode(tmux_state.filter.as_deref());
-            let sleeping_pane_ids = read_sleeping_panes(tmux_state.sleeping_panes.as_deref());
-            let git_statuses = git_cache.lock().ok().map(|c| c.clone()).unwrap_or_default();
-            let pr_statuses = pr_cache.lock().ok().map(|c| c.clone()).unwrap_or_default();
-            let check_statuses = check_cache
-                .lock()
-                .ok()
-                .map(|cache| cache.clone())
-                .unwrap_or_default();
-            let captured_panes = gather_captures(&agents, mux.as_ref(), &inactivity_tracker);
             let now = Instant::now();
             let now_ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let heartbeat_due = last_runtime_write.elapsed() >= Duration::from_secs(10);
-
-            // ── Compute tick (no I/O) ──
             let mut output = compute_tick(
                 TickInput {
-                    agents,
-                    tmux_state,
-                    captured_panes,
+                    agents: agents.clone(),
+                    tmux_state: tmux_state.clone(),
+                    captured_panes: pending_captures.take().unwrap_or_default(),
                     now,
                     now_ts,
                     position,
                     layout_mode,
-                    filter_mode,
+                    filter_mode: read_sidebar_filter_mode(tmux_state.filter.as_deref()),
                     sort,
-                    git_statuses,
-                    pr_statuses,
-                    check_statuses,
-                    sleeping_pane_ids,
+                    git_statuses: git_cache.lock().ok().map(|c| c.clone()).unwrap_or_default(),
+                    pr_statuses: pr_cache.lock().ok().map(|c| c.clone()).unwrap_or_default(),
+                    check_statuses: check_cache
+                        .lock()
+                        .ok()
+                        .map(|c| c.clone())
+                        .unwrap_or_default(),
+                    sleeping_pane_ids: read_sleeping_panes(tmux_state.sleeping_panes.as_deref()),
                 },
                 &mut inactivity_tracker,
                 &last_interrupted,
                 &status_icons,
-                heartbeat_due,
+                false,
             );
 
-            // ── Apply side effects, then commit state ──
             if let Ok(store) = StateStore::new()
                 && apply_tick_effects(&output, &store, &backend_name, &instance_id)
             {
-                last_runtime_write = Instant::now();
+                scheduler.finish_heartbeat(Instant::now(), true);
             }
             last_interrupted = output.next_interrupted;
-
-            // ── Stamp config version + broadcast ──
             output.snapshot.config_version = config_version.load(Ordering::Relaxed);
             server.broadcast(&output.snapshot);
 
-            // Update git worker with current agent paths and relevance.
-            let stale_threshold = 60 * 60; // 1 hour, matches sidebar UI
+            let stale_threshold = 60 * 60;
             let entries: Vec<GitWorkerPath> = output
                 .snapshot
                 .agents
                 .iter()
-                .map(|a| GitWorkerPath {
-                    path: a.path.clone(),
-                    is_stale: a
+                .map(|agent| GitWorkerPath {
+                    path: agent.path.clone(),
+                    is_stale: agent
                         .activity_ts()
                         .map(|ts| now_ts.saturating_sub(ts) > stale_threshold)
                         .unwrap_or(false),
-                    is_focused: output.snapshot.active_pane_ids.contains(&a.pane_id)
-                        || (!a.window_id.is_empty()
+                    is_focused: output.snapshot.active_pane_ids.contains(&agent.pane_id)
+                        || (!agent.window_id.is_empty()
                             && output
                                 .snapshot
                                 .active_windows
-                                .contains(&(a.session.clone(), a.window_id.clone()))),
+                                .contains(&(agent.session.clone(), agent.window_id.clone()))),
                 })
                 .collect();
             let _ = git_path_tx.send(entries);
@@ -2053,41 +2164,42 @@ pub fn run() -> Result<()> {
                 .snapshot
                 .agents
                 .iter()
-                .filter_map(|a| {
-                    let branch = output.snapshot.git_statuses.get(&a.path)?.branch.as_ref()?;
+                .filter_map(|agent| {
+                    let branch = output
+                        .snapshot
+                        .git_statuses
+                        .get(&agent.path)?
+                        .branch
+                        .as_ref()?;
                     Some(GithubWorkerPath {
-                        path: a.path.clone(),
+                        path: agent.path.clone(),
                         branch: branch.clone(),
                     })
                 })
                 .collect();
             let _ = github_path_tx.send(github_entries);
 
-            // Update config watcher with current project-config dirs.
-            // find_project_config does fs walks, so cache by agent path.
             let live_paths: HashSet<PathBuf> = output
                 .snapshot
                 .agents
                 .iter()
-                .map(|a| a.path.clone())
+                .map(|agent| agent.path.clone())
                 .collect();
-            project_config_cache.retain(|p, _| live_paths.contains(p));
-            let mut config_dirs: HashSet<PathBuf> = HashSet::new();
-            for a in &output.snapshot.agents {
-                let dir = if let Some(d) = project_config_cache.get(&a.path) {
-                    Some(d.clone())
-                } else {
-                    let found = crate::config::find_project_config(&a.path)
+            project_config_cache.retain(|path, _| live_paths.contains(path));
+            let mut config_dirs = HashSet::new();
+            for agent in &output.snapshot.agents {
+                let dir = project_config_cache.get(&agent.path).cloned().or_else(|| {
+                    let found = crate::config::find_project_config(&agent.path)
                         .ok()
                         .flatten()
-                        .map(|loc| loc.config_dir);
-                    if let Some(ref d) = found {
-                        project_config_cache.insert(a.path.clone(), d.clone());
+                        .map(|location| location.config_dir);
+                    if let Some(dir) = &found {
+                        project_config_cache.insert(agent.path.clone(), dir.clone());
                     }
                     found
-                };
-                if let Some(d) = dir {
-                    config_dirs.insert(d);
+                });
+                if let Some(dir) = dir {
+                    config_dirs.insert(dir);
                 }
             }
             if config_dirs != last_config_dirs {
@@ -2095,75 +2207,78 @@ pub fn run() -> Result<()> {
                 last_config_dirs = config_dirs;
             }
 
-            let agent_list: String = output
+            let agent_list = output
                 .snapshot
                 .agents
                 .iter()
-                .map(|a| a.pane_id.as_str())
+                .map(|agent| agent.pane_id.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
             if agent_list != last_agent_list {
-                if !agent_list.is_empty() {
-                    let _ = Cmd::new("tmux")
-                        .args(&["set-option", "-g", "@workmux_sidebar_agents", &agent_list])
-                        .run();
+                let result = if agent_list.is_empty() {
+                    tmux.unset_global_option("@workmux_sidebar_agents")
                 } else {
-                    let _ = Cmd::new("tmux")
-                        .args(&["set-option", "-gu", "@workmux_sidebar_agents"])
-                        .run();
+                    tmux.set_global_option("@workmux_sidebar_agents", &agent_list)
+                };
+                if let Err(error) = result {
+                    tracing::warn!(%error, "failed to publish sidebar agent inventory");
                 }
                 last_agent_list = agent_list;
             }
         }
 
-        // Track client activity for auto-exit
-        let cc = server.client_count();
-        if cc > 0 {
-            last_client_seen = Instant::now();
-        } else if last_client_seen.elapsed() > Duration::from_secs(10) {
-            tracing::info!("sidebar daemon exiting: no clients for 10s");
-            break;
+        let now = Instant::now();
+        if scheduler.heartbeat_due(now) {
+            let success = StateStore::new()
+                .and_then(|store| {
+                    store.write_runtime(
+                        &backend_name,
+                        &instance_id,
+                        &crate::state::RuntimeState {
+                            interrupted_pane_ids: last_interrupted.clone(),
+                            updated_ts: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        },
+                    )
+                })
+                .is_ok();
+            scheduler.finish_heartbeat(Instant::now(), success);
         }
 
-        // Periodic health log (every 60s)
-        if last_health_log.elapsed() >= Duration::from_secs(60) {
-            tracing::info!(clients = cc, "sidebar daemon alive");
-            last_health_log = Instant::now();
+        let now = Instant::now();
+        if scheduler.maintenance_due(now) {
+            scheduler.finish_maintenance(now);
+            let client_count = server.client_count();
+            if client_count > 0 {
+                last_client_seen = now;
+            } else if now.duration_since(last_client_seen) > Duration::from_secs(10) {
+                tracing::info!("sidebar daemon exiting: no clients for 10s");
+                break;
+            }
+            if now.duration_since(last_health_log) >= Duration::from_secs(60) {
+                tracing::info!(clients = client_count, "sidebar daemon alive");
+                last_health_log = now;
+            }
         }
 
-        // Block until a producer wakes the loop or the next refresh is due.
-        let wait = if dirty_pending {
-            debounce_interval.saturating_sub(last_refresh.elapsed())
-        } else {
-            refresh_interval.saturating_sub(last_refresh.elapsed())
-        };
-        let _ = wake_rx.recv_timeout(wait);
+        let _ = wake_rx.recv_timeout(scheduler.wait(Instant::now()));
     }
 
     if term.load(Ordering::Relaxed) {
         tracing::info!("sidebar daemon exiting: SIGTERM received");
     }
-
     signal_handle.close();
     let _ = signal_thread.join();
-
-    // Cleanup
     let _ = std::fs::remove_file(&sock_path);
     if let Ok(store) = StateStore::new() {
         store.delete_runtime(&backend_name, &instance_id);
     }
-    let _ = Cmd::new("tmux")
-        .args(&["set-option", "-gu", "@workmux_sidebar_daemon_pid"])
-        .run();
-    let _ = Cmd::new("tmux")
-        .args(&["set-option", "-gu", "@workmux_sidebar_agents"])
-        .run();
-    let _ = Cmd::new("tmux")
-        .args(&["set-option", "-gu", "@workmux_sleeping_panes"])
-        .run();
-    let _ = Cmd::new("tmux")
-        .args(&["set-option", "-gu", "@workmux_sidebar_scope"])
-        .run();
+    let _ = tmux.unset_global_option("@workmux_sidebar_daemon_pid");
+    let _ = tmux.unset_global_option("@workmux_sidebar_agents");
+    let _ = tmux.unset_global_option("@workmux_sleeping_panes");
+    let _ = tmux.unset_global_option("@workmux_sidebar_scope");
     Ok(())
 }
 
@@ -2312,8 +2427,7 @@ fn apply_tick_effects(
     }
 
     if let Some(ref runtime) = output.runtime_write {
-        let _ = store.write_runtime(backend, instance, runtime);
-        true
+        store.write_runtime(backend, instance, runtime).is_ok()
     } else {
         false
     }
@@ -2384,6 +2498,122 @@ mod tests {
             status: Some(AgentStatus::Done),
             ..working_agent(pane_id, 1)
         }
+    }
+
+    #[test]
+    fn scheduler_observes_and_captures_immediately_at_startup() {
+        let now = Instant::now();
+        let scheduler = Scheduler::new(now);
+
+        assert!(scheduler.observation_due(now));
+        assert!(scheduler.capture_due(now));
+        assert!(!scheduler.heartbeat_due(now));
+    }
+
+    #[test]
+    fn worker_and_config_publications_schedule_no_tmux_or_capture_work() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start);
+        scheduler.finish_observation(start);
+        scheduler.finish_capture(start);
+        for publication_wakeup in [
+            start + Duration::from_millis(100),
+            start + Duration::from_millis(200),
+        ] {
+            assert!(!scheduler.observation_due(publication_wakeup));
+            assert!(!scheduler.capture_due(publication_wakeup));
+        }
+    }
+
+    #[test]
+    fn failed_observation_keeps_the_periodic_recovery_deadline() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start);
+        scheduler.finish_observation(start);
+
+        assert!(!scheduler.observation_due(start + Duration::from_secs(1)));
+        assert!(scheduler.observation_due(start + OBSERVATION_INTERVAL));
+    }
+
+    #[test]
+    fn tmux_events_coalesce_without_postponing_the_first_deadline() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start);
+        scheduler.finish_observation(start);
+        scheduler.finish_capture(start);
+        scheduler.notify_tmux_event(start + Duration::from_millis(10));
+        scheduler.notify_tmux_event(start + Duration::from_millis(40));
+
+        assert!(!scheduler.observation_due(start + Duration::from_millis(59)));
+        assert!(scheduler.observation_due(start + Duration::from_millis(60)));
+    }
+
+    #[test]
+    fn event_arriving_during_observation_gets_its_own_coalesced_run() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start);
+        scheduler.finish_observation(start);
+        scheduler.notify_tmux_event(start + Duration::from_millis(20));
+        scheduler.finish_observation(start + Duration::from_millis(70));
+        scheduler.notify_tmux_event(start + Duration::from_millis(80));
+
+        assert!(!scheduler.observation_due(start + Duration::from_millis(129)));
+        assert!(scheduler.observation_due(start + Duration::from_millis(130)));
+    }
+
+    #[test]
+    fn periodic_observation_absorbs_a_pending_event() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start);
+        scheduler.finish_observation(start);
+        scheduler.notify_tmux_event(start + OBSERVATION_INTERVAL - Duration::from_millis(10));
+        scheduler.finish_observation(start + OBSERVATION_INTERVAL);
+
+        assert_eq!(scheduler.event_observation, None);
+        assert!(!scheduler.observation_due(start + OBSERVATION_INTERVAL + EVENT_COALESCE_INTERVAL));
+    }
+
+    #[test]
+    fn event_work_does_not_postpone_periodic_deadlines() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start);
+        scheduler.finish_observation(start);
+        scheduler.finish_capture(start);
+        scheduler.notify_tmux_event(start + Duration::from_millis(500));
+        scheduler.finish_observation(start + Duration::from_millis(550));
+
+        assert!(scheduler.observation_due(start + OBSERVATION_INTERVAL));
+        assert!(scheduler.capture_due(start + CAPTURE_INTERVAL));
+    }
+
+    #[test]
+    fn overdue_deadlines_advance_past_long_running_work() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start);
+        let after_stall = start + Duration::from_secs(7);
+        scheduler.finish_observation(after_stall);
+        scheduler.finish_capture(after_stall);
+
+        assert!(!scheduler.observation_due(after_stall));
+        assert!(!scheduler.capture_due(after_stall));
+        assert_eq!(scheduler.next_observation, start + Duration::from_secs(8));
+        assert_eq!(scheduler.next_capture, start + Duration::from_secs(8));
+    }
+
+    #[test]
+    fn heartbeat_retry_and_maintenance_are_independent() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(start);
+        let heartbeat = start + HEARTBEAT_INTERVAL;
+        assert!(scheduler.heartbeat_due(heartbeat));
+        scheduler.finish_heartbeat(heartbeat, false);
+        scheduler.finish_maintenance(start + MAINTENANCE_INTERVAL);
+
+        assert_eq!(
+            scheduler.next_heartbeat,
+            heartbeat + HEARTBEAT_RETRY_INTERVAL
+        );
+        assert_eq!(scheduler.next_maintenance, start + MAINTENANCE_INTERVAL * 2);
     }
 
     #[test]
@@ -3137,6 +3367,83 @@ mod tests {
         assert_eq!(entry.branch, "feature");
         assert_eq!(entry.summary.number, 123);
         assert!(dirty_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn pane_lifecycle_replacement_resets_inactivity_tracking() {
+        let mut tracker = InactivityTracker::new(Duration::from_secs(10));
+        let agents = vec![working_agent("%1", 1)];
+        let t0 = Instant::now();
+        let pane = |pid| LivePaneInfo {
+            pid: Some(pid),
+            current_command: Some("agent".into()),
+            working_dir: PathBuf::new(),
+            title: None,
+            session: Some("session".into()),
+            window: Some("window".into()),
+            session_id: Some("$1".into()),
+            window_id: Some("@1".into()),
+        };
+
+        tracker.reconcile_identities(
+            &HashMap::from([("%1".to_string(), pane(10))]),
+            Some("server-a"),
+        );
+        tracker.check_with(&agents, t0, |_| Some("same".into()));
+        assert!(
+            tracker
+                .check_with(&agents, t0 + Duration::from_secs(11), |_| Some(
+                    "same".into()
+                ))
+                .contains("%1")
+        );
+
+        tracker.reconcile_identities(
+            &HashMap::from([("%1".to_string(), pane(11))]),
+            Some("server-a"),
+        );
+        assert!(
+            tracker
+                .check_with(&agents, t0 + Duration::from_secs(12), |_| Some(
+                    "same".into()
+                ))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn server_lifecycle_replacement_resets_sticky_interruption() {
+        let mut tracker = InactivityTracker::new(Duration::from_secs(10));
+        let agents = vec![working_agent("%1", 1)];
+        let t0 = Instant::now();
+        let panes = HashMap::from([(
+            "%1".to_string(),
+            LivePaneInfo {
+                pid: Some(10),
+                current_command: Some("agent".into()),
+                working_dir: PathBuf::new(),
+                title: None,
+                session: Some("session".into()),
+                window: Some("window".into()),
+                session_id: Some("$1".into()),
+                window_id: Some("@1".into()),
+            },
+        )]);
+
+        tracker.reconcile_identities(&panes, Some("server-a"));
+        tracker.check_with(&agents, t0, |_| Some("same".into()));
+        tracker.check_with(&agents, t0 + Duration::from_secs(11), |_| {
+            Some("same".into())
+        });
+        tracker.reconcile_identities(&panes, Some("server-b"));
+
+        assert!(
+            tracker
+                .check_with(&agents, t0 + Duration::from_secs(12), |_| Some(
+                    "same".into()
+                ))
+                .is_empty()
+        );
     }
 
     #[test]

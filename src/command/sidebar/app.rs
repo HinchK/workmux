@@ -760,7 +760,7 @@ impl SidebarApp {
             let pane_id = agent.pane_id.clone();
             let _ = self.mux.switch_to_pane(&pane_id, None);
             // Signal daemon directly to bypass tmux hook round-trip latency
-            super::daemon_ctrl::signal_daemon();
+            super::daemon_ctrl::signal_daemon_for(self.mux.as_ref());
         }
     }
 
@@ -788,6 +788,7 @@ impl SidebarApp {
             settings.sidebar_layout = Some(self.layout_mode.as_str().to_string());
             let _ = store.save_settings(&settings);
         }
+        super::daemon_ctrl::signal_daemon_for(self.mux.as_ref());
     }
 
     /// Toggle the sleeping state of the selected agent.
@@ -832,7 +833,7 @@ impl SidebarApp {
         }
 
         // Signal daemon for immediate refresh (re-sort + broadcast)
-        super::daemon_ctrl::signal_daemon();
+        super::daemon_ctrl::signal_daemon_for(self.mux.as_ref());
     }
 
     pub fn toggle_filter_mode(&mut self) {
@@ -859,7 +860,7 @@ impl SidebarApp {
             Err(error) => warn!(%error, "failed to persist sidebar filter mode to settings"),
         }
         // Signal daemon for immediate refresh
-        super::daemon_ctrl::signal_daemon();
+        super::daemon_ctrl::signal_daemon_for(self.mux.as_ref());
     }
 
     pub fn window_prefix(&self) -> &str {

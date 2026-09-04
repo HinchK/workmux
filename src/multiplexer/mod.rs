@@ -284,6 +284,14 @@ pub trait Multiplexer: Send + Sync {
         ))
     }
 
+    fn rename_window_at_pane(&self, pane_id: &str, new_name: &str) -> Result<()> {
+        let _ = (pane_id, new_name);
+        Err(anyhow!(
+            "Renaming windows by pane is not supported by the {} backend",
+            self.name()
+        ))
+    }
+
     /// Rename a session from its full name to a new full name.
     ///
     /// Default implementation returns an error. Backends that support

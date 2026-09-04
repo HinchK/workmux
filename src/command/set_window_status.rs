@@ -104,6 +104,7 @@ pub fn register_agent() -> Result<()> {
     run_for_status_target(None, |mux, pane_id| {
         let _ = mux.clear_status(pane_id);
         crate::state::persist_agent_registration(mux, pane_id);
+        crate::command::sidebar::request_refresh_for(mux);
         Ok(())
     })
 }
@@ -205,6 +206,7 @@ fn apply_status_update(
         }
     }
 
+    crate::command::sidebar::request_refresh_for(mux);
     Ok(())
 }
 

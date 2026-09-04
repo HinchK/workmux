@@ -522,7 +522,7 @@ fn remove_worktree(
         io::stdout().flush()?;
     }
 
-    super::sidebar::request_refresh();
+    super::sidebar::request_refresh_for(context.mux.as_ref());
 
     Ok(result)
 }

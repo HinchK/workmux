@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cmd::Cmd;
-use crate::multiplexer::{create_backend, detect_backend};
+use crate::multiplexer::{Multiplexer, TmuxBackend, create_backend, detect_backend};
 
 use super::daemon;
 
@@ -76,12 +76,28 @@ pub(super) fn kill_daemon() {
         .run();
 }
 
+fn signal_pid(pid: &str) {
+    let _ = std::process::Command::new("kill")
+        .args(["-USR1", pid])
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+pub(super) fn signal_daemon_for(mux: &dyn Multiplexer) {
+    if mux.name() == "tmux" {
+        let tmux = TmuxBackend::for_socket(&mux.instance_id());
+        if let Ok(Some(pid)) = tmux.global_option("@workmux_sidebar_daemon_pid") {
+            signal_pid(&pid);
+        }
+    }
+}
+
 /// Signal the daemon to do an immediate refresh, bypassing tmux hook latency.
 pub(super) fn signal_daemon() {
-    if let Some(pid) = daemon_pid() {
-        let _ = std::process::Command::new("kill")
-            .args(["-USR1", &pid])
-            .stderr(std::process::Stdio::null())
-            .status();
+    let mux = create_backend(detect_backend());
+    if mux.name() == "tmux" {
+        signal_daemon_for(mux.as_ref());
+    } else if let Some(pid) = daemon_pid() {
+        signal_pid(&pid);
     }
 }
