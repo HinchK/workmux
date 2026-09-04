@@ -21,6 +21,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Reduce sidebar idle CPU while keeping Git status updates responsive for stale
+  repositories.
+
 ## v0.1.254 (2026-09-03)
 
 - Fix `workmux send` leaving prompts unsubmitted in active Codex panes.
