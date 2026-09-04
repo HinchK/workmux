@@ -23,6 +23,8 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## Unreleased
 
+- Reduce sidebar background CPU and process churn while keeping GitHub PR and
+  check statuses fresh.
 - Reduce sidebar idle CPU while keeping Git status updates responsive for stale
   repositories.
 - Avoid redundant sidebar updates and redraws when visible state is unchanged.

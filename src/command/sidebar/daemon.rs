@@ -927,6 +927,28 @@ fn publish_check_path_cache(
     }
 }
 
+fn merge_github_outcome(
+    mut prs: HashMap<String, PrSummary>,
+    mut checks: HashMap<String, CheckSummary>,
+    outcome: crate::github::BranchQueryOutcome,
+) -> (HashMap<String, PrSummary>, HashMap<String, CheckSummary>) {
+    prs.retain(|branch, _| outcome.requested.contains(branch));
+    checks.retain(|branch, _| outcome.requested.contains(branch));
+    for (branch, summary) in outcome.answered {
+        if let Some(pr) = summary.pr {
+            prs.insert(branch.clone(), pr);
+        } else {
+            prs.remove(&branch);
+        }
+        if let Some(check_summary) = summary.checks {
+            checks.insert(branch, check_summary);
+        } else {
+            checks.remove(&branch);
+        }
+    }
+    (prs, checks)
+}
+
 fn spawn_github_worker(
     term: Arc<AtomicBool>,
     dirty_flag: Arc<AtomicBool>,
@@ -1032,28 +1054,37 @@ fn spawn_github_worker(
                 continue;
             }
 
+            let requests = repo_branches
+                .into_iter()
+                .map(
+                    |(repo_key, (repo_root, branches))| crate::github::BranchQueryRequest {
+                        repo_key,
+                        repo_root,
+                        branches,
+                    },
+                )
+                .collect();
+            let outcomes = crate::github::list_branch_summaries_batch(requests);
+            let previous_prs = repo_cache
+                .lock()
+                .ok()
+                .map(|cache| cache.clone())
+                .unwrap_or_default();
+            let previous_checks = check_repo_cache
+                .lock()
+                .ok()
+                .map(|cache| cache.clone())
+                .unwrap_or_default();
             let mut fetched_prs = HashMap::new();
             let mut fetched_checks = HashMap::new();
-            for (repo_key, (query_path, branches)) in repo_branches {
-                match crate::github::list_branch_summaries(&query_path, &branches) {
-                    Ok(summaries) => {
-                        let mut prs = HashMap::new();
-                        let mut checks = HashMap::new();
-                        for (branch, summary) in summaries {
-                            if let Some(pr) = summary.pr {
-                                prs.insert(branch.clone(), pr);
-                            }
-                            if let Some(check_summary) = summary.checks {
-                                checks.insert(branch, check_summary);
-                            }
-                        }
-                        fetched_prs.insert(repo_key.clone(), prs);
-                        fetched_checks.insert(repo_key, checks);
-                    }
-                    Err(e) => {
-                        tracing::warn!("failed to fetch GitHub state for {:?}: {}", query_path, e);
-                    }
-                }
+            for (repo_key, outcome) in outcomes {
+                let (prs, checks) = merge_github_outcome(
+                    previous_prs.get(&repo_key).cloned().unwrap_or_default(),
+                    previous_checks.get(&repo_key).cloned().unwrap_or_default(),
+                    outcome,
+                );
+                fetched_prs.insert(repo_key.clone(), prs);
+                fetched_checks.insert(repo_key, checks);
             }
             if !fetched_prs.is_empty()
                 && let Ok(mut cache) = repo_cache.lock()
@@ -2309,6 +2340,7 @@ fn gather_captures(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::CheckState;
     use crate::multiplexer::{AgentPane, AgentStatus};
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -2352,6 +2384,72 @@ mod tests {
             status: Some(AgentStatus::Done),
             ..working_agent(pane_id, 1)
         }
+    }
+
+    #[test]
+    fn partial_github_outcome_updates_answered_and_retains_unanswered_branches() {
+        let pr = |number| PrSummary {
+            number,
+            title: format!("PR {number}"),
+            state: "OPEN".to_string(),
+            is_draft: false,
+            checks: None,
+            check_meta: None,
+            url: None,
+        };
+        let previous_prs = HashMap::from([
+            ("answered".to_string(), pr(1)),
+            ("unanswered".to_string(), pr(2)),
+            ("inactive".to_string(), pr(3)),
+        ]);
+        let previous_checks = HashMap::from([
+            (
+                "answered".to_string(),
+                CheckSummary {
+                    state: CheckState::Success,
+                    meta: None,
+                },
+            ),
+            (
+                "unanswered".to_string(),
+                CheckSummary {
+                    state: CheckState::Failure {
+                        passed: 0,
+                        total: 1,
+                    },
+                    meta: None,
+                },
+            ),
+            (
+                "inactive".to_string(),
+                CheckSummary {
+                    state: CheckState::Success,
+                    meta: None,
+                },
+            ),
+        ]);
+        let outcome = crate::github::BranchQueryOutcome {
+            requested: HashSet::from(["answered".to_string(), "unanswered".to_string()]),
+            answered: HashMap::from([(
+                "answered".to_string(),
+                crate::github::BranchSummary {
+                    pr: None,
+                    checks: None,
+                },
+            )]),
+        };
+
+        let (prs, checks) = merge_github_outcome(previous_prs, previous_checks, outcome);
+
+        assert!(!prs.contains_key("answered"));
+        assert!(!checks.contains_key("answered"));
+        assert_eq!(prs.get("unanswered").map(|pr| pr.number), Some(2));
+        assert!(matches!(
+            checks.get("unanswered").map(|check| &check.state),
+            Some(CheckState::Failure { .. })
+        ));
+        assert!(!prs.contains_key("inactive"));
+        assert!(!checks.contains_key("inactive"));
     }
 
     #[test]

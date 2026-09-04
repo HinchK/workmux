@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -103,6 +103,19 @@ impl CheckSummary {
 pub struct BranchSummary {
     pub pr: Option<PrSummary>,
     pub checks: Option<CheckSummary>,
+}
+
+/// One local repository's branches requested by the sidebar GitHub worker.
+pub struct BranchQueryRequest {
+    pub repo_key: PathBuf,
+    pub repo_root: PathBuf,
+    pub branches: Vec<String>,
+}
+
+/// Fresh branch results, plus the complete active branch set for cache merging.
+pub struct BranchQueryOutcome {
+    pub requested: HashSet<String>,
+    pub answered: HashMap<String, BranchSummary>,
 }
 
 /// Handles both CheckRun (status/conclusion) and StatusContext (state) from GitHub API
@@ -592,57 +605,11 @@ pub fn list_branch_summaries(
     }
 }
 
-/// Sanitize a branch name into a valid GraphQL alias (alphanumeric + underscore).
-fn branch_to_alias(index: usize, branch: &str) -> String {
-    // Use a prefix + index to guarantee uniqueness, since sanitizing could create collisions
-    let sanitized: String = branch
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    format!("br{}_{}", index, sanitized)
-}
-
-/// Build GraphQL query fragments for one branch.
-fn build_branch_fragment(alias: &str, branch: &str) -> String {
-    let escaped = branch
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    format!(
-        r#"    pr_{alias}: pullRequests(headRefName: "{escaped}", first: 1, states: [OPEN, MERGED, CLOSED], orderBy: {{field: CREATED_AT, direction: DESC}}) {{
-      nodes {{
-        number title state isDraft url
-        commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{
-          nodes {{ __typename ... on CheckRun {{ name status conclusion startedAt }} ... on StatusContext {{ context state createdAt }} }}
-        }} }} }} }} }}
-      }}
-    }}
-    ref_{alias}: ref(qualifiedName: "refs/heads/{escaped}") {{
-      target {{ ... on Commit {{ statusCheckRollup {{ contexts(first: 100) {{
-        nodes {{ __typename ... on CheckRun {{ name status conclusion startedAt }} ... on StatusContext {{ context state createdAt }} }}
-      }} }} }} }}
-    }}"#
-    )
-}
-
-/// GraphQL response structures
-#[derive(Debug, Deserialize)]
-struct GraphqlResponse {
-    data: Option<GraphqlData>,
-    errors: Option<Vec<GraphqlError>>,
-}
-
 #[derive(Debug, Deserialize)]
 struct GraphqlError {
     message: String,
-}
-
-/// The `data.repository` value is a map of dynamic aliases.
-#[derive(Debug, Deserialize)]
-struct GraphqlData {
-    repository: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    path: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -814,39 +781,192 @@ fn get_repo_context(repo_root: &Path) -> Result<ResolvedRepoContext> {
     Ok(context)
 }
 
-/// Fetch branch and PR status for multiple branches in one GraphQL API call.
-fn list_branch_summaries_graphql(
-    repo_root: &Path,
-    branches: &[String],
-) -> Result<HashMap<String, BranchSummary>> {
-    let (owner, repo_name, hostname) = get_repo_context(repo_root)?;
+const MAX_BATCH_BRANCHES: usize = 32;
+const MAX_BATCH_BODY_BYTES: usize = 64 * 1024;
 
-    let fragments: Vec<String> = branches
-        .iter()
-        .enumerate()
-        .map(|(i, branch)| {
-            let alias = branch_to_alias(i, branch);
-            build_branch_fragment(&alias, branch)
-        })
-        .collect();
+struct LocalQuery {
+    repo_key: PathBuf,
+    branches: BTreeSet<String>,
+}
+
+struct RemoteQuery {
+    hostname: String,
+    owner: String,
+    name: String,
+    branches: Vec<String>,
+    locals: Vec<LocalQuery>,
+}
+
+type RemoteQueryOutcome = HashMap<String, BranchSummary>;
+
+#[derive(Debug, Deserialize)]
+struct BatchGraphqlResponse {
+    data: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    errors: Vec<GraphqlError>,
+}
+
+struct GraphqlCommandResponse {
+    success: bool,
+    response: BatchGraphqlResponse,
+}
+
+/// Fetch sidebar GitHub state with one bounded GraphQL query per hostname chunk.
+pub fn list_branch_summaries_batch(
+    requests: Vec<BranchQueryRequest>,
+) -> HashMap<PathBuf, BranchQueryOutcome> {
+    let mut remotes: BTreeMap<(String, String, String), RemoteQuery> = BTreeMap::new();
+
+    for request in requests {
+        let requested: BTreeSet<String> = request.branches.into_iter().collect();
+        let Ok((owner, name, hostname)) = get_repo_context(&request.repo_root) else {
+            continue;
+        };
+        let key = (
+            hostname.to_ascii_lowercase(),
+            owner.to_ascii_lowercase(),
+            name.to_ascii_lowercase(),
+        );
+        let remote = remotes.entry(key).or_insert_with(|| RemoteQuery {
+            hostname,
+            owner,
+            name,
+            branches: Vec::new(),
+            locals: Vec::new(),
+        });
+        remote.locals.push(LocalQuery {
+            repo_key: request.repo_key,
+            branches: requested.clone(),
+        });
+        remote.branches.extend(requested);
+    }
+
+    let mut by_host: BTreeMap<String, Vec<RemoteQuery>> = BTreeMap::new();
+    for mut remote in remotes.into_values() {
+        remote.branches.sort();
+        remote.branches.dedup();
+        by_host
+            .entry(remote.hostname.to_ascii_lowercase())
+            .or_default()
+            .push(remote);
+    }
+
+    let mut outcomes = HashMap::new();
+    for remotes in by_host.into_values() {
+        for chunk in pack_remote_queries(remotes) {
+            let remote_outcomes = execute_remote_chunk(&chunk);
+            for (remote, remote_outcome) in chunk.into_iter().zip(remote_outcomes) {
+                let Some(remote_outcome) = remote_outcome else {
+                    continue;
+                };
+                for local in remote.locals {
+                    let answered: HashMap<String, BranchSummary> = remote_outcome
+                        .iter()
+                        .filter(|(branch, _)| local.branches.contains(*branch))
+                        .map(|(branch, summary)| (branch.clone(), summary.clone()))
+                        .collect();
+                    if !answered.is_empty() {
+                        outcomes.insert(
+                            local.repo_key,
+                            BranchQueryOutcome {
+                                requested: local.branches.into_iter().collect(),
+                                answered,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+    outcomes
+}
+
+fn pack_remote_queries(remotes: Vec<RemoteQuery>) -> Vec<Vec<RemoteQuery>> {
+    let mut chunks = Vec::new();
+    let mut chunk = Vec::new();
+    let mut branch_count = 0usize;
+
+    for remote in remotes {
+        let remote_branches = remote.branches.len();
+        chunk.push(remote);
+        let candidate_bytes = build_batch_body(&chunk)
+            .map(|body| body.len())
+            .unwrap_or(usize::MAX);
+        if chunk.len() > 1
+            && (branch_count + remote_branches > MAX_BATCH_BRANCHES
+                || candidate_bytes > MAX_BATCH_BODY_BYTES)
+        {
+            let remote = chunk.pop().expect("candidate was just pushed");
+            chunks.push(std::mem::take(&mut chunk));
+            branch_count = 0;
+            chunk.push(remote);
+        }
+        branch_count += remote_branches;
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+fn build_batch_body(remotes: &[RemoteQuery]) -> Result<Vec<u8>> {
+    let mut declarations = Vec::new();
+    let mut repositories = Vec::new();
+    let mut variables = serde_json::Map::new();
+
+    for (repo_index, remote) in remotes.iter().enumerate() {
+        let owner_var = format!("owner_{repo_index}");
+        let name_var = format!("name_{repo_index}");
+        declarations.push(format!("${owner_var}: String!"));
+        declarations.push(format!("${name_var}: String!"));
+        variables.insert(owner_var.clone(), remote.owner.clone().into());
+        variables.insert(name_var.clone(), remote.name.clone().into());
+
+        let mut branches = Vec::new();
+        for (branch_index, branch) in remote.branches.iter().enumerate() {
+            let head_var = format!("head_{repo_index}_{branch_index}");
+            let ref_var = format!("qualified_{repo_index}_{branch_index}");
+            declarations.push(format!("${head_var}: String!"));
+            declarations.push(format!("${ref_var}: String!"));
+            variables.insert(head_var.clone(), branch.clone().into());
+            variables.insert(ref_var.clone(), format!("refs/heads/{branch}").into());
+            branches.push(format!(
+                r#"    pr_r{repo_index}_b{branch_index}: pullRequests(headRefName: ${head_var}, first: 1, states: [OPEN, MERGED, CLOSED], orderBy: {{field: CREATED_AT, direction: DESC}}) {{
+      nodes {{
+        number title state isDraft url
+        commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{
+          nodes {{ __typename ... on CheckRun {{ name status conclusion startedAt }} ... on StatusContext {{ context state createdAt }} }}
+        }} }} }} }} }}
+      }}
+    }}
+    ref_r{repo_index}_b{branch_index}: ref(qualifiedName: ${ref_var}) {{
+      target {{ ... on Commit {{ statusCheckRollup {{ contexts(first: 100) {{
+        nodes {{ __typename ... on CheckRun {{ name status conclusion startedAt }} ... on StatusContext {{ context state createdAt }} }}
+      }} }} }} }}
+    }}"#
+            ));
+        }
+        repositories.push(format!(
+            "  repo_{repo_index}: repository(owner: ${owner_var}, name: ${name_var}) {{\n{}\n  }}",
+            branches.join("\n")
+        ));
+    }
 
     let query = format!(
-        "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{\n{}\n  }} }}",
-        fragments.join("\n")
+        "query({}) {{\n{}\n}}",
+        declarations.join(", "),
+        repositories.join("\n")
     );
-
-    let body = serde_json::to_vec(&serde_json::json!({
+    serde_json::to_vec(&serde_json::json!({
         "query": query,
-        "variables": {
-            "owner": owner,
-            "name": repo_name,
-        }
+        "variables": variables,
     }))
-    .context("JSON serialize")?;
+    .context("JSON serialize")
+}
 
+fn run_graphql(hostname: &str, body: &[u8]) -> Result<GraphqlCommandResponse> {
     let mut child = Command::new("gh")
-        .current_dir(repo_root)
-        .args(["api", "graphql", "--hostname", &hostname, "--input", "-"])
+        .args(["api", "graphql", "--hostname", hostname, "--input", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -857,88 +977,202 @@ fn list_branch_summaries_graphql(
         .stdin
         .take()
         .expect("stdin was piped")
-        .write_all(&body)
+        .write_all(body)
         .context("Failed to write to gh stdin")?;
-
     let output = child
         .wait_with_output()
         .context("Failed to wait for gh api graphql")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("gh api graphql failed: {stderr}"));
+    let response = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "gh api graphql returned invalid JSON with status {}",
+            output.status
+        )
+    })?;
+    Ok(GraphqlCommandResponse {
+        success: output.status.success(),
+        response,
+    })
+}
+
+fn execute_remote_chunk(chunk: &[RemoteQuery]) -> Vec<Option<RemoteQueryOutcome>> {
+    execute_remote_chunk_with(chunk, &mut run_graphql)
+}
+
+fn execute_remote_chunk_with(
+    chunk: &[RemoteQuery],
+    run: &mut impl FnMut(&str, &[u8]) -> Result<GraphqlCommandResponse>,
+) -> Vec<Option<RemoteQueryOutcome>> {
+    match execute_remote_chunk_once(chunk, run) {
+        Ok(outcomes) => outcomes,
+        Err(_) if chunk.len() > 1 => chunk
+            .iter()
+            .map(|remote| {
+                execute_remote_chunk_once(std::slice::from_ref(remote), run)
+                    .ok()
+                    .and_then(|mut outcomes| outcomes.pop().flatten())
+            })
+            .collect(),
+        Err(_) => vec![None],
     }
+}
 
-    let response: GraphqlResponse =
-        serde_json::from_slice(&output.stdout).context("Failed to parse GraphQL response")?;
-
-    if let Some(errors) = &response.errors
-        && !errors.is_empty()
-    {
-        let msgs: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
-        return Err(anyhow!("GraphQL errors: {}", msgs.join("; ")));
+fn execute_remote_chunk_once(
+    chunk: &[RemoteQuery],
+    run: &mut impl FnMut(&str, &[u8]) -> Result<GraphqlCommandResponse>,
+) -> Result<Vec<Option<RemoteQueryOutcome>>> {
+    let body = build_batch_body(chunk)?;
+    let response = run(&chunk[0].hostname, &body)?.response;
+    let aliases: HashSet<String> = (0..chunk.len())
+        .map(|index| format!("repo_{index}"))
+        .collect();
+    if response.errors.iter().any(|error| {
+        error
+            .path
+            .first()
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|alias| !aliases.contains(alias))
+    }) {
+        return Err(anyhow!("GraphQL response contained an unscoped error"));
     }
-
     let data = response
         .data
         .ok_or_else(|| anyhow!("No data in GraphQL response"))?;
-    parse_branch_summaries(data.repository, branches)
+    Ok(chunk
+        .iter()
+        .enumerate()
+        .map(|(repo_index, remote)| parse_remote_query(&data, &response.errors, repo_index, remote))
+        .collect())
 }
 
-fn parse_branch_summaries(
-    mut repo: HashMap<String, serde_json::Value>,
-    branches: &[String],
-) -> Result<HashMap<String, BranchSummary>> {
-    let mut map = HashMap::new();
+fn parse_remote_query(
+    data: &HashMap<String, serde_json::Value>,
+    errors: &[GraphqlError],
+    repo_index: usize,
+    remote: &RemoteQuery,
+) -> Option<RemoteQueryOutcome> {
+    let repo_alias = format!("repo_{repo_index}");
+    let repo_value = data.get(&repo_alias)?;
+    if repo_value.is_null()
+        || errors.iter().any(|error| {
+            error.path.len() == 1
+                && error.path.first().and_then(serde_json::Value::as_str)
+                    == Some(repo_alias.as_str())
+        })
+    {
+        return None;
+    }
+    let repo = repo_value.as_object()?;
+    let mut answered = HashMap::new();
 
-    for (index, branch) in branches.iter().enumerate() {
-        let alias = branch_to_alias(index, branch);
-        let pr_value = repo
-            .remove(&format!("pr_{alias}"))
-            .ok_or_else(|| anyhow!("Missing PR data for branch {branch}"))?;
-        let connection: GraphqlPrConnection =
-            serde_json::from_value(pr_value).context("Failed to parse GraphQL PR data")?;
-        let ref_value = repo
-            .remove(&format!("ref_{alias}"))
-            .ok_or_else(|| anyhow!("Missing ref data for branch {branch}"))?;
-        let branch_ref: Option<GraphqlBranchRef> =
-            serde_json::from_value(ref_value).context("Failed to parse GraphQL ref data")?;
-
-        let pr = connection.nodes.into_iter().next().map(|node| {
-            let check_items = node
-                .commits
-                .nodes
-                .first()
-                .map(|node| check_items_for_commit(&node.commit))
-                .unwrap_or_default();
-            let (checks, check_meta) = aggregate_checks(&check_items);
-            PrSummary {
-                number: node.number,
-                title: node.title,
-                state: node.state,
-                is_draft: node.is_draft,
-                checks,
-                check_meta,
-                url: Some(node.url),
-            }
+    for (branch_index, branch) in remote.branches.iter().enumerate() {
+        let pr_alias = format!("pr_r{repo_index}_b{branch_index}");
+        let ref_alias = format!("ref_r{repo_index}_b{branch_index}");
+        let direct_error = errors.iter().any(|error| {
+            error.path.len() == 2
+                && error.path.first().and_then(serde_json::Value::as_str)
+                    == Some(repo_alias.as_str())
+                && error
+                    .path
+                    .get(1)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|alias| alias == pr_alias || alias == ref_alias)
         });
-        let branch_checks = branch_ref
-            .and_then(|branch_ref| branch_ref.target)
-            .and_then(|commit| summarize_checks(&check_items_for_commit(&commit)));
-        let checks = pr
-            .as_ref()
-            .and_then(|pr| {
-                pr.checks.clone().map(|state| CheckSummary {
-                    state,
-                    meta: pr.check_meta.clone(),
-                })
-            })
-            .or(branch_checks);
-
-        map.insert(branch.clone(), BranchSummary { pr, checks });
+        if direct_error {
+            continue;
+        }
+        let (Some(pr_value), Some(ref_value)) = (repo.get(&pr_alias), repo.get(&ref_alias)) else {
+            continue;
+        };
+        if let Ok(summary) = parse_branch_summary_values(pr_value.clone(), ref_value.clone()) {
+            answered.insert(branch.clone(), summary);
+        }
     }
 
-    Ok(map)
+    Some(answered)
+}
+
+fn parse_branch_summary_values(
+    pr_value: serde_json::Value,
+    ref_value: serde_json::Value,
+) -> Result<BranchSummary> {
+    let connection: GraphqlPrConnection =
+        serde_json::from_value(pr_value).context("Failed to parse GraphQL PR data")?;
+    let branch_ref: Option<GraphqlBranchRef> =
+        serde_json::from_value(ref_value).context("Failed to parse GraphQL ref data")?;
+    let pr = connection.nodes.into_iter().next().map(|node| {
+        let check_items = node
+            .commits
+            .nodes
+            .first()
+            .map(|node| check_items_for_commit(&node.commit))
+            .unwrap_or_default();
+        let (checks, check_meta) = aggregate_checks(&check_items);
+        PrSummary {
+            number: node.number,
+            title: node.title,
+            state: node.state,
+            is_draft: node.is_draft,
+            checks,
+            check_meta,
+            url: Some(node.url),
+        }
+    });
+    let branch_checks = branch_ref
+        .and_then(|branch_ref| branch_ref.target)
+        .and_then(|commit| summarize_checks(&check_items_for_commit(&commit)));
+    let checks = pr
+        .as_ref()
+        .and_then(|pr| {
+            pr.checks.clone().map(|state| CheckSummary {
+                state,
+                meta: pr.check_meta.clone(),
+            })
+        })
+        .or(branch_checks);
+    Ok(BranchSummary { pr, checks })
+}
+
+/// Fetch branch and PR status for multiple branches in one GraphQL API call.
+fn list_branch_summaries_graphql(
+    repo_root: &Path,
+    branches: &[String],
+) -> Result<HashMap<String, BranchSummary>> {
+    let (owner, name, hostname) = get_repo_context(repo_root)?;
+    let remote = RemoteQuery {
+        hostname,
+        owner,
+        name,
+        branches: branches.to_vec(),
+        locals: Vec::new(),
+    };
+    let body = build_batch_body(std::slice::from_ref(&remote))?;
+    let command = run_graphql(&remote.hostname, &body)?;
+    if !command.success {
+        return Err(anyhow!("gh api graphql failed"));
+    }
+    if !command.response.errors.is_empty() {
+        let messages: Vec<&str> = command
+            .response
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect();
+        return Err(anyhow!("GraphQL errors: {}", messages.join("; ")));
+    }
+    let data = command
+        .response
+        .data
+        .ok_or_else(|| anyhow!("No data in GraphQL response"))?;
+    let summaries = parse_remote_query(&data, &[], 0, &remote)
+        .ok_or_else(|| anyhow!("Missing repository data in GraphQL response"))?;
+    if branches
+        .iter()
+        .any(|branch| !summaries.contains_key(branch))
+    {
+        return Err(anyhow!("Missing branch data in GraphQL response"));
+    }
+    Ok(summaries)
 }
 
 /// Fallback: fetch PR status one branch at a time using REST-style gh pr list.
@@ -1293,26 +1527,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_to_alias_sanitizes_hyphens() {
-        let alias = branch_to_alias(0, "my-feature-branch");
-        assert_eq!(alias, "br0_my_feature_branch");
-    }
-
-    #[test]
-    fn branch_to_alias_sanitizes_slashes() {
-        let alias = branch_to_alias(3, "feat/add-thing");
-        assert_eq!(alias, "br3_feat_add_thing");
-    }
-
-    #[test]
-    fn branch_to_alias_index_prevents_collisions() {
-        // "a-b" and "a_b" would collide without the index prefix
-        let a1 = branch_to_alias(0, "a-b");
-        let a2 = branch_to_alias(1, "a_b");
-        assert_ne!(a1, a2);
-    }
-
-    #[test]
     fn graphql_check_node_to_rollup_item_check_run() {
         let node = GraphqlCheckNode::CheckRun {
             name: Some("build".to_string()),
@@ -1394,8 +1608,12 @@ mod tests {
         }))
         .unwrap();
 
-        let summaries = parse_branch_summaries(repository, &["feature".to_string()]).unwrap();
-        let summary = summaries.get("feature").unwrap();
+        let mut repository: HashMap<String, serde_json::Value> = repository;
+        let summary = parse_branch_summary_values(
+            repository.remove("pr_br0_feature").unwrap(),
+            repository.remove("ref_br0_feature").unwrap(),
+        )
+        .unwrap();
 
         assert!(summary.pr.is_none());
         assert_eq!(
@@ -1451,8 +1669,12 @@ mod tests {
         }))
         .unwrap();
 
-        let summaries = parse_branch_summaries(repository, &["feature".to_string()]).unwrap();
-        let summary = summaries.get("feature").unwrap();
+        let mut repository: HashMap<String, serde_json::Value> = repository;
+        let summary = parse_branch_summary_values(
+            repository.remove("pr_br0_feature").unwrap(),
+            repository.remove("ref_br0_feature").unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(summary.pr.as_ref().map(|pr| pr.number), Some(42));
         assert_eq!(
@@ -1462,14 +1684,6 @@ mod tests {
                 total: 1,
             })
         );
-    }
-
-    #[test]
-    fn branch_fragment_escapes_control_characters() {
-        let fragment = build_branch_fragment("br0", "feat/\"line\nnext");
-
-        assert!(fragment.contains("headRefName: \"feat/\\\"line\\nnext\""));
-        assert!(fragment.contains("refs/heads/feat/\\\"line\\nnext"));
     }
 
     #[test]
@@ -1517,6 +1731,187 @@ mod tests {
             meta.as_ref().and_then(|m| m.failing_name.as_deref()),
             Some("lint-check")
         );
+    }
+
+    fn remote_query(name: &str, branches: Vec<String>) -> RemoteQuery {
+        RemoteQuery {
+            hostname: "github.com".to_string(),
+            owner: "owner".to_string(),
+            name: name.to_string(),
+            branches,
+            locals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn batch_query_uses_variables_for_repository_and_branch_values() {
+        let branch = "feat/quote-\"-line\n-unicode-雪".to_string();
+        let body = build_batch_body(&[remote_query("repo", vec![branch.clone()])]).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let query = body["query"].as_str().unwrap();
+
+        assert!(!query.contains(&branch));
+        assert_eq!(body["variables"]["head_0_0"], branch);
+        assert_eq!(
+            body["variables"]["qualified_0_0"],
+            "refs/heads/feat/quote-\"-line\n-unicode-雪"
+        );
+    }
+
+    #[test]
+    fn batch_packing_limits_total_branches() {
+        let remotes = (0..33)
+            .map(|index| remote_query(&format!("repo-{index}"), vec!["main".to_string()]))
+            .collect();
+        let chunks = pack_remote_queries(remotes);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 32);
+        assert_eq!(chunks[1].len(), 1);
+    }
+
+    #[test]
+    fn batch_packing_keeps_oversized_repository_atomic() {
+        let branches = (0..(MAX_BATCH_BRANCHES + 8))
+            .map(|index| format!("branch-{index}"))
+            .collect();
+        let chunks = pack_remote_queries(vec![
+            remote_query("large", branches),
+            remote_query("next", vec!["main".to_string()]),
+        ]);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 1);
+        assert_eq!(chunks[0][0].branches.len(), MAX_BATCH_BRANCHES + 8);
+        assert_eq!(chunks[1][0].name, "next");
+    }
+
+    #[test]
+    fn batch_packing_limits_serialized_body_size() {
+        let long_branch = "x".repeat(MAX_BATCH_BODY_BYTES);
+        let chunks = pack_remote_queries(vec![
+            remote_query("first", vec![long_branch.clone()]),
+            remote_query("second", vec![long_branch]),
+        ]);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 1);
+        assert_eq!(chunks[1].len(), 1);
+    }
+
+    #[test]
+    fn unscoped_batch_failure_retries_each_repository_once() {
+        let remotes = vec![
+            remote_query("one", vec!["main".to_string()]),
+            remote_query("two", vec!["main".to_string()]),
+            remote_query("three", vec!["main".to_string()]),
+        ];
+        let mut calls = 0;
+        let outcomes = execute_remote_chunk_with(&remotes, &mut |_hostname, body| {
+            calls += 1;
+            if calls == 1 {
+                return Ok(GraphqlCommandResponse {
+                    success: false,
+                    response: BatchGraphqlResponse {
+                        data: None,
+                        errors: vec![GraphqlError {
+                            message: "unscoped".to_string(),
+                            path: Vec::new(),
+                        }],
+                    },
+                });
+            }
+            let request: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(
+                request["variables"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .filter(|key| key.starts_with("owner_"))
+                    .count(),
+                1
+            );
+            Ok(GraphqlCommandResponse {
+                success: true,
+                response: BatchGraphqlResponse {
+                    data: Some(HashMap::from([(
+                        "repo_0".to_string(),
+                        serde_json::json!({
+                            "pr_r0_b0": { "nodes": [] },
+                            "ref_r0_b0": null
+                        }),
+                    )])),
+                    errors: Vec::new(),
+                },
+            })
+        });
+
+        assert_eq!(calls, 4);
+        assert_eq!(outcomes.len(), 3);
+        assert!(
+            outcomes
+                .into_iter()
+                .all(|outcome| { outcome.is_some_and(|outcome| outcome.contains_key("main")) })
+        );
+    }
+
+    #[test]
+    fn batch_parser_accepts_sibling_data_on_unsuccessful_command() {
+        let response: BatchGraphqlResponse = serde_json::from_value(serde_json::json!({
+            "data": {
+                "repo_0": null,
+                "repo_1": {
+                    "pr_r1_b0": { "nodes": [] },
+                    "ref_r1_b0": null
+                }
+            },
+            "errors": [
+                { "message": "hidden", "path": ["repo_0"] },
+                { "message": "nested", "path": ["repo_1", "pr_r1_b0", "nodes", 0, "commits"] }
+            ]
+        }))
+        .unwrap();
+        let remotes = [
+            remote_query("hidden", vec!["main".to_string()]),
+            remote_query("visible", vec!["feature".to_string()]),
+        ];
+        let mut response = Some(response);
+        let outcomes = execute_remote_chunk_with(&remotes, &mut |_hostname, _body| {
+            Ok(GraphqlCommandResponse {
+                success: false,
+                response: response.take().unwrap(),
+            })
+        });
+
+        assert!(outcomes[0].is_none());
+        assert_eq!(
+            outcomes[1].as_ref().unwrap().get("feature"),
+            Some(&BranchSummary {
+                pr: None,
+                checks: None,
+            })
+        );
+    }
+
+    #[test]
+    fn batch_parser_leaves_directly_failed_branch_unanswered() {
+        let response: BatchGraphqlResponse = serde_json::from_value(serde_json::json!({
+            "data": {
+                "repo_0": {
+                    "pr_r0_b0": null,
+                    "ref_r0_b0": null
+                }
+            },
+            "errors": [
+                { "message": "field failed", "path": ["repo_0", "pr_r0_b0"] }
+            ]
+        }))
+        .unwrap();
+        let remote = remote_query("repo", vec!["feature".to_string()]);
+        let outcome =
+            parse_remote_query(&response.data.unwrap(), &response.errors, 0, &remote).unwrap();
+
+        assert!(outcome.is_empty());
     }
 
     #[test]
