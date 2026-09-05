@@ -644,6 +644,41 @@ fn replace_worktree_watches(
     watch_complete.insert(worktree.to_path_buf(), complete);
 }
 
+/// Reconcile root watches, preserving watches for repositories that remain active.
+/// Returns the roots whose watches were added.
+fn reconcile_worktree_watches(
+    watcher: &mut notify::RecommendedWatcher,
+    active_roots: &[PathBuf],
+    worktree_watches: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    watch_complete: &mut HashMap<PathBuf, bool>,
+    watch_to_worktrees: &mut HashMap<PathBuf, HashSet<PathBuf>>,
+) -> Vec<PathBuf> {
+    let active: HashSet<&PathBuf> = active_roots.iter().collect();
+    let removed: Vec<PathBuf> = worktree_watches
+        .keys()
+        .filter(|root| !active.contains(*root))
+        .cloned()
+        .collect();
+    for root in removed {
+        detach_worktree_watches(watcher, &root, worktree_watches, watch_to_worktrees);
+        watch_complete.remove(&root);
+    }
+    let mut added = Vec::new();
+    for root in active_roots {
+        if !worktree_watches.contains_key(root) {
+            replace_worktree_watches(
+                watcher,
+                root,
+                worktree_watches,
+                watch_complete,
+                watch_to_worktrees,
+            );
+            added.push(root.clone());
+        }
+    }
+    added
+}
+
 /// Calculate the next timeout for debounced work, capped at one second so
 /// termination and maintenance remain responsive.
 fn next_worker_timeout(pending: &HashMap<PathBuf, Instant>, debounce: Duration) -> Duration {
@@ -691,9 +726,13 @@ fn reconcile_git_cache(
     current: &HashMap<PathBuf, ResolvedGitWorktree>,
     cache: &mut HashMap<PathBuf, GitStatus>,
 ) -> (bool, Vec<PathBuf>) {
-    let active_agent_paths: HashSet<PathBuf> = current
-        .values()
-        .flat_map(|entry| entry.agent_paths.iter().cloned())
+    let previous_roots: HashMap<&PathBuf, &PathBuf> = previous
+        .iter()
+        .flat_map(|(root, entry)| entry.agent_paths.iter().map(move |path| (path, root)))
+        .collect();
+    let current_roots: HashMap<&PathBuf, &PathBuf> = current
+        .iter()
+        .flat_map(|(root, entry)| entry.agent_paths.iter().map(move |path| (path, root)))
         .collect();
     let root_statuses: HashMap<PathBuf, GitStatus> = previous
         .iter()
@@ -706,17 +745,14 @@ fn reconcile_git_cache(
         .collect();
 
     let before = cache.len();
-    cache.retain(|path, _| active_agent_paths.contains(path));
+    // A status belongs to a repository root, even when its agent path is unchanged.
+    cache.retain(|path, _| {
+        current_roots.contains_key(path) && previous_roots.get(path) == current_roots.get(path)
+    });
     let mut changed = cache.len() != before;
     let mut missing = Vec::new();
     for (root, worktree) in current {
-        let existing = root_statuses.get(root).cloned().or_else(|| {
-            worktree
-                .agent_paths
-                .iter()
-                .find_map(|path| cache.get(path).cloned())
-        });
-        if let Some(status) = existing {
+        if let Some(status) = root_statuses.get(root) {
             for path in &worktree.agent_paths {
                 if !cache.contains_key(path) {
                     cache.insert(path.clone(), status.clone());
@@ -743,6 +779,23 @@ struct ResolvedGitWorktree {
     agent_paths: Vec<PathBuf>,
     is_stale: bool,
     is_focused: bool,
+}
+
+const GIT_ROOT_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Expire both positive and negative discoveries independently of agent updates.
+fn expire_git_roots(
+    roots_by_agent: &mut HashMap<PathBuf, Option<PathBuf>>,
+    last_revalidation: &mut Instant,
+    now: Instant,
+) -> bool {
+    if now.saturating_duration_since(*last_revalidation) < GIT_ROOT_REVALIDATION_INTERVAL {
+        return false;
+    }
+    *last_revalidation = now;
+    let expired = !roots_by_agent.is_empty();
+    roots_by_agent.clear();
+    expired
 }
 
 /// Resolve agent directories to verified worktree roots and group shared roots.
@@ -1230,7 +1283,7 @@ fn spawn_git_worker(
         let mut last_maintenance = Instant::now();
         let mut last_audit = Instant::now();
         let mut last_recovery = Instant::now() - Duration::from_secs(30);
-        let mut last_negative_retry = Instant::now();
+        let mut last_root_revalidation = Instant::now();
         let mut recovery_due = false;
         let mut watcher_degraded = watcher.is_none();
         let debounce_duration = Duration::from_millis(300);
@@ -1298,61 +1351,47 @@ fn spawn_git_worker(
                 thread::sleep(Duration::from_secs(1));
             }
 
-            if last_negative_retry.elapsed() >= Duration::from_secs(30) {
-                last_negative_retry = Instant::now();
-                if roots_by_agent.values().any(Option::is_none) {
-                    roots_by_agent.retain(|_, root| root.is_some());
-                    active_entries.clear();
-                }
-            }
+            let roots_expired = expire_git_roots(
+                &mut roots_by_agent,
+                &mut last_root_revalidation,
+                Instant::now(),
+            );
 
             let mut latest_entries = None;
             while let Ok(entries) = rx.try_recv() {
                 latest_entries = Some(entries);
             }
-            if let Some(mut entries) = latest_entries {
+            let entries_changed = if let Some(mut entries) = latest_entries {
                 entries.sort();
-                if entries != active_entries {
-                    let previous = std::mem::take(&mut resolved_worktrees);
-                    active_entries = entries;
-                    resolved_worktrees =
-                        resolve_git_worktrees_cached(&active_entries, &mut roots_by_agent);
+                let changed = entries != active_entries;
+                active_entries = entries;
+                changed
+            } else {
+                false
+            };
+            if entries_changed || roots_expired {
+                let current = resolve_git_worktrees_cached(&active_entries, &mut roots_by_agent);
+                if current != resolved_worktrees {
+                    let previous = std::mem::replace(&mut resolved_worktrees, current);
                     unique_active = resolved_worktrees.keys().cloned().collect();
                     unique_active.sort();
                     let unique_set: HashSet<PathBuf> = unique_active.iter().cloned().collect();
+                    gitignores.retain(|path, _| unique_set.contains(path));
+                    ignored_tracked_paths.retain(|path, _| unique_set.contains(path));
+                    pending_worktrees.retain(|path, _| unique_set.contains(path));
+                    last_refreshed.retain(|path, _| unique_set.contains(path));
                     if let Some(ref mut active_watcher) = watcher {
-                        let removed: Vec<PathBuf> = worktree_watches
-                            .keys()
-                            .filter(|path| !unique_set.contains(*path))
-                            .cloned()
-                            .collect();
-                        for path in removed {
-                            detach_worktree_watches(
-                                active_watcher,
-                                &path,
-                                &mut worktree_watches,
-                                &mut watch_to_worktrees,
-                            );
-                            watch_complete.remove(&path);
-                            gitignores.remove(&path);
-                            ignored_tracked_paths.remove(&path);
-                            pending_worktrees.remove(&path);
-                            last_refreshed.remove(&path);
-                        }
-
-                        for path in &unique_active {
-                            if !worktree_watches.contains_key(path) {
-                                replace_worktree_watches(
-                                    active_watcher,
-                                    path,
-                                    &mut worktree_watches,
-                                    &mut watch_complete,
-                                    &mut watch_to_worktrees,
-                                );
-                                gitignores.insert(path.clone(), build_gitignore(path));
-                                ignored_tracked_paths
-                                    .insert(path.clone(), load_ignored_tracked_paths(path));
-                            }
+                        let added = reconcile_worktree_watches(
+                            active_watcher,
+                            &unique_active,
+                            &mut worktree_watches,
+                            &mut watch_complete,
+                            &mut watch_to_worktrees,
+                        );
+                        for path in added {
+                            gitignores.insert(path.clone(), build_gitignore(&path));
+                            ignored_tracked_paths
+                                .insert(path.clone(), load_ignored_tracked_paths(&path));
                         }
                     }
 
@@ -3073,6 +3112,262 @@ mod tests {
         assert!(missing.is_empty());
         assert_eq!(cache, HashMap::from([(nested, status)]));
         assert!(!cache.contains_key(&old_path));
+    }
+
+    #[test]
+    fn positive_root_cache_rediscovers_nested_repository() {
+        for keep_parent_agent in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let parent = dir.path().join("parent");
+            let child = parent.join("child");
+            init_repo(&parent);
+            run_git(&parent, &["symbolic-ref", "HEAD", "refs/heads/parent"]);
+            std::fs::create_dir(&child).unwrap();
+            let parent = parent.canonicalize().unwrap();
+            let child = child.canonicalize().unwrap();
+            let mut entries = vec![GitWorkerPath {
+                path: child.clone(),
+                is_stale: false,
+                is_focused: false,
+            }];
+            if keep_parent_agent {
+                entries.push(GitWorkerPath {
+                    path: parent.clone(),
+                    is_stale: true,
+                    is_focused: false,
+                });
+            }
+            let mut roots = HashMap::new();
+            let initial = resolve_git_worktrees_cached(&entries, &mut roots);
+            assert_eq!(initial.len(), 1);
+            assert!(initial.contains_key(&parent));
+            let cache: GitCache = Arc::new(Mutex::new(HashMap::new()));
+            assert!(refresh_git_status(
+                &parent,
+                &initial[&parent].agent_paths,
+                &cache
+            ));
+            assert_eq!(
+                cache.lock().unwrap()[&child].branch.as_deref(),
+                Some("parent")
+            );
+
+            let mut watcher = notify::RecommendedWatcher::new(
+                |_: notify::Result<notify::Event>| {},
+                mutation_watcher_config(),
+            )
+            .unwrap();
+            let mut watches = HashMap::new();
+            let mut complete = HashMap::new();
+            let mut reverse = HashMap::new();
+            reconcile_worktree_watches(
+                &mut watcher,
+                std::slice::from_ref(&parent),
+                &mut watches,
+                &mut complete,
+                &mut reverse,
+            );
+
+            init_repo(&child);
+            run_git(&child, &["symbolic-ref", "HEAD", "refs/heads/child"]);
+            assert_eq!(
+                crate::git::get_repo_root_for(&child)
+                    .unwrap()
+                    .canonicalize()
+                    .unwrap(),
+                child,
+            );
+            let start = Instant::now();
+            let mut last_revalidation = start;
+            assert!(!expire_git_roots(
+                &mut roots,
+                &mut last_revalidation,
+                start + GIT_ROOT_REVALIDATION_INTERVAL - Duration::from_millis(1),
+            ));
+            assert_eq!(resolve_git_worktrees_cached(&entries, &mut roots), initial);
+            assert!(expire_git_roots(
+                &mut roots,
+                &mut last_revalidation,
+                start + GIT_ROOT_REVALIDATION_INTERVAL,
+            ));
+            let resolved = resolve_git_worktrees_cached(&entries, &mut roots);
+            assert!(resolved.contains_key(&child));
+            assert_eq!(resolved.contains_key(&parent), keep_parent_agent);
+            let (changed, missing) =
+                reconcile_git_cache(&initial, &resolved, &mut cache.lock().unwrap());
+            assert!(changed);
+            assert_eq!(missing, vec![child.clone()]);
+            assert!(!cache.lock().unwrap().contains_key(&child));
+
+            let active = resolved.keys().cloned().collect::<Vec<_>>();
+            assert_eq!(
+                reconcile_worktree_watches(
+                    &mut watcher,
+                    &active,
+                    &mut watches,
+                    &mut complete,
+                    &mut reverse,
+                ),
+                vec![child.clone()]
+            );
+            assert_eq!(watches.contains_key(&parent), keep_parent_agent);
+            assert_eq!(complete.contains_key(&parent), keep_parent_agent);
+            assert!(complete[&child]);
+            assert!(reverse[&child.join(".git")].contains(&child));
+            assert_eq!(
+                reverse.values().any(|roots| roots.contains(&parent)),
+                keep_parent_agent
+            );
+            assert!(find_worktrees_for_path(&child.join(".git/HEAD"), &reverse).contains(&child));
+            assert!(refresh_git_status(
+                &child,
+                &resolved[&child].agent_paths,
+                &cache
+            ));
+            assert_eq!(
+                cache.lock().unwrap()[&child].branch.as_deref(),
+                Some("child")
+            );
+            assert!(
+                reconcile_worktree_watches(
+                    &mut watcher,
+                    &active,
+                    &mut watches,
+                    &mut complete,
+                    &mut reverse,
+                )
+                .is_empty()
+            );
+            let (changed, missing) =
+                reconcile_git_cache(&resolved, &resolved, &mut cache.lock().unwrap());
+            assert!(!changed);
+            assert!(missing.is_empty());
+
+            std::fs::remove_dir_all(child.join(".git")).unwrap();
+            assert!(expire_git_roots(
+                &mut roots,
+                &mut last_revalidation,
+                start + GIT_ROOT_REVALIDATION_INTERVAL * 2,
+            ));
+            let merged = resolve_git_worktrees_cached(&entries, &mut roots);
+            assert_eq!(merged, initial);
+            let (changed, missing) =
+                reconcile_git_cache(&resolved, &merged, &mut cache.lock().unwrap());
+            assert!(changed);
+            if keep_parent_agent {
+                assert!(missing.is_empty());
+            } else {
+                assert_eq!(missing, vec![parent.clone()]);
+                assert!(refresh_git_status(
+                    &parent,
+                    &merged[&parent].agent_paths,
+                    &cache
+                ));
+            }
+            assert_eq!(
+                cache.lock().unwrap()[&child].branch.as_deref(),
+                Some("parent")
+            );
+            reconcile_worktree_watches(
+                &mut watcher,
+                std::slice::from_ref(&parent),
+                &mut watches,
+                &mut complete,
+                &mut reverse,
+            );
+            assert!(!watches.contains_key(&child));
+            assert!(!complete.contains_key(&child));
+            assert!(!reverse.values().any(|roots| roots.contains(&child)));
+            assert!(reverse[&parent.join(".git")].contains(&parent));
+        }
+    }
+
+    #[test]
+    fn git_worker_revalidates_roots_without_path_updates() {
+        struct StopWorker(Arc<AtomicBool>);
+        impl Drop for StopWorker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("parent");
+        let child = parent.join("child");
+        init_repo(&parent);
+        run_git(&parent, &["symbolic-ref", "HEAD", "refs/heads/parent"]);
+        std::fs::create_dir(&child).unwrap();
+        let term = Arc::new(AtomicBool::new(false));
+        let _stop = StopWorker(term.clone());
+        let dirty = Arc::new(AtomicBool::new(false));
+        let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+        let (cache, paths_tx) = spawn_git_worker(term, dirty.clone(), wake_tx);
+        paths_tx
+            .send(vec![GitWorkerPath {
+                path: child.clone(),
+                is_stale: true,
+                is_focused: false,
+            }])
+            .unwrap();
+
+        let wait_for_branch = |branch: &str, timeout: Duration| {
+            let deadline = Instant::now() + timeout;
+            loop {
+                if cache
+                    .lock()
+                    .unwrap()
+                    .get(&child)
+                    .is_some_and(|status| status.branch.as_deref() == Some(branch))
+                    && dirty.load(Ordering::Relaxed)
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "worker did not publish branch {branch}"
+                );
+                let _ = wake_rx.recv_timeout(Duration::from_millis(50));
+            }
+        };
+        wait_for_branch("parent", Duration::from_secs(5));
+        dirty.store(false, Ordering::Relaxed);
+        while wake_rx.try_recv().is_ok() {}
+        init_repo(&child);
+        run_git(&child, &["symbolic-ref", "HEAD", "refs/heads/child"]);
+        // The worker must rediscover this root without another path-channel message.
+        wait_for_branch(
+            "child",
+            GIT_ROOT_REVALIDATION_INTERVAL + Duration::from_secs(5),
+        );
+    }
+
+    #[test]
+    fn root_revalidation_retries_negative_discoveries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        let entries = [GitWorkerPath {
+            path: path.clone(),
+            is_stale: true,
+            is_focused: false,
+        }];
+        let mut roots = HashMap::new();
+        assert!(resolve_git_worktrees_cached(&entries, &mut roots).is_empty());
+        init_repo(&path);
+        let start = Instant::now();
+        let mut last_revalidation = start;
+        assert!(expire_git_roots(
+            &mut roots,
+            &mut last_revalidation,
+            start + GIT_ROOT_REVALIDATION_INTERVAL,
+        ));
+        let resolved = resolve_git_worktrees_cached(&entries, &mut roots);
+        assert!(resolved.contains_key(&path));
+        assert!(!expire_git_roots(
+            &mut roots,
+            &mut last_revalidation,
+            start + GIT_ROOT_REVALIDATION_INTERVAL + Duration::from_secs(1),
+        ));
+        assert_eq!(resolve_git_worktrees_cached(&entries, &mut roots), resolved);
     }
 
     #[test]
