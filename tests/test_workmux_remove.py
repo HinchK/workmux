@@ -1132,18 +1132,21 @@ def test_deferred_remove_cleans_up_after_final_tmux_window_closes(
         ["git", "worktree", "list", "--porcelain"], cwd=mux_repo_path
     ).stdout
     assert str(worktree_path) not in registered
-    metadata = env.run_command(
-        [
-            "git",
-            "config",
-            "--local",
-            "--get-regexp",
-            f"^workmux\\.worktree\\.{branch_name}\\.",
-        ],
-        cwd=mux_repo_path,
-        check=False,
+    assert poll_until(
+        lambda: env.run_command(
+            [
+                "git",
+                "config",
+                "--local",
+                "--get-regexp",
+                f"^workmux\\.worktree\\.{branch_name}\\.",
+            ],
+            cwd=mux_repo_path,
+            check=False,
+        ).returncode
+        != 0,
+        timeout=10.0,
     )
-    assert metadata.returncode != 0
     assert env.tmux(["has-session"], check=False).returncode != 0
 
 
