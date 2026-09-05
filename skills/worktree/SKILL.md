@@ -35,8 +35,11 @@ For each task:
 The prompt file should:
 
 - Include the full task description
-- Use RELATIVE paths only (never absolute paths, since each worktree has its own
-  root directory)
+- Use relative paths for files inside the repository, since each worktree has
+  its own root directory
+- Preserve user-provided attachment paths verbatim, including absolute paths to
+  screenshots or other files outside the repository, and tell the agent to
+  inspect them
 - Be specific about what the agent should accomplish
 
 ## Skill delegation
@@ -59,6 +62,17 @@ Do NOT write detailed implementation steps when a skill is specified — the ski
 handles that.
 
 ## Flags
+
+**`-a <model>` / `--agent <model>`**: Select the agent for the worktree. Remove
+this flag and its value from the task description, and pass them to every
+`workmux add` command as `--agent <model>`. This flag configures workmux and must
+not appear in the implementation prompt.
+
+For example, `/skill:worktree -a gemini implement feature X` runs:
+
+```bash
+workmux add feature-x -b -P <prompt-file> --agent gemini
+```
 
 **`--merge`**: When passed, add instruction to use `/merge` skill at the end to
 commit, rebase, and merge the branch.
