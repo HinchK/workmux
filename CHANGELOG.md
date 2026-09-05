@@ -24,9 +24,9 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 ## v0.1.255 (2026-09-05)
 
 - Improve sidebar performance without sacrificing responsiveness:
-  - Cut Git CPU by 74% across 30 repositories.
-  - Cut GitHub refresh CPU by 60% across five repositories.
-  - Cut tmux server CPU by 26% on a 217-pane server.
+  - Cut background Git status CPU by 74% in benchmarks.
+  - Cut GitHub status refresh CPU by 60% in benchmarks.
+  - Cut tmux observation CPU by 26% in a large-session benchmark.
 - Show accurate Git status for agents in nested directories, shared repositories,
   and linked worktrees while ignoring directories outside Git repositories.
 - Keep agent sessions available to resurrect after multiplexer restarts and
