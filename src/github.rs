@@ -1068,8 +1068,8 @@ fn parse_remote_query(
     for (branch_index, branch) in remote.branches.iter().enumerate() {
         let pr_alias = format!("pr_r{repo_index}_b{branch_index}");
         let ref_alias = format!("ref_r{repo_index}_b{branch_index}");
-        let direct_error = errors.iter().any(|error| {
-            error.path.len() == 2
+        let branch_error = errors.iter().any(|error| {
+            error.path.len() >= 2
                 && error.path.first().and_then(serde_json::Value::as_str)
                     == Some(repo_alias.as_str())
                 && error
@@ -1078,7 +1078,7 @@ fn parse_remote_query(
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|alias| alias == pr_alias || alias == ref_alias)
         });
-        if direct_error {
+        if branch_error {
             continue;
         }
         let (Some(pr_value), Some(ref_value)) = (repo.get(&pr_alias), repo.get(&ref_alias)) else {
@@ -1866,8 +1866,7 @@ mod tests {
                 }
             },
             "errors": [
-                { "message": "hidden", "path": ["repo_0"] },
-                { "message": "nested", "path": ["repo_1", "pr_r1_b0", "nodes", 0, "commits"] }
+                { "message": "hidden", "path": ["repo_0"] }
             ]
         }))
         .unwrap();
@@ -1891,6 +1890,92 @@ mod tests {
                 checks: None,
             })
         );
+    }
+
+    #[test]
+    fn batch_parser_leaves_nested_failed_branch_unanswered_and_keeps_siblings() {
+        let successful_commit = serde_json::json!({
+            "statusCheckRollup": {
+                "contexts": {
+                    "nodes": [{
+                        "__typename": "CheckRun",
+                        "name": "test",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "startedAt": null
+                    }]
+                }
+            }
+        });
+        for failed_alias in ["pr_r0_b0", "ref_r0_b0"] {
+            let failed_commit = serde_json::json!({ "statusCheckRollup": null });
+            let (pr_commit, ref_commit, path) = if failed_alias == "pr_r0_b0" {
+                (
+                    &failed_commit,
+                    &successful_commit,
+                    serde_json::json!([
+                        "repo_0",
+                        failed_alias,
+                        "nodes",
+                        0,
+                        "commits",
+                        "nodes",
+                        0,
+                        "commit",
+                        "statusCheckRollup"
+                    ]),
+                )
+            } else {
+                (
+                    &successful_commit,
+                    &failed_commit,
+                    serde_json::json!(["repo_0", failed_alias, "target", "statusCheckRollup"]),
+                )
+            };
+            let response: BatchGraphqlResponse = serde_json::from_value(serde_json::json!({
+                "data": {
+                    "repo_0": {
+                        "pr_r0_b0": { "nodes": [{
+                            "number": 42,
+                            "title": "Feature",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "url": "https://github.com/owner/repo/pull/42",
+                            "commits": { "nodes": [{ "commit": pr_commit }] }
+                        }] },
+                        "ref_r0_b0": { "target": ref_commit },
+                        "pr_r0_b1": { "nodes": [] },
+                        "ref_r0_b1": null
+                    },
+                    "repo_1": {
+                        "pr_r1_b0": { "nodes": [] },
+                        "ref_r1_b0": null
+                    }
+                },
+                "errors": [{ "message": "rollup resolver failed", "path": path }]
+            }))
+            .unwrap();
+            let remotes = [
+                remote_query("one", vec!["failed".to_string(), "healthy".to_string()]),
+                remote_query("two", vec!["healthy".to_string()]),
+            ];
+            let mut response = Some(response);
+            let outcomes = execute_remote_chunk_with(&remotes, &mut |_, _| {
+                Ok(GraphqlCommandResponse {
+                    success: false,
+                    response: response.take().unwrap(),
+                })
+            });
+
+            let first = outcomes[0].as_ref().unwrap();
+            assert!(!first.contains_key("failed"), "{failed_alias}: {first:?}");
+            let healthy = BranchSummary {
+                pr: None,
+                checks: None,
+            };
+            assert_eq!(first.get("healthy"), Some(&healthy));
+            assert_eq!(outcomes[1].as_ref().unwrap().get("healthy"), Some(&healthy));
+        }
     }
 
     #[test]
