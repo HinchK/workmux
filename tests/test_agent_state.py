@@ -654,7 +654,7 @@ def test_status_update_preserves_state_when_tmux_boot_id_is_unavailable(
     tmux_wrapper.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = display-message ] && [ "$2" = -p ] '
-        "&& [ \"$3\" = '#{start_time}' ]; then\n"
+        "&& [ \"$3\" = '#{start_time}:#{pid}' ]; then\n"
         "  exit 1\n"
         "fi\n"
         f'exec {shlex.quote(real_tmux)} "$@"\n'
