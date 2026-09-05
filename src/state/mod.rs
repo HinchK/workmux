@@ -143,7 +143,15 @@ fn persist_agent_snapshot_locked(
     let existing = preserve_existing
         .then(|| {
             store.get_agent(&pane_key).ok().flatten().filter(|state| {
-                mux.name() != "tmux" || (state.pane_pid == live_pid && state.boot_id == boot_id)
+                mux.name() != "tmux"
+                    || (state.pane_pid == live_pid
+                        && state
+                            .boot_id
+                            .as_deref()
+                            .zip(boot_id.as_deref())
+                            .is_some_and(|(stored, current)| {
+                                store::same_server_boot("tmux", stored, current)
+                            }))
             })
         })
         .flatten();

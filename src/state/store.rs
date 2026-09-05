@@ -451,9 +451,15 @@ impl StateStore {
     pub(crate) fn upsert_agent_locked(&self, state: &AgentState) -> Result<()> {
         let path = self.agent_path(&state.pane_key);
         let historical = read_agent_file(&path)?.filter(|existing| {
-            existing.boot_id.is_some()
-                && state.boot_id.is_some()
-                && existing.boot_id != state.boot_id
+            existing
+                .boot_id
+                .as_deref()
+                .zip(state.boot_id.as_deref())
+                .is_some_and(|(stored, current)| {
+                    stored != current
+                        && !(same_server_boot(&state.pane_key.backend, stored, current)
+                            && existing.pane_pid == state.pane_pid)
+                })
         });
         if let Some(existing) = historical.as_ref() {
             self.merge_recovery_locked(
@@ -652,16 +658,6 @@ impl StateStore {
         write_atomic_durable(&path, &content)
     }
 
-    fn save_recovery_manifest_visible_locked(&self, manifest: &RecoveryManifest) -> Result<()> {
-        let path = self.recovery_path(&manifest.backend, &manifest.instance);
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow!("recovery path has no parent"))?;
-        fs::create_dir_all(parent)?;
-        let content = serde_json::to_vec_pretty(manifest)?;
-        write_atomic(&path, &content)
-    }
-
     fn merge_recovery_locked(
         &self,
         backend: &str,
@@ -722,7 +718,7 @@ impl StateStore {
             manifest.last_compacted_boot = Some(boot.to_string());
         }
         let entries = manifest.entries.len();
-        self.save_recovery_manifest_visible_locked(&manifest)?;
+        self.save_recovery_manifest_locked(&manifest)?;
         Ok(entries)
     }
 
@@ -771,7 +767,7 @@ impl StateStore {
             if state
                 .boot_id
                 .as_deref()
-                .is_some_and(|boot| boot != current_boot_id)
+                .is_some_and(|boot| !same_server_boot(backend, boot, current_boot_id))
             {
                 historical.push((path, revision, state));
             } else {
@@ -890,11 +886,26 @@ impl StateStore {
                                     store.load_recovery_manifest_locked(backend, instance)?,
                                 );
                             }
-                            manifests
-                                .get_mut(&key)
-                                .unwrap()
-                                .entries
-                                .retain(|entry| !entry.recent_sources.contains(source.as_ref()));
+                            manifests.get_mut(&key).unwrap().entries.retain(|entry| {
+                                // A workdir entry can include history outside this plan.
+                                // Recent source membership alone does not authorize deletion.
+                                let fully_planned = entry.pending_sources.is_empty()
+                                    && entry.source_count == entry.recent_sources.len()
+                                    && entry.recent_sources.iter().all(|recent| {
+                                        sources.iter().any(|planned| {
+                                            matches!(planned,
+                                                    AgentStateSource::Flat {
+                                                        backend: planned_backend,
+                                                        instance: planned_instance,
+                                                        source: planned_source,
+                                                        ..
+                                                    } if planned_backend == backend
+                                                        && planned_instance == instance
+                                                        && planned_source.as_ref() == recent)
+                                        })
+                                    });
+                                !(fully_planned && entry.recent_sources.contains(source.as_ref()))
+                            });
                         }
                     }
                     AgentStateSource::Recovery {
@@ -1346,7 +1357,7 @@ impl StateStore {
 
             let pane_id = &state.pane_key.pane_id;
             let previous_server =
-                server_lifecycle_changed(state.boot_id.as_deref(), current_boot_id);
+                server_lifecycle_changed(backend, state.boot_id.as_deref(), current_boot_id);
             match live_pane {
                 Some(_) if previous_server => {
                     trace!(
@@ -1459,8 +1470,22 @@ impl StateStore {
     }
 }
 
-fn server_lifecycle_changed(stored: Option<&str>, current: Option<&str>) -> bool {
-    stored.is_some() && stored != current
+/// Legacy tmux IDs identify a possible matching server by start time alone.
+/// Callers merging pane state must also verify the pane PID.
+pub(super) fn same_server_boot(backend: &str, stored: &str, current: &str) -> bool {
+    stored == current
+        || (backend == "tmux"
+            && !stored.is_empty()
+            && stored.bytes().all(|byte| byte.is_ascii_digit())
+            && current.split_once(':').is_some_and(|(start, pid)| {
+                start == stored && !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
+            }))
+}
+
+fn server_lifecycle_changed(backend: &str, stored: Option<&str>, current: Option<&str>) -> bool {
+    stored.is_some_and(|stored| {
+        current.is_none_or(|current| !same_server_boot(backend, stored, current))
+    })
 }
 
 fn tmux_auto_renamed_windows(
@@ -1565,11 +1590,19 @@ mod tests {
 
     #[test]
     fn test_previous_server_lifecycle_requires_stored_boot_id() {
-        assert!(server_lifecycle_changed(Some("old"), Some("current")));
-        assert!(server_lifecycle_changed(Some("old"), None));
-        assert!(!server_lifecycle_changed(Some("current"), Some("current")));
-        assert!(!server_lifecycle_changed(None, Some("current")));
-        assert!(!server_lifecycle_changed(None, None));
+        assert!(server_lifecycle_changed(
+            "tmux",
+            Some("old"),
+            Some("current")
+        ));
+        assert!(server_lifecycle_changed("tmux", Some("old"), None));
+        assert!(!server_lifecycle_changed(
+            "tmux",
+            Some("current"),
+            Some("current")
+        ));
+        assert!(!server_lifecycle_changed("tmux", None, Some("current")));
+        assert!(!server_lifecycle_changed("tmux", None, None));
     }
 
     #[test]
@@ -2466,5 +2499,138 @@ mod tests {
             update.stats.reads,
             update.stats.parses,
         );
+    }
+
+    #[test]
+    fn legacy_tmux_boot_matches_only_a_valid_same_start_time() {
+        assert!(same_server_boot("tmux", "1700000000", "1700000000:42"));
+        assert!(!same_server_boot("tmux", "1700000000", "1700000001:42"));
+        assert!(!same_server_boot("tmux", "1700000000:41", "1700000000:42"));
+        assert!(!same_server_boot("tmux", "1700000000", "1700000000:"));
+        assert!(!same_server_boot(
+            "tmux",
+            "1700000000",
+            "1700000000:unknown"
+        ));
+        assert!(!same_server_boot("tmux", "unknown", "unknown:42"));
+        assert!(!same_server_boot("wezterm", "1700000000", "1700000000:42"));
+        assert!(!server_lifecycle_changed(
+            "tmux",
+            Some("1700000000"),
+            Some("1700000000:42")
+        ));
+    }
+
+    #[test]
+    fn compaction_retains_same_start_legacy_tmux_records() {
+        let (store, _dir) = test_store();
+        let legacy = context_state("tmux", "default", 1, Some("1700000000"), 1);
+        let older = context_state("tmux", "default", 2, Some("1699999999"), 2);
+        write_raw_agent(&store, &legacy);
+        write_raw_agent(&store, &older);
+        let stats = store
+            .compact_context("tmux", "default", Some("1700000000:42"))
+            .unwrap();
+        assert_eq!(stats.compacted, 1);
+        assert_eq!(stats.retained_flat, 1);
+        assert!(store.get_agent(&legacy.pane_key).unwrap().is_some());
+        assert!(store.get_agent(&older.pane_key).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_boot_upgrade_archives_only_a_different_pane_process() {
+        for same_pid in [true, false] {
+            let (store, _dir) = test_store();
+            let legacy = context_state("tmux", "default", 1, Some("1700000000"), 1);
+            write_raw_agent(&store, &legacy);
+            let mut current = legacy.clone();
+            current.boot_id = Some("1700000000:42".to_string());
+            if !same_pid {
+                current.pane_pid += 1;
+            }
+            store.upsert_agent(&current).unwrap();
+            let manifest = store
+                .load_recovery_manifest_locked("tmux", "default")
+                .unwrap();
+            assert_eq!(manifest.entries.len(), usize::from(!same_pid));
+        }
+    }
+
+    #[test]
+    fn flat_consumption_preserves_unplanned_compacted_sources() {
+        let (store, _dir) = test_store();
+        let mut planned = context_state("tmux", "default", 1, Some("old"), 1);
+        planned.command = "claude".to_string();
+        write_raw_agent(&store, &planned);
+        let sources: Vec<_> = store
+            .resurrection_snapshot("tmux", "default")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.source)
+            .collect();
+        let mut unplanned = context_state("tmux", "default", 2, Some("old"), 1);
+        unplanned.command = "codex".to_string();
+        store.upsert_agent(&unplanned).unwrap();
+        store
+            .compact_context("tmux", "default", Some("current"))
+            .unwrap();
+        store.consume_agent_sources(&sources).unwrap();
+        let remaining = store.resurrection_snapshot("tmux", "default").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].represented_count, 2);
+        assert_eq!(remaining[0].state.command, "codex");
+    }
+
+    #[test]
+    fn flat_consumption_removes_a_fully_planned_compaction_batch() {
+        let (store, _dir) = test_store();
+        for pane in 1..=2 {
+            write_raw_agent(
+                &store,
+                &context_state("tmux", "default", pane, Some("old"), 1),
+            );
+        }
+        let sources: Vec<_> = store
+            .resurrection_snapshot("tmux", "default")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.source)
+            .collect();
+        store
+            .compact_context("tmux", "default", Some("current"))
+            .unwrap();
+        store.consume_agent_sources(&sources).unwrap();
+        assert!(
+            store
+                .resurrection_snapshot("tmux", "default")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn flat_consumption_preserves_history_outside_the_recent_batch() {
+        let (store, _dir) = test_store();
+        write_raw_agent(&store, &context_state("tmux", "default", 1, Some("old"), 1));
+        store
+            .compact_context("tmux", "default", Some("middle"))
+            .unwrap();
+        write_raw_agent(
+            &store,
+            &context_state("tmux", "default", 2, Some("middle"), 1),
+        );
+        let sources: Vec<_> = store
+            .resurrection_snapshot("tmux", "default")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.source)
+            .collect();
+        store
+            .compact_context("tmux", "default", Some("current"))
+            .unwrap();
+        store.consume_agent_sources(&sources).unwrap();
+        let remaining = store.resurrection_snapshot("tmux", "default").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].represented_count, 2);
     }
 }

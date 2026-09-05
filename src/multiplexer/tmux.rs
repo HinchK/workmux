@@ -1458,8 +1458,8 @@ impl Multiplexer for TmuxBackend {
 
     fn server_boot_id(&self) -> Result<Option<String>> {
         // Server start time plus PID distinguishes rapid restarts while remaining
-        // stable for the server lifetime. Legacy start-time-only IDs compare as
-        // an earlier lifecycle and remain valid recovery input.
+        // stable for the server lifetime. Legacy start-time-only IDs require
+        // pane PID validation when merging state from the same start time.
         self.tmux_query(&["display-message", "-p", server_boot_format!()])
             .map(|s| {
                 let trimmed = s.trim().to_string();
