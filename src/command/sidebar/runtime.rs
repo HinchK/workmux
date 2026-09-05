@@ -13,7 +13,7 @@ use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cmd::Cmd;
 use crate::multiplexer::{create_backend, detect_backend};
@@ -108,6 +108,7 @@ pub fn run_sidebar() -> Result<()> {
     let mut needs_clear = false;
     let startup = std::time::Instant::now();
     let startup_grace = Duration::from_secs(3);
+    let mut last_pane_check = LastPaneCheck::new(startup + startup_grace);
     let mut last_refresh = std::time::Instant::now();
 
     loop {
@@ -139,18 +140,14 @@ pub fn run_sidebar() -> Result<()> {
             (None, None) => Duration::from_secs(3600),
         };
 
+        // The startup recheck has one deadline, even if snapshots are deduplicated.
+        let timeout = last_pane_check
+            .timeout(Instant::now())
+            .map_or(timeout, |grace| timeout.min(grace));
+
         let first_event = match rx.recv_timeout(timeout) {
             Ok(ev) => Some(ev),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                app.process_pending_resize(&startup, startup_grace);
-                advance_refresh_if_due(
-                    &mut app,
-                    &mut last_refresh,
-                    refresh_interval,
-                    &mut needs_render,
-                );
-                continue;
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 tracing::info!("sidebar-run exiting: event channel disconnected");
                 break;
@@ -163,8 +160,7 @@ pub fn run_sidebar() -> Result<()> {
                 ev,
                 &mut app,
                 &snapshot_handle,
-                &startup,
-                startup_grace,
+                &mut last_pane_check,
                 &mut needs_render,
                 &mut needs_clear,
             );
@@ -176,11 +172,16 @@ pub fn run_sidebar() -> Result<()> {
                 ev,
                 &mut app,
                 &snapshot_handle,
-                &startup,
-                startup_grace,
+                &mut last_pane_check,
                 &mut needs_render,
                 &mut needs_clear,
             );
+        }
+
+        if last_pane_check.grace_expired(Instant::now())
+            && last_pane_check.should_exit(app.host_identity(), sidebar_is_only_pane)
+        {
+            quit_for_last_pane(&mut app);
         }
 
         // Process any pending resize whose debounce has elapsed
@@ -267,49 +268,76 @@ fn sidebar_is_only_pane(window_id: &str, pane_id: &str) -> bool {
         .is_ok_and(|output| sole_pane_is_sidebar(&output, pane_id))
 }
 
-fn should_exit_for_last_pane(
-    startup_grace_elapsed: bool,
-    identity: Option<&HostIdentity>,
-    pane_counts: &std::collections::HashMap<String, usize>,
-    verify_live_panes: impl FnOnce(&str, &str) -> bool,
-) -> bool {
-    if !startup_grace_elapsed {
-        return false;
-    }
-    let Some(identity) = identity else {
-        return false;
-    };
+struct LastPaneCheck {
+    grace_deadline: Option<Instant>,
+    pane_count: Option<usize>,
+}
 
-    pane_counts.get(&identity.window_id).copied().unwrap_or(2) <= 1
-        && verify_live_panes(&identity.window_id, &identity.pane_id)
+impl LastPaneCheck {
+    fn new(grace_deadline: Instant) -> Self {
+        Self {
+            grace_deadline: Some(grace_deadline),
+            pane_count: None,
+        }
+    }
+
+    fn timeout(&self, now: Instant) -> Option<Duration> {
+        self.grace_deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    /// Consume the startup deadline once, including when input wakes the loop.
+    fn grace_expired(&mut self, now: Instant) -> bool {
+        if self.grace_deadline.is_some_and(|deadline| now >= deadline) {
+            self.grace_deadline = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn should_exit(
+        &self,
+        identity: Option<&HostIdentity>,
+        verify_live_panes: impl FnOnce(&str, &str) -> bool,
+    ) -> bool {
+        if self.grace_deadline.is_some() || self.pane_count.is_none_or(|count| count > 1) {
+            return false;
+        }
+        let Some(identity) = identity else {
+            return false;
+        };
+        verify_live_panes(&identity.window_id, &identity.pane_id)
+    }
+}
+
+fn quit_for_last_pane(app: &mut SidebarApp) {
+    let window_id = app.host_window_id().unwrap_or("unknown");
+    app.quit_reason = Some(format!(
+        "last-pane: sidebar is sole pane in window {}",
+        window_id
+    ));
+    app.quit_silent = true;
+    app.should_quit = true;
 }
 
 fn process_event(
     event: AppEvent,
     app: &mut SidebarApp,
     snapshot_handle: &client::SnapshotHandle,
-    startup: &std::time::Instant,
-    startup_grace: Duration,
+    last_pane_check: &mut LastPaneCheck,
     needs_render: &mut bool,
     needs_clear: &mut bool,
 ) {
     match event {
         AppEvent::SnapshotReady => {
             if let Some(snapshot) = snapshot_handle.take() {
-                let last_pane = should_exit_for_last_pane(
-                    startup.elapsed() > startup_grace,
-                    app.host_identity(),
-                    &snapshot.window_pane_counts,
-                    sidebar_is_only_pane,
-                );
-                if last_pane {
-                    let window_id = app.host_window_id().unwrap_or("unknown");
-                    app.quit_reason = Some(format!(
-                        "last-pane: sidebar is sole pane in window {}",
-                        window_id
-                    ));
-                    app.quit_silent = true;
-                    app.should_quit = true;
+                last_pane_check.pane_count = app
+                    .host_window_id()
+                    .and_then(|window_id| snapshot.window_pane_counts.get(window_id))
+                    .copied();
+                if last_pane_check.should_exit(app.host_identity(), sidebar_is_only_pane) {
+                    quit_for_last_pane(app);
                 }
                 app.apply_snapshot(snapshot);
                 *needs_render = true;
@@ -401,47 +429,87 @@ mod tests {
     }
 
     #[test]
+    fn startup_recheck_exits_without_another_snapshot() {
+        let identity = test_identity();
+        let startup = Instant::now();
+        let grace = Duration::from_secs(3);
+        let mut check = LastPaneCheck::new(startup + grace);
+        check.pane_count = Some(1);
+
+        assert_eq!(check.timeout(startup), Some(grace));
+        assert!(!check.grace_expired(startup + grace - Duration::from_nanos(1)));
+        assert!(!check.should_exit(Some(&identity), |_, _| {
+            panic!("startup grace must skip live verification")
+        }));
+
+        assert_eq!(check.timeout(startup + grace), Some(Duration::ZERO));
+        assert!(check.grace_expired(startup + grace));
+        assert!(check.should_exit(Some(&identity), |window, pane| {
+            window == "@42" && pane == "%12"
+        }));
+        assert_eq!(check.timeout(startup + grace), None);
+        assert!(!check.grace_expired(startup + grace + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn startup_recheck_live_verifies_stale_snapshot_only_once() {
+        let identity = test_identity();
+        let deadline = Instant::now();
+        let mut check = LastPaneCheck::new(deadline);
+        check.pane_count = Some(1);
+        let mut live_checks = 0;
+
+        for now in [deadline, deadline + Duration::from_secs(60)] {
+            if check.grace_expired(now) {
+                assert!(!check.should_exit(Some(&identity), |_, _| {
+                    live_checks += 1;
+                    false
+                }));
+            }
+        }
+        assert_eq!(live_checks, 1);
+        assert_eq!(check.timeout(deadline), None);
+    }
+
+    #[test]
+    fn startup_recheck_uses_latest_snapshot_count() {
+        let identity = test_identity();
+        let deadline = Instant::now();
+        let mut check = LastPaneCheck::new(deadline);
+        check.pane_count = Some(1);
+        check.pane_count = Some(2);
+        assert!(check.grace_expired(deadline));
+        assert!(!check.should_exit(Some(&identity), |_, _| {
+            panic!("content pane created during grace must skip live verification")
+        }));
+        assert_eq!(check.timeout(deadline), None);
+
+        // Snapshot-driven checks remain available after the one-shot deadline.
+        check.pane_count = Some(1);
+        assert!(check.should_exit(Some(&identity), |_, _| true));
+    }
+
+    #[test]
     fn last_pane_exit_requires_snapshot_and_live_confirmation() {
         let identity = test_identity();
-        let one_pane = std::collections::HashMap::from([("@42".to_string(), 1)]);
-        let two_panes = std::collections::HashMap::from([("@42".to_string(), 2)]);
+        let deadline = Instant::now();
+        let mut check = LastPaneCheck::new(deadline);
+        assert!(check.grace_expired(deadline));
 
-        assert!(!should_exit_for_last_pane(
-            false,
-            Some(&identity),
-            &one_pane,
-            |_, _| panic!("startup grace must skip live verification")
-        ));
-        assert!(!should_exit_for_last_pane(
-            true,
-            None,
-            &one_pane,
-            |_, _| panic!("missing identity must skip live verification")
-        ));
-        assert!(!should_exit_for_last_pane(
-            true,
-            Some(&identity),
-            &std::collections::HashMap::new(),
-            |_, _| panic!("missing count must skip live verification")
-        ));
-        assert!(!should_exit_for_last_pane(
-            true,
-            Some(&identity),
-            &two_panes,
-            |_, _| panic!("multiple panes must skip live verification")
-        ));
-        assert!(!should_exit_for_last_pane(
-            true,
-            Some(&identity),
-            &one_pane,
-            |window_id, pane_id| window_id == "@42" && pane_id != "%12"
-        ));
-        assert!(should_exit_for_last_pane(
-            true,
-            Some(&identity),
-            &one_pane,
-            |window_id, pane_id| window_id == "@42" && pane_id == "%12"
-        ));
+        for count in [None, Some(2)] {
+            check.pane_count = count;
+            assert!(!check.should_exit(Some(&identity), |_, _| {
+                panic!("missing count or multiple panes must skip live verification")
+            }));
+        }
+        check.pane_count = Some(1);
+        assert!(!check.should_exit(None, |_, _| {
+            panic!("missing identity must skip live verification")
+        }));
+        assert!(!check.should_exit(Some(&identity), |_, _| false));
+        assert!(check.should_exit(Some(&identity), |window, pane| {
+            window == "@42" && pane == "%12"
+        }));
     }
 
     #[test]
