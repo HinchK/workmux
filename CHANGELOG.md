@@ -21,19 +21,16 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.255 (2026-09-05)
 
-- Bound historical agent state across multiplexer restarts while preserving
-  resurrection recovery and avoiding repeated sidebar parsing.
-- Reduce sidebar tmux overhead without delaying status updates or inactivity
-  detection.
-- Reduce sidebar background CPU and process churn while keeping GitHub PR and
-  check statuses fresh.
-- Reduce sidebar idle CPU while keeping Git status updates responsive for stale
-  repositories.
-- Avoid redundant sidebar updates and redraws when visible state is unchanged.
-- Keep sidebar Git status accurate for nested agent paths, shared repositories,
-  and linked worktrees while excluding non-repository paths.
+- Improve sidebar performance without sacrificing responsiveness:
+  - Cut Git CPU by 74% across 30 repositories.
+  - Cut GitHub refresh CPU by 60% across five repositories.
+  - Cut tmux server CPU by 26% on a 217-pane server.
+- Show accurate Git status for agents in nested directories, shared repositories,
+  and linked worktrees while ignoring directories outside Git repositories.
+- Keep agent sessions available to resurrect after multiplexer restarts and
+  workmux upgrades without accumulating duplicate history.
 
 ## v0.1.254 (2026-09-03)
 
