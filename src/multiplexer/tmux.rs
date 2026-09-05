@@ -162,20 +162,22 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
         let window_index = fields[11]
             .parse()
             .map_err(|_| anyhow!("tmux returned malformed window index: {:?}", fields[11]))?;
+        let attached_clients: u32 = fields[9].parse().map_err(|_| {
+            anyhow!(
+                "tmux returned malformed attached client count: {:?}",
+                fields[9]
+            )
+        })?;
         if session.is_empty()
             || window_id.is_empty()
             || !matches!(fields[8], "0" | "1")
-            || !matches!(fields[9], "0" | "1")
             || !matches!(fields[10], "0" | "1")
         {
             return Err(anyhow!("tmux returned malformed sidebar state: {record:?}"));
         }
         let status = nonempty(fields[7]);
-        if snapshot.live_panes.contains_key(&pane_id) {
-            return Err(anyhow!(
-                "tmux returned duplicate sidebar pane ID: {pane_id}"
-            ));
-        }
+        // Linked windows appear once per session, but their panes are shared.
+        let first_occurrence = !snapshot.live_panes.contains_key(&pane_id);
         snapshot.live_panes.insert(
             pane_id.clone(),
             LivePaneInfo {
@@ -196,11 +198,13 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
         snapshot
             .pane_window_indexes
             .insert(pane_id.clone(), window_index);
-        *snapshot
-            .window_pane_counts
-            .entry(window_id.clone())
-            .or_default() += 1;
-        if fields[8] == "1" && fields[9] == "1" {
+        if first_occurrence {
+            *snapshot
+                .window_pane_counts
+                .entry(window_id.clone())
+                .or_default() += 1;
+        }
+        if fields[8] == "1" && attached_clients > 0 {
             snapshot.active_windows.insert((session, window_id));
         }
         if fields[10] == "1" {
@@ -1582,6 +1586,44 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_snapshot_accepts_attached_client_counts() {
+        for attached in [0, 1, 2, 10] {
+            let output = format!(
+                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n"
+            );
+            let snapshot = parse_sidebar_snapshot(&output).unwrap();
+            assert_eq!(snapshot.live_panes.len(), 1);
+            assert_eq!(
+                snapshot
+                    .active_windows
+                    .contains(&("main".into(), "@2".into())),
+                attached > 0
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_snapshot_counts_linked_panes_once_and_tracks_each_session() {
+        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%7\x1f12345\x1fnode\x1fAgent\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f1\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f0\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n";
+        let snapshot = parse_sidebar_snapshot(output).unwrap();
+        assert_eq!(snapshot.live_panes.len(), 2);
+        assert_eq!(snapshot.window_pane_counts["@2"], 2);
+        assert_eq!(snapshot.active_windows.len(), 2);
+        assert!(
+            snapshot
+                .active_windows
+                .contains(&("main".into(), "@2".into()))
+        );
+        assert!(
+            snapshot
+                .active_windows
+                .contains(&("other".into(), "@2".into()))
+        );
+        assert_eq!(snapshot.live_panes["%7"].session.as_deref(), Some("other"));
+        assert_eq!(snapshot.pane_window_indexes["%7"], 9);
+    }
+
+    #[test]
     fn sidebar_snapshot_rejects_malformed_records() {
         let error = parse_sidebar_snapshot("\x1e%7\x1f12345\n").unwrap_err();
         assert!(error.to_string().contains("malformed sidebar state"));
@@ -1589,6 +1631,18 @@ mod tests {
         let malformed_pid = "\x1e%7\x1fnot-a-pid\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n";
         let error = parse_sidebar_snapshot(malformed_pid).unwrap_err();
         assert!(error.to_string().contains("malformed sidebar pane PID"));
+
+        for attached in ["", "-1", "invalid"] {
+            let output = format!(
+                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n"
+            );
+            let error = parse_sidebar_snapshot(&output).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("malformed attached client count")
+            );
+        }
     }
 
     #[test]
