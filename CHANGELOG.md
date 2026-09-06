@@ -21,6 +21,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Resume an agent's previous session when recreating a worktree at the same path
+  with `workmux add --continue`, optionally supplying a follow-up prompt.
+
 ## v0.1.255 (2026-09-05)
 
 - Improve sidebar performance without sacrificing responsiveness:
