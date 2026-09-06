@@ -41,6 +41,7 @@ workmux add <branch-name> [flags]
 | `-s, --session`                | Shorthand for `--mode session`. Cannot be combined with `--mode`.                                                                                                                                                                                                                                                                             |
 | `--dry-run`                    | Print the resolved worktree path, branch, base, multiplexer target, file operations, and post-create hooks without creating or modifying anything.                                                                                                                                                                                            |
 | `--config <path>`              | Use an alternate config file for this invocation. Still merges with global config. Useful for per-command config overrides like `workmux add feat/my-branch --config .workmux.window.yaml`.                                                                                                                                                   |
+| `-c, --continue`               | Resume the agent's most recent conversation at the destination worktree path. Can be combined with `-p` or `-P`. Cannot be combined with `--fork`.                                                                                                                                                                                            |
 | `--fork`                       | Fork the last conversation from the current worktree into the new one. The agent resumes with the forked conversation context. Use `--fork=<session-id>` to fork a specific session (prefix matching supported). Supports Claude Code and Codex.                                                                                              |
 
 ## Skip options
@@ -69,6 +70,25 @@ workmux uses live pane working directories when their closest matches identify
 one session. A tmux server with one session is the final fallback. Remaining
 ambiguity requires `--parent-session <name>`. The working directory selects the
 Git repository and only provides conservative evidence for tmux placement.
+
+## Resume a session at a recreated worktree path
+
+Use `--continue` for follow-up work after a worktree has been merged or removed:
+
+```bash
+workmux add auth-module --name auth-module --continue -b -P followup.md
+```
+
+Use the same absolute worktree path and agent as the previous session. If the
+original handle was explicit, preserve it with `--name`. The agent resumes its
+most recent conversation for that path while Git creates the worktree using the
+normal branch/base rules. Session history must still exist in the agent's storage;
+the agent determines what happens if no matching session exists.
+
+Unlike `--fork`, which copies context from the source worktree, `--continue`
+resumes context belonging to the destination path. Continuation uses the same
+agent-specific flags as `workmux open --continue`. It is not supported when
+invoking `add` from inside a sandbox guest.
 
 ## Examples
 

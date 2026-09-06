@@ -338,6 +338,10 @@ enum Commands {
         #[arg(short = 'l', long, conflicts_with = "agent")]
         layout: Option<String>,
 
+        /// Resume the agent's most recent conversation at the destination worktree path
+        #[arg(short = 'c', long = "continue", conflicts_with = "fork")]
+        continue_session: bool,
+
         /// Fork the last conversation from the current worktree into the new one.
         /// Specify a session ID to fork a specific conversation, or omit for most recent.
         #[arg(long, num_args = 0..=1, default_missing_value = "", require_equals = true)]
@@ -1041,6 +1045,7 @@ pub fn run() -> Result<()> {
             rescue,
             multi,
             layout,
+            continue_session,
             fork,
             wait,
             mode,
@@ -1064,6 +1069,7 @@ pub fn run() -> Result<()> {
                 rescue,
                 multi,
                 layout,
+                continue_session,
                 fork,
                 wait,
                 dry_run,
@@ -1378,6 +1384,42 @@ fn print_fish_dynamic_completion() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_continue_accepts_prompt() {
+        for flag in ["--continue", "-c"] {
+            let cli = Cli::try_parse_from([
+                "workmux",
+                "add",
+                "followup",
+                flag,
+                "-P",
+                "followup.md",
+                "-b",
+            ])
+            .unwrap();
+            let Commands::Add {
+                continue_session,
+                prompt,
+                ..
+            } = cli.command
+            else {
+                panic!("expected add command");
+            };
+            assert!(continue_session);
+            assert_eq!(prompt.prompt_file, Some(PathBuf::from("followup.md")));
+        }
+    }
+
+    #[test]
+    fn add_continue_conflicts_with_fork() {
+        for fork in ["--fork", "--fork=session-id"] {
+            let err = Cli::try_parse_from(["workmux", "add", "followup", "--continue", fork])
+                .err()
+                .expect("continue and fork must conflict");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
 
     #[test]
     fn add_pr_parses_number_and_github_url() {

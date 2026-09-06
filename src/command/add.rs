@@ -224,6 +224,7 @@ pub fn run(
     rescue: RescueArgs,
     multi: MultiArgs,
     layout: Option<String>,
+    continue_session: bool,
     fork: Option<String>,
     wait: bool,
     dry_run: bool,
@@ -237,6 +238,9 @@ pub fn run(
         }
         if layout.is_some() {
             bail!("--layout is not supported from inside a sandbox");
+        }
+        if continue_session {
+            bail!("--continue is not supported from inside a sandbox");
         }
         if fork.is_some() {
             bail!("--fork is not supported from inside a sandbox");
@@ -338,6 +342,9 @@ pub fn run(
     options.focus_window = !setup.background;
     options.open_if_exists = setup.open_if_exists;
     options.mode = mode;
+    if continue_session {
+        options.resume_mode = crate::multiplexer::types::ResumeMode::Continue;
+    }
 
     // If using --auto-name and config has auto_name.background = true, run in background
     if auto_name && options.focus_window {
