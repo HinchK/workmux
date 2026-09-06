@@ -27,6 +27,36 @@ const STDIN_INPUT_VAR: &str = "input";
 /// Maximum stdin size to read (10MB) to prevent OOM from infinite streams
 const STDIN_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Validate plain agent executables on the host. Shell expressions and relative
+/// paths depend on the pane shell and worktree environment.
+fn validate_agent_executable(config: &config::Config) -> Result<()> {
+    if config.sandbox.is_enabled() {
+        return Ok(());
+    }
+    let Some(command) = config.agent.as_deref() else {
+        return Ok(());
+    };
+    if command.is_empty() {
+        bail!("Agent command must not be empty");
+    }
+    if !command
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.+/".contains(c))
+        || (command.contains('/') && !std::path::Path::new(command).is_absolute())
+    {
+        return Ok(());
+    }
+    let found =
+        config::resolve_executable_path(command).is_some_and(|path| which::which(path).is_ok());
+    if !found {
+        bail!(
+            "Agent executable '{}' not found or not executable. Check --agent or your agent configuration.",
+            command
+        );
+    }
+    Ok(())
+}
+
 /// Generate a branch name from prompt text using LLM with spinner feedback.
 ///
 /// This helper consolidates the duplicate branch name generation logic that was
@@ -249,6 +279,13 @@ pub fn run(
         multi.agent.first().map(|s| s.as_str()),
         config_override,
     )?;
+
+    if !setup.no_pane_cmds && !sandbox_override && !dry_run {
+        for agent in &multi.agent {
+            let config = config::Config::load_with_override(Some(agent), config_override)?;
+            validate_agent_executable(&config)?;
+        }
+    }
 
     // Resolve fork source if --fork is set
     let fork_source = if let Some(ref fork_arg) = fork {
@@ -1178,5 +1215,49 @@ fn run_add_via_rpc(
             bail!("Host failed to spawn agent: {}", message)
         }
         other => bail!("Unexpected RPC response: {:?}", other),
+    }
+}
+
+#[cfg(test)]
+mod agent_validation_tests {
+    use super::*;
+
+    fn config(agent: &str) -> config::Config {
+        config::Config {
+            agent: Some(agent.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_missing_agent() {
+        let error =
+            validate_agent_executable(&config("workmux-nonexistent-agent-938472")).unwrap_err();
+        assert!(error.to_string().contains("Agent executable"));
+    }
+
+    #[test]
+    fn checks_absolute_executable_paths() {
+        assert!(validate_agent_executable(&config("/bin/sh")).is_ok());
+        assert!(validate_agent_executable(&config("/nonexistent/workmux-agent")).is_err());
+    }
+
+    #[test]
+    fn preserves_shell_commands_and_worktree_relative_paths() {
+        for command in [
+            "./agent",
+            "agent --flag",
+            "AGENT_MODE=test agent",
+            "$HOME/bin/agent",
+        ] {
+            assert!(validate_agent_executable(&config(command)).is_ok());
+        }
+    }
+
+    #[test]
+    fn skips_sandbox_agents() {
+        let mut config = config("workmux-nonexistent-agent-938472");
+        config.sandbox.enabled = Some(true);
+        assert!(validate_agent_executable(&config).is_ok());
     }
 }
