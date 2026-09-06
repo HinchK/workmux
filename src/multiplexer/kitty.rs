@@ -101,6 +101,16 @@ impl KittyBackend {
         Cmd::new("kitten").arg("@")
     }
 
+    fn paste_text_args(pane_id: &str, content: &str) -> Vec<String> {
+        vec![
+            "send-text".into(),
+            "--match".into(),
+            format!("id:{pane_id}"),
+            "--bracketed-paste=enable".into(),
+            content.into(),
+        ]
+    }
+
     /// Query all windows/tabs/panes as flat list.
     fn list_panes(&self) -> Result<Vec<FlatPane>> {
         let output = self
@@ -612,14 +622,9 @@ impl Multiplexer for KittyBackend {
 
     fn paste_text(&self, pane_id: &str, content: &str) -> Result<()> {
         // Use bracketed paste mode
+        let args = Self::paste_text_args(pane_id, content);
         self.kitten_cmd()
-            .args(&[
-                "send-text",
-                "--match",
-                &format!("id:{}", pane_id),
-                "--bracketed-paste",
-                content,
-            ])
+            .args(&args.iter().map(String::as_str).collect::<Vec<_>>())
             .run()
             .context("Failed to paste content to pane")?;
 
@@ -752,6 +757,22 @@ impl Multiplexer for KittyBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_text_args_set_mode_and_preserve_content() {
+        for content in ["first line\nsecond line", "single-line Codex prompt"] {
+            assert_eq!(
+                KittyBackend::paste_text_args("42", content),
+                [
+                    "send-text",
+                    "--match",
+                    "id:42",
+                    "--bracketed-paste=enable",
+                    content,
+                ]
+            );
+        }
+    }
 
     #[test]
     fn test_kitty_backend_name() {
