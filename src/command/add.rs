@@ -284,13 +284,6 @@ pub fn run(
         config_override,
     )?;
 
-    if !setup.no_pane_cmds && !sandbox_override && !dry_run {
-        for agent in &multi.agent {
-            let config = config::Config::load_with_override(Some(agent), config_override)?;
-            validate_agent_executable(&config)?;
-        }
-    }
-
     // Resolve fork source if --fork is set
     let fork_source = if let Some(ref fork_arg) = fork {
         let agent_name = initial_config.agent.as_deref().unwrap_or("claude");
@@ -481,6 +474,21 @@ pub fn run(
         options.window_session_name = parent_session;
     }
 
+    // Validate multi-worktree arguments
+    if multi.count.is_some() && multi.agent.len() > 1 {
+        return Err(anyhow!(
+            "--count can only be used with zero or one --agent, but {} were provided",
+            multi.agent.len()
+        ));
+    }
+
+    if !setup.no_pane_cmds && !sandbox_override && !dry_run {
+        for agent in &multi.agent {
+            let config = config::Config::load_with_override(Some(agent), config_override)?;
+            validate_agent_executable(&config)?;
+        }
+    }
+
     // Handle rescue flow early if requested
     if rescue.with_changes && !dry_run {
         let (mut rescue_config, rescue_location) = config::Config::load_with_location(
@@ -539,14 +547,6 @@ pub fn run(
     } else {
         None
     };
-
-    // Validate multi-worktree arguments
-    if multi.count.is_some() && multi.agent.len() > 1 {
-        return Err(anyhow!(
-            "--count can only be used with zero or one --agent, but {} were provided",
-            multi.agent.len()
-        ));
-    }
 
     let has_foreach_in_prompt = prompt_doc
         .as_ref()

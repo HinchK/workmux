@@ -729,12 +729,14 @@ class TestBranchTemplate:
         mux_server: MuxEnvironment,
         workmux_exe_path: Path,
         mux_repo_path: Path,
+        fake_agent_installer: FakeAgentInstaller,
     ):
         """Verifies `--branch-template` controls the branch naming scheme."""
         env = mux_server
         base_name = "TICKET-123"
         template = r"{{ agent }}/{{ base_name | lower }}-{{ num }}"
 
+        fake_agent_installer.install("Gemini", "#!/bin/sh\nexit 0\n")
         write_workmux_config(mux_repo_path)
         run_workmux_command(
             env,
