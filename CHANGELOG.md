@@ -23,6 +23,8 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## Unreleased
 
+- Fix `workmux send` failing to deliver multiline messages and single-line Codex
+  prompts on Kitty. ([#268](https://github.com/raine/workmux/issues/268))
 - Resume an agent's previous session when recreating a worktree at the same path
   with `workmux add --continue`, optionally supplying a follow-up prompt.
 
