@@ -21,12 +21,13 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.256 (2026-09-06)
 
-- Fix `workmux send` failing to deliver multiline messages and single-line Codex
-  prompts on Kitty. ([#268](https://github.com/raine/workmux/issues/268))
-- Resume an agent's previous session when recreating a worktree at the same path
-  with `workmux add --continue`, optionally supplying a follow-up prompt.
+- Resume an agent's previous session when recreating a worktree at the same path with `workmux add --continue`, optionally supplying a follow-up prompt.
+- Fix `workmux send` failing to deliver multiline messages and single-line Codex prompts on Kitty. ([#268](https://github.com/raine/workmux/issues/268))
+- Report missing executables selected with `--agent` before creating branches or worktrees for local launches.
+- Select an agent with `-a` or `--agent` in the worktree skill, and preserve attachment paths in delegated prompts.
+- Reuse agents' existing conversations for follow-up work with the coordinator skill, including after worktrees are merged or removed.
 
 ## v0.1.255 (2026-09-05)
 
