@@ -33,8 +33,10 @@ monitor them, send instructions, and trigger merges.
 
 ### Spawn Agents
 
-For each task, write a prompt file then run `workmux add`. You are a dispatcher.
-Do NOT read source files, edit code, or implement tasks yourself.
+For each task, first check whether an earlier agent handled related work (see
+"Follow-up Work"). Reuse that session when available. For an independent task,
+write a prompt file then run `workmux add`. You are a dispatcher. Do NOT read
+source files, edit code, or implement tasks yourself.
 
 **Prompt file rules:**
 
@@ -77,6 +79,8 @@ Flags:
 - `-P <file>`: prompt file (contents sent to agent on launch)
 - `-p <text>`: inline prompt (short tasks only)
 - `--name <handle>`: explicit handle name (otherwise derived from branch)
+- `-c, --continue`: resume the agent's most recent session at the destination
+  worktree path; can be combined with `-p` or `-P`, but not `--fork`
 - `--base <branch>`: base branch to branch from (default: current)
 - `--parent-session <session>`: tmux session that receives the agent window
 
@@ -216,6 +220,20 @@ the current repository.
 
 ## Workflow Patterns
 
+### Follow-up Work
+
+For improvements or corrections to earlier work, reuse the original agent session:
+
+- **Agent running:** `workmux send auth-module -f followup.md`
+- **Worktree exists, window closed:**
+  `workmux open auth-module --continue -P followup.md`
+- **Worktree removed:**
+  `workmux add auth-module --name auth-module --continue -b -P followup.md`
+
+Use the same worktree name. In the follow-up prompt, state whether the earlier
+work is merged. Resume the normal monitor, review, and merge
+loop.
+
 ### Fan-out / Fan-in
 
 Spawn multiple agents, then review and merge each one as soon as it finishes:
@@ -278,4 +296,6 @@ remaining handles. Keep finished handles out of subsequent wait commands.
 8. **Use `--timeout`** to avoid waiting forever. Handle timeout exits
    gracefully.
 9. **Prompt files should use relative paths** (each worktree has its own root).
-10. You are a coordinator, not an implementer. Never edit source files directly.
+10. **Reuse sessions for related follow-ups.** Follow "Follow-up Work" before
+    spawning a fresh agent.
+11. You are a coordinator, not an implementer. Never edit source files directly.
